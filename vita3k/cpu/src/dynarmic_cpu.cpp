@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include "cpu/common.h"
+#include <util/mmx_targeting_fix.h>
 #include <cpu/impl/dynarmic_cpu.h>
 #include <cpu/state.h>
 #include <util/log.h>
@@ -238,7 +239,79 @@ public:
             }
             return std::nullopt;
         }
-        return MemoryRead32(addr);
+
+        std::uint32_t code = MemoryRead32(addr);
+
+        // Metal Max Xeno: v76/v77 semantic validator corrections retained by
+        // the proven v1.57 gameplay fix. The result object stores a 1-based
+        // ordinal at +0x30, while the validator compares a semantic ID from its
+        // list. Replace only that load with the resolved ID. Also suppress the
+        // known zero overwrite of the caller's already-nonzero saved result.
+        if (parent->thread_id == 11
+            && mmx_targeting_fix::validator_semantic_armed.load(std::memory_order_acquire)) {
+            if (addr == 0x810DCCD0U || addr + 2U == 0x810DCCD0U) {
+                constexpr std::uint16_t expected = 0x6B01U; // LDR r1,[r0,#0x30]
+                const std::uint32_t id = mmx_targeting_fix::validator_resolved_id.load(std::memory_order_acquire);
+                const bool high = addr + 2U == 0x810DCCD0U;
+                const std::uint16_t original = high ? static_cast<std::uint16_t>((code >> 16) & 0xFFFFU)
+                                                    : static_cast<std::uint16_t>(code & 0xFFFFU);
+                if (original == expected && id > 0U && id <= 0xFFU) {
+                    const std::uint16_t replacement = static_cast<std::uint16_t>(0x2100U | id); // MOVS r1,#imm8
+                    if (high)
+                        code = (code & 0x0000FFFFU) | (static_cast<std::uint32_t>(replacement) << 16);
+                    else
+                        code = (code & 0xFFFF0000U) | replacement;
+                    if (!mmx_targeting_fix::validator_remap_translated.exchange(true, std::memory_order_acq_rel))
+                        LOG_WARN("[MMX-FIX-VALIDATOR-ID] pc=0x810DCCD0 validator_id=0x{:02X} original=0x{:04X} replacement=0x{:04X}", id, original, replacement);
+                } else if (original != expected) {
+                    LOG_WARN("[MMX-FIX-VALIDATOR-ID-MISMATCH] pc=0x810DCCD0 expected=0x6B01 actual=0x{:04X}", original);
+                }
+            }
+
+            if (addr == 0x810DCDBCU || addr + 2U == 0x810DCDBCU) {
+                constexpr std::uint16_t expected = 0x6021U; // STR r1,[r4]
+                const bool high = addr + 2U == 0x810DCDBCU;
+                const std::uint16_t original = high ? static_cast<std::uint16_t>((code >> 16) & 0xFFFFU)
+                                                    : static_cast<std::uint16_t>(code & 0xFFFFU);
+                if (original == expected) {
+                    if (high)
+                        code = (code & 0x0000FFFFU) | (0xBF00U << 16);
+                    else
+                        code = (code & 0xFFFF0000U) | 0xBF00U;
+                    if (!mmx_targeting_fix::validator_saved_store_suppressed.exchange(true, std::memory_order_acq_rel))
+                        LOG_WARN("[MMX-FIX-VALIDATOR-PRESERVE] pc=0x810DCDBC original=0x6021 replacement=0xBF00");
+                } else {
+                    LOG_WARN("[MMX-FIX-VALIDATOR-PRESERVE-MISMATCH] pc=0x810DCDBC expected=0x6021 actual=0x{:04X}", original);
+                }
+            }
+        }
+
+        // Proven v1.57 clear-LOS fix: only bypass the type/state-6 special
+        // rejection when the current decisive geometry sample is positive.
+        // Negative/zero geometry keeps the original BEQ/action-0x33 path.
+        const bool clear_type6 =
+            mmx_targeting_fix::enabled.load(std::memory_order_acquire)
+            && mmx_targeting_fix::geometry_clear.load(std::memory_order_acquire);
+        if (parent->thread_id == 11 && clear_type6
+            && (addr == 0x810ED458U || addr + 2U == 0x810ED458U)) {
+            constexpr std::uint16_t expected = 0xD005U; // BEQ 0x810ED466
+            const bool high = addr + 2U == 0x810ED458U;
+            const std::uint16_t original = high ? static_cast<std::uint16_t>((code >> 16) & 0xFFFFU)
+                                                : static_cast<std::uint16_t>(code & 0xFFFFU);
+            if (original == expected) {
+                if (high)
+                    code = (code & 0x0000FFFFU) | (0xBF00U << 16);
+                else
+                    code = (code & 0xFFFF0000U) | 0xBF00U;
+                if (!mmx_targeting_fix::type6_branch_translated.exchange(true, std::memory_order_acq_rel))
+                    LOG_WARN("[MMX-V1.57-CONDITIONAL-TYPE6-BYPASS-TRANSLATE] pc=0x810ED458 geometry_raw=0x{:08X} original=0xD005 replacement=0xBF00 action=CLEAR_LOS_FALLTHROUGH_TO_810ECB94",
+                        mmx_targeting_fix::geometry_raw.load(std::memory_order_acquire));
+            } else {
+                LOG_WARN("[MMX-FIX-TYPE6-MISMATCH] pc=0x810ED458 expected=0xD005 actual=0x{:04X}", original);
+            }
+        }
+
+        return code;
     }
 
     static void TraceInstruction(uint64_t self_, uint64_t address, uint64_t is_thumb) {
@@ -251,6 +324,84 @@ public:
             return disassemble(*self.parent, address);
         }();
         LOG_TRACE("{} ({}): {} {}", log_hex(self_), self.parent->thread_id, log_hex(address), disassembly);
+    }
+
+    // Resolve the selected 1-based target ordinal through the game's own
+    // validator list before 0x810DCCB8 is translated/called.
+    static void MmxResolveValidatorId(uint64_t self_, uint64_t address, uint64_t) {
+        ArmDynarmicCallback &self = *reinterpret_cast<ArmDynarmicCallback *>(self_);
+        if (self.parent->thread_id != 11 || static_cast<std::uint32_t>(address) != 0x810ECB30U
+            || !mmx_targeting_fix::validator_semantic_armed.load(std::memory_order_acquire))
+            return;
+
+        auto read32 = [&](std::uint32_t addr, std::uint32_t fallback = 0U) -> std::uint32_t {
+            Ptr<std::uint32_t> p{ addr };
+            if (!p || !p.valid(*self.parent->mem) || addr < self.parent->mem->host_page_size)
+                return fallback;
+            return *p.get(*self.parent->mem);
+        };
+
+        const auto &r = self.cpu->jit->Regs();
+        const std::uint32_t ordinal = r[10];
+        const std::uint32_t global = read32(0x812E7340U, 0);
+        const std::uint32_t begin = (global >= 0x82000000U && global < 0x86000000U) ? read32(global + 0x664U, 0) : 0;
+        const std::uint32_t end = (global >= 0x82000000U && global < 0x86000000U) ? read32(global + 0x668U, 0) : 0;
+        const std::uint32_t count = (end >= begin && begin >= 0x82000000U && end < 0x86000000U) ? ((end - begin) / 4U) : 0;
+        std::uint32_t id = 0;
+        if (ordinal >= 1U && ordinal <= count) {
+            const std::uint32_t entry = read32(begin + (ordinal - 1U) * 4U, 0);
+            if (entry >= 0x82000000U && entry < 0x86000000U)
+                id = read32(entry + 0x518U, 0);
+        }
+        mmx_targeting_fix::validator_selected_ordinal.store(ordinal, std::memory_order_release);
+        mmx_targeting_fix::validator_resolved_id.store(id, std::memory_order_release);
+        LOG_WARN("[MMX-FIX-VALIDATOR-RESOLVE] ordinal={} validator_id=0x{:08X}", ordinal, id);
+    }
+
+    // End the one-shot v76/v77 validator correction after the parent reaches
+    // its natural accept/reject outcome. Controller code restores the natural
+    // validator translation on the next input poll.
+    static void MmxObserveValidatorOutcome(uint64_t self_, uint64_t address, uint64_t) {
+        ArmDynarmicCallback &self = *reinterpret_cast<ArmDynarmicCallback *>(self_);
+        const std::uint32_t pc = static_cast<std::uint32_t>(address);
+        if (self.parent->thread_id != 11 || (pc != 0x810E2AACU && pc != 0x810E2B34U)
+            || !mmx_targeting_fix::validator_semantic_armed.load(std::memory_order_acquire))
+            return;
+        mmx_targeting_fix::validator_semantic_armed.store(false, std::memory_order_release);
+        mmx_targeting_fix::validator_restore_pending.store(true, std::memory_order_release);
+        LOG_WARN("[MMX-FIX-VALIDATOR-OUTCOME] pc=0x{:08X} outcome={}",
+            pc, pc == 0x810E2AACU ? "CONTINUE" : "REJECT");
+    }
+
+    // Capture the decisive geometry input used by the proven v1.57 fix.
+    // Positive finite nonzero s0 means clear LOS; negative/zero keeps native
+    // type-6 rejection. Retranslate only the later 0x810ED414 helper when the
+    // classification changes.
+    static void MmxCaptureConditionalLos(uint64_t self_, uint64_t address, uint64_t) {
+        ArmDynarmicCallback &self = *reinterpret_cast<ArmDynarmicCallback *>(self_);
+        if (self.parent->thread_id != 11 || static_cast<std::uint32_t>(address) != 0x810EDFA0U
+            || !mmx_targeting_fix::enabled.load(std::memory_order_acquire))
+            return;
+
+        const auto &ext = self.cpu->jit->ExtRegs();
+        if (ext.empty())
+            return;
+        const std::uint32_t raw = ext[0];
+        const std::uint32_t magnitude = raw & 0x7FFFFFFFU;
+        const bool finite = (raw & 0x7F800000U) != 0x7F800000U;
+        const bool clear = finite && magnitude != 0U && (raw & 0x80000000U) == 0U;
+        const bool previous = mmx_targeting_fix::geometry_clear.exchange(clear, std::memory_order_acq_rel);
+        mmx_targeting_fix::geometry_raw.store(raw, std::memory_order_release);
+
+        if (previous != clear) {
+            mmx_targeting_fix::type6_branch_translated.store(false, std::memory_order_release);
+            self.cpu->invalidate_jit_cache(0x810ED400U, 0x200U);
+        }
+
+        LOG_WARN("[MMX-V1.57-GEOMETRY-GATE] pc=0x810EDFA0 s0_raw=0x{:08X} sign={} decision={} action={}",
+            raw, (raw & 0x80000000U) ? "NEGATIVE" : "POSITIVE",
+            clear ? "CLEAR_ALLOW_TYPE6_FALLTHROUGH" : "OBSTRUCTED_KEEP_NATIVE_TYPE6",
+            previous == clear ? "KEEP_HELPER_CACHE" : "INVALIDATE_810ED414_HELPER");
     }
 
     inline static std::recursive_timed_mutex loader_lock_mutex;
@@ -370,6 +521,14 @@ public:
     }
 
     void PreCodeTranslationHook(bool is_thumb, Dynarmic::A32::VAddr pc, Dynarmic::A32::IREmitter &ir) override {
+        // Metal Max Xeno targeting fix hooks. Runtime/title arming is handled
+        // in ctrl.cpp; these callbacks remain inert otherwise.
+        if (pc == 0x810ECB30U)
+            ir.CallHostFunction(&MmxResolveValidatorId, ir.Imm64((uint64_t)this), ir.Imm64(pc), ir.Imm64(is_thumb));
+        if (pc == 0x810E2AACU || pc == 0x810E2B34U)
+            ir.CallHostFunction(&MmxObserveValidatorOutcome, ir.Imm64((uint64_t)this), ir.Imm64(pc), ir.Imm64(is_thumb));
+        if (pc == 0x810EDFA0U)
+            ir.CallHostFunction(&MmxCaptureConditionalLos, ir.Imm64((uint64_t)this), ir.Imm64(pc), ir.Imm64(is_thumb));
         if (!is_thumb) {
             if (const MonoLoaderOp op = classify_mono_loader_lock(pc); op != MonoLoaderOp::None) {
                 static std::once_flag announced;
