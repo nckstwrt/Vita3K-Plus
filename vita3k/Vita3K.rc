@@ -17,8 +17,8 @@
 
 #include "resource.h"
 
-IDI_ICON1 ICON "Vita3K.ico"
-FRAME_ICON ICON "Vita3K.ico"
+IDI_ICON1 ICON "Vita3KPlus.ico"
+FRAME_ICON ICON "Vita3KPlus.ico"
 
 #define APSTUDIO_READONLY_SYMBOLS
 /////////////////////////////////////////////////////////////////////////////
@@ -84,12 +84,12 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", "https://github.com/Vita3K/Vita3K"
-            VALUE "FileDescription", "Vita3K PSVita Emulator"
+            VALUE "FileDescription", "Vita3K+ PSVita Emulator"
             VALUE "FileVersion", FILE_VERSION_STR "\0"
             VALUE "InternalName", "Vita3K.exe"
             VALUE "LegalCopyright", "Copyright (C) 2018-2026"
             VALUE "OriginalFilename", "Vita3K.exe"
-            VALUE "ProductName", "Vita3K"
+            VALUE "ProductName", "Vita3K+"
             VALUE "ProductVersion", FILE_VERSION_STR "\0"
         END
     END

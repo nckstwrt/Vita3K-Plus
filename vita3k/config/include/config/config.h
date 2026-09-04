@@ -20,6 +20,14 @@
 #include <input/physical_key.h>
 #include <util/system.h>
 
+#ifdef __ANDROID__
+#define VITA3K_DEFAULT_MEMORY_MAPPING "page-table"
+#elif defined(_WIN32)
+#define VITA3K_DEFAULT_MEMORY_MAPPING "external-host"
+#else
+#define VITA3K_DEFAULT_MEMORY_MAPPING "double-buffer"
+#endif
+
 enum ModulesMode {
     AUTOMATIC,
     AUTO_MANUAL,
@@ -133,7 +141,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "log-active-shaders", false, log_active_shaders)                                         \
     code(bool, "log-uniforms", false, log_uniforms)                                                     \
     code(bool, "log-compat-warn", false, log_compat_warn)                                               \
-    code(bool, "validation-layer", true, validation_layer)                                              \
+    code(bool, "validation-layer", false, validation_layer)                                              \
     code(bool, "pstv-mode", false, pstv_mode)                                                           \
     code(bool, "show-mode", false, show_mode)                                                           \
     code(bool, "demo-mode", false, demo_mode)                                                           \
@@ -145,20 +153,30 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(std::string, "custom-driver-name", "", custom_driver_name)                                     \
     code(bool, "turbo-mode", false, turbo_mode)                                                         \
     code(int, "gpu-idx", 0, gpu_idx)                                                                    \
-    code(bool, "high-accuracy", false, high_accuracy)                                                   \
+    code(bool, "high-accuracy", true, high_accuracy)                                                   \
+    code(std::string, "tu-debug", "", tu_debug)                                                     \
+    code(bool, "disable-raster-order", false, disable_raster_order)                                \
+    code(bool, "disable-programmable-blending", false, disable_programmable_blending)               \
+    code(bool, "force-full-precision", false, force_full_precision)                                \
+    code(int, "hang-dump-seconds", 0, hang_dump_seconds)                                       \
     code(float, "resolution-multiplier", 1.0f, resolution_multiplier)                                   \
-    code(bool, "disable-surface-sync", true, disable_surface_sync)                                      \
+    code(bool, "disable-surface-sync", false, disable_surface_sync)                                      \
+    code(bool, "surface-sync-clamp-rt", true, surface_sync_clamp_rt)                               \
     code(std::string, "screen-filter", "Bilinear", screen_filter)                                       \
     code(bool, "v-sync", true, v_sync)                                                                  \
     code(int, "anisotropic-filtering", 1, anisotropic_filtering)                                        \
     code(bool, "texture-cache", true, texture_cache)                                                    \
-    code(bool, "async-pipeline-compilation", true, async_pipeline_compilation)                          \
+    code(bool, "async-pipeline-compilation", false, async_pipeline_compilation)                          \
+    code(bool, "accurate-thread-scheduling", false, accurate_thread_scheduling)                         \
+    code(bool, "preempt-on-wake", false, preempt_on_wake)                                               \
+    code(int, "preempt-on-wake-us", 1000, preempt_on_wake_us)                                             \
+    code(int, "guest-cores", 1, guest_cores)                                                            \
     code(bool, "show-compile-shaders", true, show_compile_shaders)                                      \
     code(bool, "hashless-texture-cache", false, hashless_texture_cache)                                 \
     code(bool, "import-textures", false, import_textures)                                               \
     code(bool, "export-textures", false, export_textures)                                               \
     code(bool, "export-as-png", true, export_as_png)                                                    \
-    code(std::string, "memory-mapping", "double-buffer", memory_mapping)                                \
+    code(std::string, "memory-mapping", VITA3K_DEFAULT_MEMORY_MAPPING, memory_mapping)                   \
     code(bool, "boot-apps-full-screen", false, boot_apps_full_screen)                                   \
     code(bool, "show-live-area-screen", false, show_live_area_screen)                                   \
     code(std::string, "audio-backend", "SDL", audio_backend)                                            \
@@ -191,8 +209,8 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(std::string, "user-lang", std::string{}, user_lang)                                            \
     code(bool, "show-welcome", true, show_welcome)                                                      \
     code(bool, "warn-missing-firmware", true, warn_missing_firmware)                                    \
-    code(bool, "check-for-updates", true, check_for_updates)                                            \
-    code(int, "check-for-updates-mode", static_cast<int>(UPDATE_STARTUP_PROMPT), check_for_updates_mode)\
+    code(bool, "check-for-updates", false, check_for_updates)                                           \
+    code(int, "check-for-updates-mode", static_cast<int>(UPDATE_STARTUP_OFF), check_for_updates_mode)   \
     code(int, "file-loading-delay", 0, file_loading_delay)                                              \
     code(bool, "shader-cache", true, shader_cache)                                                      \
     code(bool, "spirv-shader", false, spirv_shader)                                                     \
@@ -208,11 +226,11 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(int, "front-camera-type", 2, front_camera_type)                                                \
     code(std::string, "front-camera-id", std::string{}, front_camera_id)                                \
     code(std::string, "front-camera-image", std::string{}, front_camera_image)                          \
-    code(uint32_t, "front-camera-color", 0, front_camera_color)                                         \
+    code(uint32_t, "front-camera-color", 0xFFFFFFFF, front_camera_color)                                         \
     code(int, "back-camera-type", 2, back_camera_type)                                                  \
     code(std::string, "back-camera-id", std::string{}, back_camera_id)                                  \
     code(std::string, "back-camera-image", std::string{}, back_camera_image)                            \
-    code(uint32_t, "back-camera-color", 0, back_camera_color)                                           \
+    code(uint32_t, "back-camera-color", 0xFFFFFFFF, back_camera_color)                                           \
     code(bool, "tracy-primitive-impl", false, tracy_primitive_impl)
 
 // Vector members produced in the config file

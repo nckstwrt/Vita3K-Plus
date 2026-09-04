@@ -102,11 +102,6 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
   {
     super(context/*, attrs*/);
 
-    // Set the on touch listener.
-    // Do not register the overlay as a touch listener
-    // Instead let EmuSurface forward touch events
-    setOnTouchListener(this);
-
     // Force draw
     setWillNotDraw(false);
 
@@ -293,7 +288,7 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
             concerned = true;
 
             if (legacyId == ButtonType.BUTTON_TOUCH_SWITCH)
-              setTouchState(button.getPressed());
+              setTouchState(button.getTouchSwitchState());
             else if (legacyId == ButtonType.BUTTON_TOUCH_HIDE)
               mHideOverlayButtons = !mHideOverlayButtons;
             else
@@ -724,6 +719,12 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
             new InputOverlayDrawableButton(res, defaultStateBitmap, pressedStateBitmap, legacyId,
                     control, role);
 
+    if (legacyId == ButtonType.BUTTON_TOUCH_SWITCH)
+    {
+      final Bitmap bothStateBitmap = resizeBitmap(context, BitmapFactory.decodeResource(res, R.drawable.button_touch_fb), scale);
+      overlayDrawable.setThirdStateBitmap(res, bothStateBitmap);
+    }
+
     OverlayPosition position = layout.positionFor(legacyId);
     if (position == null)
       position = new OverlayPosition(0f, 0f);
@@ -880,6 +881,20 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
     }
   }
 
+  public boolean isPointerOwned(int pointerId)
+  {
+    for (InputOverlayDrawableButton button : overlayButtons)
+      if (button.getTrackId() == pointerId)
+        return true;
+    for (InputOverlayDrawableDpad dpad : overlayDpads)
+      if (dpad.getTrackId() == pointerId)
+        return true;
+    for (InputOverlayDrawableJoystick joystick : overlayJoysticks)
+      if (joystick.getTrackId() == pointerId)
+        return true;
+    return false;
+  }
+
   public boolean isInEditMode()
   {
     return mIsInEditMode;
@@ -953,7 +968,7 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
   public native void detachController();
   public native void setAxis(int axis, short value);
   public native void setButton(int button, boolean value);
-  public native void setTouchState(boolean is_back);
+  public native void setTouchState(int mode); // 0 = front, 1 = back, 2 = front + back mirrored
 
   private LayoutBounds resolveLayoutBounds() {
     return resolveLayoutBounds(getWidth(), getHeight(), getContext());

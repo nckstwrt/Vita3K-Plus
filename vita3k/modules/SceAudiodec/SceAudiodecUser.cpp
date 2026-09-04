@@ -27,6 +27,9 @@ TRACY_MODULE_NAME(SceAudiodecUser);
 
 enum {
     SCE_AUDIODEC_ERROR_API_FAIL = 0x807F0000,
+    SCE_AUDIODEC_ERROR_INVALID_TYPE = 0x807F0002,
+    SCE_AUDIODEC_AT9_ERROR_INVALID_CONFIG = 0x807F2001,
+    SCE_AUDIODEC_ERROR_INVALID_POINTER = 0x807F0004,
     SCE_AUDIODEC_ERROR_NOT_INITIALIZED = 0x807F0005,
     SCE_AUDIODEC_ERROR_INVALID_HANDLE = 0x807F0009,
     SCE_AUDIODEC_ERROR_NOT_HANDLE_IN_USE = 0x807F000A,
@@ -294,10 +297,38 @@ EXPORT(int, sceAudiodecDeleteDecoderResident) {
     return UNIMPLEMENTED();
 }
 
+static uint32_t get_at9_factor(uint32_t config_data) {
+    const uint32_t value = ((config_data >> 8) & 0xF) >> 1;
+    if (value == 0)
+        return 1;
+    if (value == 1 || value == 2)
+        return 2;
+    return 0;
+}
+
 EXPORT(int, sceAudiodecGetContextSize, SceAudiodecCtrl *pCtrl, SceAudiodecCodec codecType) {
     TRACY_FUNC(sceAudiodecGetContextSize, pCtrl, codecType);
-    STUBBED("fake size");
-    return 53;
+    if (!pCtrl)
+        return RET_ERROR(SCE_AUDIODEC_ERROR_INVALID_POINTER);
+
+    switch (codecType) {
+    case SCE_AUDIODEC_TYPE_AT9: {
+        const SceAudiodecInfo *info = pCtrl->info.get(emuenv.mem);
+        if (!info)
+            return RET_ERROR(SCE_AUDIODEC_ERROR_INVALID_POINTER);
+        const uint32_t at9_factor = get_at9_factor(info->at9.config_data);
+        if (at9_factor == 0)
+            return RET_ERROR(SCE_AUDIODEC_AT9_ERROR_INVALID_CONFIG);
+        return 0x400 * at9_factor + 0x400;
+    }
+    case SCE_AUDIODEC_TYPE_AAC:
+        return 0x18000;
+    case SCE_AUDIODEC_TYPE_MP3:
+    case SCE_AUDIODEC_TYPE_CELP:
+        return 0;
+    default:
+        return RET_ERROR(SCE_AUDIODEC_ERROR_INVALID_TYPE);
+    }
 }
 
 EXPORT(int, sceAudiodecGetInternalError) {

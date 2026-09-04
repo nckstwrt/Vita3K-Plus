@@ -28,7 +28,9 @@ public final class InputOverlayDrawableButton
   private int mHeight;
   private BitmapDrawable mDefaultStateBitmap;
   private BitmapDrawable mPressedStateBitmap;
+  private BitmapDrawable mThirdStateBitmap = null;
   private boolean mPressedState = false;
+  private int mTouchSwitchState = 0;  // 0 = front, 1 = back, 2 = front+back
   private int mRole = 0;
 
   /**
@@ -82,6 +84,14 @@ public final class InputOverlayDrawableButton
 
   public boolean getPressed() { return mPressedState; }
 
+  public int getTouchSwitchState() { return mTouchSwitchState; }
+
+  public void setThirdStateBitmap(Resources res, Bitmap bitmap)
+  {
+    mThirdStateBitmap = new BitmapDrawable(res, bitmap);
+    mThirdStateBitmap.setBounds(mDefaultStateBitmap.getBounds());
+  }
+
   public void onConfigureTouch(MotionEvent event)
   {
     switch (event.getAction())
@@ -114,6 +124,15 @@ public final class InputOverlayDrawableButton
 
   private BitmapDrawable getCurrentStateBitmapDrawable()
   {
+    if (mRole == InputOverlay.OVERLAY_MASK_TOUCH_SCREEN_SWITCH && mThirdStateBitmap != null)
+    {
+      switch (mTouchSwitchState)
+      {
+        case 1: return mPressedStateBitmap;
+        case 2: return mThirdStateBitmap;
+        default: return mDefaultStateBitmap;
+      }
+    }
     return mPressedState ? mPressedStateBitmap : mDefaultStateBitmap;
   }
 
@@ -121,12 +140,16 @@ public final class InputOverlayDrawableButton
   {
     mDefaultStateBitmap.setBounds(left, top, right, bottom);
     mPressedStateBitmap.setBounds(left, top, right, bottom);
+    if (mThirdStateBitmap != null)
+      mThirdStateBitmap.setBounds(left, top, right, bottom);
   }
 
   public void setOpacity(int value)
   {
     mDefaultStateBitmap.setAlpha(value);
     mPressedStateBitmap.setAlpha(value);
+    if (mThirdStateBitmap != null)
+      mThirdStateBitmap.setAlpha(value);
   }
 
   public Rect getBounds()
@@ -147,8 +170,10 @@ public final class InputOverlayDrawableButton
   public void setPressedState(boolean isPressed)
   {
     if(mRole == InputOverlay.OVERLAY_MASK_TOUCH_SCREEN_SWITCH){
-      if(isPressed)
-        mPressedState = !mPressedState;
+      if(isPressed){
+        mTouchSwitchState = (mTouchSwitchState + 1) % (mThirdStateBitmap != null ? 3 : 2);
+        mPressedState = mTouchSwitchState == 1;
+      }
     } else {
       mPressedState = isPressed;
     }

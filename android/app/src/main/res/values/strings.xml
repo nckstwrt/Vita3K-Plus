@@ -1,6 +1,6 @@
 <resources>
     <!-- App name -->
-    <string name="app_name">Vita3K</string>
+    <string name="app_name">Vita3K+</string>
 
     <!-- Common actions -->
     <string name="action_ok">OK</string>
@@ -38,7 +38,7 @@
     <string name="app_action_reset_last_played">Reset Last Played</string>
 
     <!-- Apps list screen -->
-    <string name="apps_list_app_title">Vita3K</string>
+    <string name="apps_list_app_title">Vita3K+</string>
     <plurals name="apps_list_n_selected">
         <item quantity="one">%1$d selected</item>
         <item quantity="other">%1$d selected</item>
@@ -173,7 +173,7 @@
     <string name="updates_summary_custom_build_with_date">You are currently running a non-official or PR build.\n\nIf you update, you will switch to the latest official build and will no longer be on this custom or PR build.\n\nLatest official build: %1$s\nPublished: %2$s</string>
 
     <!-- Initial setup -->
-    <string name="initial_setup_welcome_title">Welcome to Vita3K</string>
+    <string name="initial_setup_welcome_title">Welcome to Vita3K+</string>
     <string name="initial_setup_welcome_body">Vita3K is an open-source PlayStation Vita emulator written in C++ for Windows, Linux, macOS, and Android. The emulator is still under active development, so feedback and testing are greatly appreciated.</string>
     <string name="initial_setup_piracy_notice">Vita3K does not condone piracy. You must dump your own games.</string>
     <string name="initial_setup_firmware_title">Install Firmware</string>
@@ -388,6 +388,8 @@
     <string name="settings_gpu_disable_surface_sync_desc">Speed hack, disabling turns off surface syncing between CPU and GPU.\nSurface syncing is needed by a few games.\nGives a big performance boost if disabled (in particular when upscaling is on).</string>
     <string name="settings_gpu_async_pipeline">Asynchronous Pipeline Compilation</string>
     <string name="settings_gpu_async_pipeline_desc">Allow pipelines to be compiled concurrently on multiple concurrent threads.\nThis decreases pipeline compilation stutter at the cost of temporary graphical glitches.</string>
+    <string name="settings_gpu_accurate_scheduling">Accurate Thread Scheduling</string>
+    <string name="settings_gpu_accurate_scheduling_desc">Run guest threads one at a time in priority order, closer to real hardware.\nFixes hangs/deadlocks in some games (e.g. cutscene freezes) at a possible performance cost.</string>
     <string name="settings_gpu_screen_filter">Screen Filter</string>
     <string name="settings_gpu_screen_filter_desc">Select the final image filter to apply.</string>
     <string name="settings_gpu_resolution">Internal Resolution Upscaling</string>
@@ -408,6 +410,13 @@
     <string name="settings_gpu_turbo_mode_desc">Provides a way to force the GPU to run at the maximum possible clocks. Thermal constraints will still be applied.</string>
     <string name="settings_gpu_shader_cache">Enable Shader Cache</string>
     <string name="settings_gpu_shader_cache_desc">Enable shader caching. Reduces stuttering on subsequent runs.</string>
+    <string name="settings_gpu_clear_shader_cache">Clear Shader Cache</string>
+    <string name="settings_gpu_clear_shader_cache_summary">Deletes cached shaders for all games</string>
+    <string name="settings_gpu_clear_shader_cache_action">Clear</string>
+    <string name="settings_gpu_clear_shader_cache_desc">Deletes the compiled shader cache for every game. Shaders are recompiled the next time each game runs, so the first run after clearing will stutter more. Use this if a game renders incorrectly after an emulator update. To clear a single game instead, use Shader Cache in that game\'s menu.</string>
+    <string name="settings_gpu_clear_shader_cache_confirm">Delete cached shaders for all games. They will be recompiled the next time each game runs.</string>
+    <string name="settings_gpu_clear_shader_cache_done">Shader cache cleared.</string>
+    <string name="settings_gpu_clear_shader_cache_empty">There was no shader cache to clear.</string>
     <string name="settings_gpu_spirv_shader">Use SPIR-V Shader (deprecated)</string>
     <string name="settings_gpu_spirv_shader_desc">Pass generated Spir-V shader directly to driver.\nNote that some beneficial extensions will be disabled, and not all GPUs are compatible with this.</string>
     <string name="settings_gpu_memory_mapping">Memory Mapping</string>
@@ -743,4 +752,11 @@
     <string name="trophy_detail_earned_label">Earned</string>
     <string name="trophy_detail_description_label">Details</string>
     <string name="trophy_not_yet_earned">Not yet earned</string>
+
+    <string name="settings_emulator_browse_files">Browse Vita files</string>
+    <string name="settings_emulator_browse_files_value">Open the emulator storage in the system file browser</string>
+    <string name="settings_emulator_browse_files_desc">Opens the Vita3K+ storage folder (games, saves, config, logs) in the system document browser. The same folder also appears as \"Vita3K+\" in the sidebar of the system file picker, and in file managers that support document providers such as Solid Explorer, MiXplorer, Total Commander, etc.</string>
+    <string name="settings_emulator_browse_files_unavailable">No document browser found on this device. Vita3K+ still appears as a storage location in the sidebar of the system file picker, and in file managers that support document providers.</string>
+    <string name="documents_root_summary">Games, saves, config and logs</string>
+    <string name="documents_storage_root_summary">Games and saves (custom storage folder)</string>
 </resources>

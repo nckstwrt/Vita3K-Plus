@@ -15,6 +15,8 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <atomic>
+
 #include <gxm/types.h>
 #include <renderer/commands.h>
 #include <renderer/driver_functions.h>
@@ -27,8 +29,11 @@
 #include <renderer/vulkan/state.h>
 
 #include <gxm/functions.h>
+#include <kernel/state.h>
 #include <renderer/functions.h>
 #include <util/align.h>
+
+#include <chrono>
 #include <util/log.h>
 #include <util/tracy.h>
 
@@ -152,13 +157,110 @@ COMMAND(handle_destroy_render_target) {
     complete_command(renderer, helper, 0);
 }
 
+inline constexpr bool enable_world_stop_for_transitions = true;
+
+struct WorldStopScope {
+    KernelState *kernel = nullptr;
+    MemState *mem_state = nullptr;
+    WorldStopScope(renderer::State &renderer, MemState &mem, SceUID except_thread, Address addr, uint32_t size) {
+        if (!enable_world_stop_for_transitions || !mem.use_page_table || !renderer.kernel)
+            return;
+        kernel = renderer.kernel;
+        mem_state = &mem;
+        const auto start = std::chrono::steady_clock::now();
+        const int not_parked = kernel->stop_world(except_thread, std::chrono::milliseconds(50));
+        const auto took_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        mem.transition_not_parked = not_parked;
+        static uint64_t clean_stops = 0;
+        const bool interesting = not_parked > 0 || took_ms >= 10;
+        if (interesting || ((++clean_stops) & 63) == 1)
+            LOG_INFO("memory transition 0x{:X} size 0x{:X}: world stopped in {} ms, {} thread(s) not parked", addr, size, took_ms, not_parked);
+    }
+    ~WorldStopScope() {
+        if (kernel) {
+            mem_state->transition_not_parked = -1;
+            kernel->resume_world();
+            LOG_DEBUG("memory transition: world resumed");
+        }
+    }
+};
+
+inline constexpr bool DORMANT_MAPPINGS = true;
+inline constexpr uint64_t DORMANT_BUDGET_BYTES = 128ull * 1024 * 1024;
+static std::atomic<uint32_t> g_dormant_count{ 0 };
+
+bool has_dormant_mappings() {
+    return g_dormant_count.load(std::memory_order_acquire) != 0;
+}
+
+static void note_memory_transition(renderer::State &renderer, const char *kind, Address addr, uint32_t size) {
+    renderer.last_mem_transition_epoch_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(), std::memory_order_relaxed);
+    static uint64_t transitions = 0;
+    if (((++transitions) & 1023) == 1)
+        LOG_INFO("[MEMTRANS] transition #{}: {} 0x{:X} size 0x{:X}", transitions, kind, addr, size);
+}
+
+static void teardown_dormant(renderer::State &renderer, MemState &mem, SceUID caller_thread, Address addr, const char *why) {
+    auto &vk = dynamic_cast<vulkan::VKState &>(renderer);
+    static uint64_t teardowns = 0;
+    if (((++teardowns) & 63) == 1)
+        LOG_INFO("[DORMANT] teardown #{} of 0x{:X} ({}); {} still dormant, {} MiB", teardowns, addr, why, vk.dormant_mappings.size(), vk.dormant_bytes / (1024 * 1024));
+    const WorldStopScope world_stop(renderer, mem, caller_thread, addr, 0);
+    vk.teardown_dormant(mem, addr);
+    g_dormant_count.store(static_cast<uint32_t>(vk.dormant_mappings.size()), std::memory_order_release);
+}
+
+static void evict_dormant_to_budget(renderer::State &renderer, MemState &mem, SceUID caller_thread, uint64_t budget, const char *why) {
+    auto &vk = dynamic_cast<vulkan::VKState &>(renderer);
+    while (vk.dormant_bytes > budget && !vk.dormant_mappings.empty()) {
+        const Address victim = vk.oldest_dormant();
+        if (!victim)
+            break;
+        teardown_dormant(renderer, mem, caller_thread, victim, why);
+    }
+}
+
+// memory pressure reported since the last transition: drop everything dormant first
+static void honour_dormant_trim(renderer::State &renderer, MemState &mem, SceUID caller_thread) {
+    auto &vk = dynamic_cast<vulkan::VKState &>(renderer);
+    if (!vk.dormant_trim_requested)
+        return;
+    vk.dormant_trim_requested = false;
+    evict_dormant_to_budget(renderer, mem, caller_thread, 0, "memory trim");
+}
+
 COMMAND(handle_memory_map) {
     TRACY_FUNC_COMMANDS(handle_memory_map);
     const Ptr<void> addr = helper.pop<Ptr<void>>();
     const uint32_t size = helper.pop<uint32_t>();
+    const SceUID caller_thread = static_cast<SceUID>(helper.pop<uint32_t>());
 
-    if (renderer.current_backend == Backend::Vulkan) {
-        dynamic_cast<vulkan::VKState &>(renderer).map_memory(mem, addr, size);
+    note_memory_transition(renderer, "map", addr.address(), size);
+
+    if (DORMANT_MAPPINGS && renderer.current_backend == Backend::Vulkan) {
+        auto &vk = dynamic_cast<vulkan::VKState &>(renderer);
+        honour_dormant_trim(renderer, mem, caller_thread);
+        // identical remap of a dormant range: everything is still in place, just make it live again
+        if (vk.promote_dormant(addr.address(), size)) {
+            g_dormant_count.store(static_cast<uint32_t>(vk.dormant_mappings.size()), std::memory_order_release);
+            static uint64_t promoted = 0;
+            if (((++promoted) & 1023) == 1)
+                LOG_INFO("[DORMANT] identical remap of 0x{:X} size 0x{:X} promoted without copying ({} so far)", addr.address(), size, promoted);
+            complete_command(renderer, helper, 0);
+            return;
+        }
+        // a dormant range this mapping would overlap (different base or size) must really go first, so
+        // its data is back in the arena before the new mapping copies from there
+        for (const Address overlap : vk.dormant_overlapping(addr.address(), addr.address() + size))
+            teardown_dormant(renderer, mem, caller_thread, overlap, "overlapping map");
+    }
+
+    {
+        const WorldStopScope world_stop(renderer, mem, caller_thread, addr.address(), size);
+
+        if (renderer.current_backend == Backend::Vulkan) {
+            dynamic_cast<vulkan::VKState &>(renderer).map_memory(mem, addr, size);
+        }
     }
 
     complete_command(renderer, helper, 0);
@@ -168,11 +270,47 @@ COMMAND(handle_memory_unmap) {
     TRACY_FUNC_COMMANDS(handle_memory_unmap);
 
     const Ptr<void> addr = helper.pop<Ptr<void>>();
+    const SceUID caller_thread = static_cast<SceUID>(helper.pop<uint32_t>());
 
-    if (renderer.current_backend == Backend::Vulkan) {
-        dynamic_cast<vulkan::VKState &>(renderer).unmap_memory(mem, addr);
+    note_memory_transition(renderer, "unmap", addr.address(), 0);
+
+    if (DORMANT_MAPPINGS && renderer.current_backend == Backend::Vulkan) {
+        auto &vk = dynamic_cast<vulkan::VKState &>(renderer);
+        honour_dormant_trim(renderer, mem, caller_thread);
+        if (vk.dormant_mappings.contains(addr.address())) {
+            LOG_WARN_ONCE("unmap of an already-dormant range 0x{:X} ignored", addr.address());
+            complete_command(renderer, helper, 0);
+            return;
+        }
+        // a live mapping goes dormant so no copy, no world-stop, no waitIdle
+        if (vk.make_dormant(addr.address())) {
+            g_dormant_count.store(static_cast<uint32_t>(vk.dormant_mappings.size()), std::memory_order_release);
+            evict_dormant_to_budget(renderer, mem, caller_thread, DORMANT_BUDGET_BYTES, "budget");
+            complete_command(renderer, helper, 0);
+            return;
+        }
+        // not a live mapping so fall through to the ordinary unmap, which reports it
     }
 
+    {
+        const WorldStopScope world_stop(renderer, mem, caller_thread, addr.address(), 0);
+
+        if (renderer.current_backend == Backend::Vulkan) {
+            dynamic_cast<vulkan::VKState &>(renderer).unmap_memory(mem, addr);
+        }
+    }
+
+    complete_command(renderer, helper, 0);
+}
+
+COMMAND(handle_memory_unmap_flush) {
+    TRACY_FUNC_COMMANDS(handle_memory_unmap_flush);
+    const SceUID caller_thread = static_cast<SceUID>(helper.pop<uint32_t>());
+    if (DORMANT_MAPPINGS && renderer.current_backend == Backend::Vulkan) {
+        auto &vk = dynamic_cast<vulkan::VKState &>(renderer);
+        while (!vk.dormant_mappings.empty())
+            teardown_dormant(renderer, mem, caller_thread, vk.dormant_mappings.begin()->first, "guest free");
+    }
     complete_command(renderer, helper, 0);
 }
 
@@ -249,8 +387,14 @@ void create(SceGxmSyncObject *sync, State &state) {
     sync->being_deleted = false;
 }
 
-void destroy(SceGxmSyncObject *sync, State &state) {
-    // nothing to do right now
+void destroy(SceGxmSyncObject *sync, State &state, std::function<void()> dealloc) {
+    if (dealloc && state.current_backend == Backend::Vulkan && state.features.enable_memory_mapping) {
+        auto *vk_state = static_cast<vulkan::VKState *>(&state);
+        vk_state->request_queue.push(vulkan::CallbackRequest{
+            new vulkan::CallbackRequestFunction(std::move(dealloc)) });
+    } else if (dealloc) {
+        dealloc();
+    }
 }
 
 bool init(FrameHost &frame, std::unique_ptr<State> &state, Backend backend, const Config &config, const Root &root_paths) {

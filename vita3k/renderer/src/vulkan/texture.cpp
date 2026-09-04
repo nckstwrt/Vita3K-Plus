@@ -15,6 +15,11 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <chrono>
+#include <cpu/functions.h>
 #include <renderer/vulkan/functions.h>
 
 #include <renderer/vulkan/gxm_to_vulkan.h>
@@ -56,6 +61,31 @@ static bool is_depth_stencil_compatible_format(SceGxmTextureBaseFormat format, b
 
 VKTextureCache::VKTextureCache(VKState &state)
     : state(state) {}
+
+uint64_t VKTextureCache::release_all_cached_textures() {
+    uint64_t freed = 0;
+    for (auto &item : texture_queue.items) {
+        TextureCacheInfo &info = item.content;
+        if (info.texture_size == 0)
+            continue;
+
+        texture_lookup.erase(std::bit_cast<TextureGxmDataRepr>(info.texture));
+        info.texture_size = 0;
+        info.dirty = false;
+        info.use_hash = false;
+        info.last_hash_scene = 0;
+
+        TextureCacheEntry &entry = textures[info.index];
+        if (entry.texture.image) {
+            freed += entry.memory_needed;
+            entry.texture.destroy();
+        }
+        entry.memory_needed = 0;
+    }
+    current_texture = nullptr;
+    gxm_texture = nullptr;
+    return freed;
+}
 
 void VKTextureCache::cleanup() {
     for (auto &entry : textures) {
@@ -112,21 +142,26 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
 
     TextureViewport texture_viewport{};
 
-    if (renderer::texture::convert_base_texture_format_to_base_color_format(base_format, format_target_of_texture)) {
+    // surface-cache views are always 2D, so a cube texture must skip it or the shader samples a cube sampler through a 2D view
+    const bool texture_is_cube = texture.texture_type() == SCE_GXM_TEXTURE_CUBE || texture.texture_type() == SCE_GXM_TEXTURE_CUBE_ARBITRARY;
+
+    bool color_convertible = renderer::texture::convert_base_texture_format_to_base_color_format(base_format, format_target_of_texture);
+    if (color_convertible && !texture_is_cube) {
         // try to retrieve it from the color surface cache
         lookup_result = context.state.surface_cache.retrieve_color_surface_as_texture(texture, format_target_of_texture, &texture_viewport);
     }
 
     bool is_depth_surface = false;
-    if (!lookup_result.has_value() && is_depth_stencil_compatible_format(base_format, is_depth_surface)) {
+    if (!lookup_result.has_value() && !texture_is_cube && is_depth_stencil_compatible_format(base_format, is_depth_surface)) {
         // Try to retrieve depth/stencil cache
         lookup_result = context.state.surface_cache.retrieve_depth_stencil_as_texture(texture, &texture_viewport);
     }
 
     if (lookup_result.has_value()) {
-        // get the sampler now
-        context.state.texture_cache.cache_and_bind_sampler(texture, is_depth_surface);
+        const bool needs_nearest = !context.state.texture_cache.format_supports_linear_filter(lookup_result->format);
+        context.state.texture_cache.cache_and_bind_sampler(texture, needs_nearest);
     } else {
+        context.state.texture_cache.current_scene = context.scene_timestamp;
         context.state.texture_cache.cache_and_bind_texture(texture, mem);
         auto &image = context.state.texture_cache.current_texture->texture;
         lookup_result = TextureLookupResult{
@@ -164,6 +199,11 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
             context.curr_frag_ublock.set_viewport_offset(index, texture_viewport.offset);
         }
     }
+
+    if (!is_vertex) {
+        context.curr_frag_ublock.set_cast_sampler_bit(index, lookup_result->is_typeless_cast, lookup_result->cast_phase_hi);
+        context.curr_frag_ublock.set_raw_cast_bit(index, lookup_result->is_raw_bits);
+    }
 }
 
 void VKTextureCache::prepare_staging_buffer(bool is_configure) {
@@ -184,8 +224,7 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
     // if we are not using the previous buffer, we wait if the buffer was used at least once,
     // less than MAX_FRAMES_RENDERING frames ago and we have not yet waited for its fence
     const bool need_wait = !use_previous_buffer
-        && staging_buffer->frame_timestamp != ~0
-        && staging_buffer->frame_timestamp > context->frame_timestamp - MAX_FRAMES_RENDERING
+        && is_frame_timestamp_in_flight(staging_buffer->frame_timestamp, context->frame_timestamp)
         && staging_buffer->scene_timestamp > last_waited_scene;
     const vk::Fence current_fence = context->next_fence;
 
@@ -378,7 +417,7 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
     uint32_t width = gxm::get_width(gxm_texture);
     uint32_t height = gxm::get_height(gxm_texture);
 
-    const uint16_t mip_count = renderer::texture::get_upload_mip(gxm_texture.true_mip_count(), width, height);
+    uint16_t mip_count = renderer::texture::get_upload_mip(gxm_texture.true_mip_count(), width, height);
 
     vk::Format vk_format = texture::translate_format(base_format);
     if (gxm::is_bcn_format(base_format) && !support_dxt)
@@ -386,6 +425,41 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
         vk_format = bcn_to_rgba8(vk_format);
     if (gxm_texture.gamma_mode)
         vk_format = linear_to_srgb(vk_format);
+
+    if (vk_format != vk::Format::eUndefined && !format_supports_sampled_image(vk_format)) {
+        vk::Format fallback = texture::translate_format(base_format);
+        if (gxm::is_bcn_format(base_format) && !support_dxt)
+            fallback = bcn_to_rgba8(fallback);
+        if (fallback != vk_format && format_supports_sampled_image(fallback)) {
+            LOG_WARN_ONCE("Texture format {} is not sampleable on this GPU - using {} instead (sRGB decode dropped)", vk::to_string(vk_format), vk::to_string(fallback));
+            vk_format = fallback;
+        } else {
+            const auto raw = std::bit_cast<std::array<uint32_t, 4>>(gxm_texture);
+            LOG_ERROR("Texture format {} (base 0x{:X}) is not sampleable on this GPU and has no direct fallback - substituting RGBA8; raw words {:08X} {:08X} {:08X} {:08X}", vk::to_string(vk_format), fmt::underlying(base_format), raw[0], raw[1], raw[2], raw[3]);
+            vk_format = gxm_texture.gamma_mode ? vk::Format::eR8G8B8A8Srgb : vk::Format::eR8G8B8A8Unorm;
+        }
+    }
+
+    // Refuse to hand the gfx driver anything out of range and instead substitute safe values
+    {
+        const uint32_t max_dim = 16384; // conservative floor of maxImageDimension2D across our GPUs
+        const bool format_invalid = (vk_format == vk::Format::eUndefined);
+        const bool dims_invalid = (width == 0) || (height == 0) || (width > max_dim) || (height > max_dim);
+        const uint32_t max_mips_allowed = static_cast<uint32_t>(std::bit_width(std::max(std::max(width, 1u), std::max(height, 1u))));
+        const bool mips_invalid = (mip_count == 0) || (mip_count > max_mips_allowed);
+        if (format_invalid || dims_invalid || mips_invalid) {
+            const auto raw = std::bit_cast<std::array<uint32_t, 4>>(gxm_texture);
+            LOG_ERROR("Refusing degenerate texture image: {}x{} mips {} format {} (base 0x{:X} type 0x{:X} cube {}) raw words {:08X} {:08X} {:08X} {:08X} - substituting a safe placeholder",
+                width, height, mip_count, vk::to_string(vk_format), fmt::underlying(base_format),
+                fmt::underlying(gxm_texture.texture_type()), is_cube, raw[0], raw[1], raw[2], raw[3]);
+            if (format_invalid)
+                vk_format = vk::Format::eR8G8B8A8Unorm;
+            width = std::clamp(width, 1u, max_dim);
+            height = std::clamp(height, 1u, max_dim);
+            const uint32_t max_mips_fixed = static_cast<uint32_t>(std::bit_width(std::max(width, height)));
+            mip_count = static_cast<uint16_t>(std::clamp<uint32_t>(mip_count, 1u, max_mips_fixed));
+        }
+    }
 
     current_texture->mip_count = mip_count;
     current_texture->is_cube = is_cube;
@@ -539,6 +613,11 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
 }
 
 void VKTextureCache::upload_done() {
+    if (!is_texture_transfer_ready) {
+        LOG_ERROR_ONCE("Texture upload produced no data (see preceding texture errors) - skipping layout transition");
+        return;
+    }
+
     // transition the texture back to read only
     vk::ImageSubresourceRange range{
         .aspectMask = vk::ImageAspectFlagBits::eColor,
@@ -552,6 +631,29 @@ void VKTextureCache::upload_done() {
     // this should not be necessary
     cmd_buffer = nullptr;
     is_texture_transfer_ready = false;
+}
+
+bool VKTextureCache::format_supports_sampled_image(vk::Format format) {
+    auto it = sampled_image_support_cache.find(static_cast<VkFormat>(format));
+    if (it != sampled_image_support_cache.end())
+        return it->second;
+    const vk::FormatProperties props = state.physical_device.getFormatProperties(format);
+    constexpr vk::FormatFeatureFlags needed = vk::FormatFeatureFlagBits::eSampledImage | vk::FormatFeatureFlagBits::eTransferDst;
+    const bool supported = (props.optimalTilingFeatures & needed) == needed;
+    sampled_image_support_cache[static_cast<VkFormat>(format)] = supported;
+    return supported;
+}
+
+bool VKTextureCache::format_supports_linear_filter(vk::Format format) {
+    auto it = linear_filter_support_cache.find(static_cast<VkFormat>(format));
+    if (it != linear_filter_support_cache.end())
+        return it->second;
+    const vk::FormatProperties props = state.physical_device.getFormatProperties(format);
+    const bool supported = static_cast<bool>(props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImageFilterLinear);
+    linear_filter_support_cache[static_cast<VkFormat>(format)] = supported;
+    if (!supported)
+        LOG_INFO("format {} lacks linear-filter support: samplers for it will use nearest", vk::to_string(format));
+    return supported;
 }
 
 void VKTextureCache::configure_sampler(size_t index, const SceGxmTexture &texture, bool no_linear) {
@@ -586,7 +688,7 @@ void VKTextureCache::configure_sampler(size_t index, const SceGxmTexture &textur
         .mipLodBias = (static_cast<float>(texture.lod_bias) - 31.f) / 8.f,
         .maxAnisotropy = static_cast<float>(anisotropic_filtering),
         .compareEnable = VK_FALSE,
-        .minLod = static_cast<float>(texture.lod_min0 | (texture.lod_min1 << 2)),
+        .minLod = static_cast<float>(texture.true_lod_min()),
         .maxLod = VK_LOD_CLAMP_NONE,
         .unnormalizedCoordinates = VK_FALSE,
     };

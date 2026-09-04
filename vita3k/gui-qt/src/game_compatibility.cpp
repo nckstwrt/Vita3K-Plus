@@ -32,14 +32,15 @@
 static constexpr const char *k_version_url = "https://api.github.com/repos/Vita3K/compatibility/releases/latest";
 static constexpr const char *k_db_url = "https://github.com/Vita3K/compatibility/releases/download/compat_db/app_compat_db.xml.zip";
 
-GameCompatibility::GameCompatibility(CompatState &state, std::filesystem::path cache_path, QObject *parent)
+GameCompatibility::GameCompatibility(CompatState &state, std::filesystem::path cache_path, bool allow_online_update, QObject *parent)
     : QObject(parent)
     , m_state(state)
     , m_cache_path(std::move(cache_path)) {
     if (compat::load_from_disk(m_state, m_cache_path))
         Q_EMIT db_loaded(static_cast<int>(m_state.app_compat_db.size()));
 
-    request_update();
+    if (allow_online_update)
+        request_update();
 }
 
 void GameCompatibility::request_update() {

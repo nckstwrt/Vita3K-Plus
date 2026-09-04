@@ -10,7 +10,7 @@
     <x>0</x>
     <y>0</y>
     <width>780</width>
-    <height>676</height>
+    <height>912</height>
    </rect>
   </property>
   <property name="minimumSize">
@@ -696,6 +696,13 @@ QGroupBox[flat=&quot;true&quot;]::title {
                     <widget class="QCheckBox" name="async_pipeline_compilation">
                      <property name="text">
                       <string>Asynchronous Pipeline Compilation</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item>
+                    <widget class="QCheckBox" name="accurate_thread_scheduling">
+                     <property name="text">
+                      <string>Accurate Thread Scheduling</string>
                      </property>
                     </widget>
                    </item>

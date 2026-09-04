@@ -246,6 +246,26 @@ public class Emulator extends SDLActivity
     }
 
     @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        try {
+            if (NativeLib.INSTANCE.isInitialized())
+                NativeLib.INSTANCE.onTrimMemory(level);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    @Override
+    public void onLowMemory() {
+        super.onLowMemory();
+        try {
+            if (NativeLib.INSTANCE.isInitialized())
+                NativeLib.INSTANCE.onTrimMemory(80);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    @Override
     protected void onStart() {
         super.onStart();
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START);

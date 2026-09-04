@@ -55,6 +55,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QScreen>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStringList>
@@ -105,7 +106,7 @@ SettingsDialog::SettingsDialog(EmuEnvState &emuenv,
     setWindowFlag(Qt::WindowCloseButtonHint, true);
     setWindowFlag(Qt::WindowContextHelpButtonHint, false);
     setAttribute(Qt::WA_DeleteOnClose);
-    setWindowIcon(QIcon(QStringLiteral(":/Vita3K.png")));
+    setWindowIcon(QIcon(QStringLiteral(":/Vita3KPlus.png")));
     m_ui->tab_widget_settings->tabBar()->hide();
     m_ui->log_font_family->setEditable(true);
     m_ui->log_font_family->setInsertPolicy(QComboBox::NoInsert);
@@ -118,8 +119,14 @@ SettingsDialog::SettingsDialog(EmuEnvState &emuenv,
         font_completer->setFilterMode(Qt::MatchContains);
         font_completer->setCaseSensitivity(Qt::CaseInsensitive);
     }
+    constexpr int no_scroll_height = 912;
     if (!m_gui_settings || !restoreGeometry(m_gui_settings->get_value(gui::sd_geometry).toByteArray()))
-        resize(780, 676);
+        resize(780, no_scroll_height);
+    if (height() < no_scroll_height) {
+        const QScreen *dialog_screen = screen() ? screen() : QApplication::primaryScreen();
+        const int usable = dialog_screen ? dialog_screen->availableGeometry().height() - 64 : no_scroll_height;
+        resize(width(), std::max(minimumHeight(), std::min(no_scroll_height, usable)));
+    }
     connect(&m_theme_manager, &ThemeManager::theme_state_changed, this, &SettingsDialog::refresh_themes);
     connect(&m_theme_manager, &ThemeManager::theme_catalog_changed, this, &SettingsDialog::refresh_themes);
     m_ui->settingsCategory->setSpacing(0);
@@ -323,6 +330,7 @@ void SettingsDialog::load_config() {
     m_ui->vsync->setChecked(m_config.v_sync);
     m_ui->disable_surface_sync->setChecked(m_config.disable_surface_sync);
     m_ui->async_pipeline_compilation->setChecked(m_config.async_pipeline_compilation);
+    m_ui->accurate_thread_scheduling->setChecked(m_config.accurate_thread_scheduling);
 
     {
         m_ui->memory_mapping_box->clear();
@@ -613,6 +621,9 @@ void SettingsDialog::build_desired_config(Config &desired) const {
     current.v_sync = m_ui->vsync->isChecked();
     current.disable_surface_sync = m_ui->disable_surface_sync->isChecked();
     current.async_pipeline_compilation = m_ui->async_pipeline_compilation->isChecked();
+    current.accurate_thread_scheduling = m_ui->accurate_thread_scheduling->isChecked();
+    current.preempt_on_wake = current.accurate_thread_scheduling;
+    current.preempt_on_wake_us = 1000;
     current.memory_mapping = m_ui->memory_mapping_box->currentData().toString().toStdString();
     current.screen_filter = m_ui->screen_filter_box->currentText().toStdString();
     current.resolution_multiplier = static_cast<float>(m_ui->resolution_upscale->value()) / 4.0f;
@@ -1076,6 +1087,7 @@ void SettingsDialog::setup_connections() {
         if (color.isValid()) {
             emuenv.cfg.front_camera_color = color.rgba();
             update_camera_color_preview();
+            mark_dirty();
         }
     });
     connect(m_ui->back_camera_color_btn, &QPushButton::clicked, this, [this] {
@@ -1084,6 +1096,7 @@ void SettingsDialog::setup_connections() {
         if (color.isValid()) {
             emuenv.cfg.back_camera_color = color.rgba();
             update_camera_color_preview();
+            mark_dirty();
         }
     });
 
@@ -1095,6 +1108,7 @@ void SettingsDialog::setup_connections() {
         if (!file.isEmpty()) {
             emuenv.cfg.front_camera_image = file.toUtf8();
             m_ui->front_camera_image_path->setText(file);
+            mark_dirty();
         }
     });
     connect(m_ui->back_camera_image_btn, &QPushButton::clicked, this, [this] {
@@ -1105,6 +1119,7 @@ void SettingsDialog::setup_connections() {
         if (!file.isEmpty()) {
             emuenv.cfg.back_camera_image = file.toUtf8();
             m_ui->back_camera_image_path->setText(file);
+            mark_dirty();
         }
     });
 
@@ -1199,6 +1214,7 @@ void SettingsDialog::setup_connections() {
         { m_ui->vsync, tr("V-Sync"), m_tooltips->vsync },
         { m_ui->disable_surface_sync, tr("Disable Surface Sync"), m_tooltips->disable_surface_sync },
         { m_ui->async_pipeline_compilation, tr("Asynchronous Pipeline Compilation"), m_tooltips->async_pipeline },
+        { m_ui->accurate_thread_scheduling, tr("Accurate Thread Scheduling"), m_tooltips->accurate_thread_scheduling },
         { m_ui->memory_mapping_box, tr("Memory Mapping"), m_tooltips->memory_mapping },
         { m_ui->screen_filter_box, tr("Screen Filter"), m_tooltips->screen_filter },
         { m_ui->gb_gpu_device, tr("Graphics Device"), m_tooltips->gpu_device },

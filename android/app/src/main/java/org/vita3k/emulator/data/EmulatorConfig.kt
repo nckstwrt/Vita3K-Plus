@@ -15,14 +15,15 @@ class EmulatorConfig {
 
     // GPU
     @JvmField var backendRenderer: String = "Vulkan"
-    @JvmField var highAccuracy: Boolean = false
+    @JvmField var highAccuracy: Boolean = true
     @JvmField var resolutionMultiplier: Float = 1.0f
-    @JvmField var disableSurfaceSync: Boolean = true
+    @JvmField var disableSurfaceSync: Boolean = false
     @JvmField var screenFilter: String = "Bilinear"
-    @JvmField var memoryMapping: String = "double-buffer"
+    @JvmField var memoryMapping: String = "page-table"
     @JvmField var vSync: Boolean = true
     @JvmField var anisotropicFiltering: Int = 1
-    @JvmField var asyncPipelineCompilation: Boolean = true
+    @JvmField var asyncPipelineCompilation: Boolean = false
+    @JvmField var accurateThreadScheduling: Boolean = false
     @JvmField var exportTextures: Boolean = false
     @JvmField var importTextures: Boolean = false
     @JvmField var exportAsPng: Boolean = true
@@ -78,7 +79,7 @@ class EmulatorConfig {
     @JvmField var logUniforms: Boolean = false
     @JvmField var colorSurfaceDebug: Boolean = false
     @JvmField var dumpElfs: Boolean = false
-    @JvmField var validationLayer: Boolean = true
+    @JvmField var validationLayer: Boolean = false
     @JvmField var textureCache: Boolean = true
     @JvmField var stretchDisplayArea: Boolean = false
     @JvmField var fullscreenHdResPixelPerfect: Boolean = false
@@ -87,8 +88,8 @@ class EmulatorConfig {
     // Emulator
     @JvmField var showLiveAreaScreen: Boolean = false
     @JvmField var showCompileShaders: Boolean = true
-    @JvmField var checkForUpdates: Boolean = true
-    @JvmField var checkForUpdatesMode: Int = 1
+    @JvmField var checkForUpdates: Boolean = false
+    @JvmField var checkForUpdatesMode: Int = 0
     @JvmField var archiveLog: Boolean = false
     @JvmField var logCompatWarn: Boolean = false
     @JvmField var logLevel: Int = 0
@@ -110,6 +111,7 @@ class EmulatorConfig {
         config.vSync = vSync
         config.anisotropicFiltering = anisotropicFiltering
         config.asyncPipelineCompilation = asyncPipelineCompilation
+        config.accurateThreadScheduling = accurateThreadScheduling
         config.exportTextures = exportTextures
         config.importTextures = importTextures
         config.exportAsPng = exportAsPng
@@ -189,6 +191,7 @@ class EmulatorConfig {
             vSync == other.vSync &&
             anisotropicFiltering == other.anisotropicFiltering &&
             asyncPipelineCompilation == other.asyncPipelineCompilation &&
+            accurateThreadScheduling == other.accurateThreadScheduling &&
             exportTextures == other.exportTextures &&
             importTextures == other.importTextures &&
             exportAsPng == other.exportAsPng &&
@@ -265,6 +268,7 @@ class EmulatorConfig {
         result = 31 * result + vSync.hashCode()
         result = 31 * result + anisotropicFiltering
         result = 31 * result + asyncPipelineCompilation.hashCode()
+        result = 31 * result + accurateThreadScheduling.hashCode()
         result = 31 * result + exportTextures.hashCode()
         result = 31 * result + importTextures.hashCode()
         result = 31 * result + exportAsPng.hashCode()

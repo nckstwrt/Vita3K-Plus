@@ -17,6 +17,8 @@
 
 #include "SceGxm.h"
 
+#include <chrono>
+#include <cpu/functions.h>
 #include <modules/module_parent.h>
 
 #include <span>
@@ -47,6 +49,9 @@
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceGxm);
+
+// Precomputed vertex/fragment state applies to every draw once set on the context, not only sceGxmDrawPrecomputed.
+static constexpr bool use_precomputed_state_on_draw = true;
 
 template <>
 std::string to_debug_str<SceGxmColorFormat>(const MemState &mem, SceGxmColorFormat type) {
@@ -902,6 +907,7 @@ static void display_entry_thread(EmuEnvState &emuenv) {
     }
 
     while (true) {
+        emuenv.gxm.display_worker_state.store(0, std::memory_order_relaxed);
         auto display_callback = display_queue.top();
         if (!display_callback)
             break;
@@ -909,18 +915,36 @@ static void display_entry_thread(EmuEnvState &emuenv) {
         SceGxmSyncObject *old_sync = display_callback->old_sync.get(emuenv.mem);
         SceGxmSyncObject *new_sync = display_callback->new_sync.get(emuenv.mem);
 
-        // sceGxmDisplayQueueAddEntry waits for both buffers to complete
-        if (renderer::wishlist(old_sync, display_callback->old_sync_timestamp) == renderer::SyncWaitResult::Shutdown) {
+        const auto wait_sync = [&](SceGxmSyncObject *sync, uint32_t wanted, const char *which) {
+            uint32_t stalled_seconds = 0;
+            while (true) {
+                const renderer::SyncWaitResult res = renderer::wishlist(sync, wanted, 1'000'000);
+                if (res != renderer::SyncWaitResult::TimedOut)
+                    return res;
+                if (emuenv.display.abort.load())
+                    return renderer::SyncWaitResult::Shutdown;
+                stalled_seconds++;
+                if (stalled_seconds == 5 || (stalled_seconds % 30) == 0)
+                    LOG_ERROR("DISPLAY QUEUE STALLED {}s: waiting on {} sync object 0x{:X} for timestamp {}, current {} (ahead {}); the guest render thread is blocked in sceGxmDisplayQueueAddEntry",
+                        stalled_seconds, which, reinterpret_cast<uintptr_t>(sync), wanted,
+                        sync->timestamp_current.load(), sync->timestamp_ahead.load());
+            }
+        };
+        emuenv.gxm.display_worker_state.store(1, std::memory_order_relaxed);
+        if (wait_sync(old_sync, display_callback->old_sync_timestamp, "old") == renderer::SyncWaitResult::Shutdown) {
             return;
         }
         if (old_sync != new_sync) {
-            if (renderer::wishlist(new_sync, display_callback->new_sync_timestamp) == renderer::SyncWaitResult::Shutdown) {
+            emuenv.gxm.display_worker_state.store(2, std::memory_order_relaxed);
+            if (wait_sync(new_sync, display_callback->new_sync_timestamp, "new") == renderer::SyncWaitResult::Shutdown) {
                 return;
             }
         }
+        emuenv.gxm.display_worker_state.store(3, std::memory_order_relaxed);
 
         // now we can remove the thread from the display queue
         display_queue.pop();
+        emuenv.gxm.display_entries_done.fetch_add(1, std::memory_order_relaxed);
 
         // check if we're shutting down before calling run_guest_function to avoid deadlock
         if (emuenv.display.abort.load()) {
@@ -1555,7 +1579,7 @@ EXPORT(void, sceGxmSetDefaultRegionClipAndViewport, SceGxmContext *context, uint
     }
 }
 
-static void gxmContextStateRestore(renderer::State &state, SceGxmContext *context, const bool sync_viewport_and_clip) {
+static void gxmContextStateRestore(renderer::State &state, SceGxmContext *context, const MemState &mem, const bool sync_viewport_and_clip) {
     if (sync_viewport_and_clip) {
         renderer::set_region_clip(state, context->renderer.get(), SCE_GXM_REGION_CLIP_OUTSIDE,
             context->state.region_clip_min.x, context->state.region_clip_max.x, context->state.region_clip_min.y,
@@ -1593,14 +1617,16 @@ static void gxmContextStateRestore(renderer::State &state, SceGxmContext *contex
     }
 
     if (context->state.vertex_program) {
-        renderer::set_program(state, context->renderer.get(), context->state.vertex_program, false);
+        const auto *program = context->state.vertex_program.get(mem);
+        renderer::set_program(state, context->renderer.get(), context->state.vertex_program, program->renderer_binding, false);
 
         context->is_vert_texture_dirty.set();
     }
 
     // The uniform buffer, vertex stream will be uploaded later, for now only need to resync de textures
     if (context->state.fragment_program) {
-        renderer::set_program(state, context->renderer.get(), context->state.fragment_program, true);
+        const auto *program = context->state.fragment_program.get(mem);
+        renderer::set_program(state, context->renderer.get(), context->state.fragment_program, program->renderer_binding, true);
 
         context->is_frag_texture_dirty.set();
     }
@@ -1664,7 +1690,7 @@ EXPORT(int, sceGxmBeginCommandList, SceGxmContext *deferredContext) {
 
     // Begin the command list by white washing previous command list, and restoring deferred state
     renderer::reset_command_list(deferredContext->renderer->command_list);
-    gxmContextStateRestore(*emuenv.renderer, deferredContext, false);
+    gxmContextStateRestore(*emuenv.renderer, deferredContext, emuenv.mem, false);
 
     deferredContext->state.active = true;
 
@@ -2235,6 +2261,13 @@ EXPORT(int, sceGxmDisplayQueueAddEntry, Ptr<SceGxmSyncObject> oldBuffer, Ptr<Sce
     if (!oldBuffer || !newBuffer)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
+    const auto queue_start = std::chrono::steady_clock::now();
+    struct QueueTimer {
+        std::chrono::steady_clock::time_point start;
+        ~QueueTimer() {
+        }
+    } queue_timer{ queue_start };
+
     const Address address = alloc(emuenv.mem, emuenv.gxm.params.displayQueueCallbackDataSize, __FUNCTION__);
     const Ptr<void> ptr(address);
     memcpy(ptr.get(emuenv.mem), callbackData.get(emuenv.mem), emuenv.gxm.params.displayQueueCallbackDataSize);
@@ -2269,15 +2302,18 @@ EXPORT(int, sceGxmDisplayQueueAddEntry, Ptr<SceGxmSyncObject> oldBuffer, Ptr<Sce
 
     renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::NewFrame, false, frame, &emuenv.display, active_renderer_context);
 
-    if (emuenv.gxm.params.displayQueueMaxPendingCount == 1)
+    if (emuenv.gxm.params.displayQueueMaxPendingCount == 1) {
         // double buffering, not handled by the queue configuration
+        guest_sched_release_for_block();
         emuenv.gxm.display_queue.wait_empty();
+    }
 
     return 0;
 }
 
 EXPORT(int, sceGxmDisplayQueueFinish) {
     TRACY_FUNC(sceGxmDisplayQueueFinish);
+    guest_sched_release_for_block();
     emuenv.gxm.display_queue.wait_empty();
 
     return 0;
@@ -2328,8 +2364,23 @@ static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, c
         return RET_ERROR(SCE_GXM_ERROR_NULL_PROGRAM);
     }
 
-    const SceGxmFragmentProgram &gxm_fragment_program = *context->state.fragment_program.get(emuenv.mem);
-    const SceGxmVertexProgram &gxm_vertex_program = *context->state.vertex_program.get(emuenv.mem);
+    // A precomputed state set on the context overrides program/textures/uniforms for every draw until cleared.
+    SceGxmPrecomputedVertexState *pre_vert = use_precomputed_state_on_draw
+        ? context->state.precomputed_vertex_state.get(emuenv.mem)
+        : nullptr;
+    SceGxmPrecomputedFragmentState *pre_frag = use_precomputed_state_on_draw
+        ? context->state.precomputed_fragment_state.get(emuenv.mem)
+        : nullptr;
+
+    const Ptr<const SceGxmFragmentProgram> frag_program_ptr = (pre_frag && pre_frag->program)
+        ? pre_frag->program
+        : context->state.fragment_program;
+    const Ptr<const SceGxmVertexProgram> vert_program_ptr = (pre_vert && pre_vert->program)
+        ? pre_vert->program
+        : context->state.vertex_program;
+
+    const SceGxmFragmentProgram &gxm_fragment_program = *frag_program_ptr.get(emuenv.mem);
+    const SceGxmVertexProgram &gxm_vertex_program = *vert_program_ptr.get(emuenv.mem);
 
     // Set uniforms
     const SceGxmProgram &vertex_program_gxp = *gxm_vertex_program.program.get(emuenv.mem);
@@ -2337,34 +2388,47 @@ static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, c
 
     const void *indices_ptr = indexData.get(emuenv.mem);
 
-    gxmSetUniformBuffers(*emuenv.renderer, emuenv.gxm, context, vertex_program_gxp, context->state.vertex_uniform_buffers, gxm_vertex_program.renderer_data->uniform_buffer_sizes,
+    std::span<UniformBuffer> vert_buffers = (pre_vert && pre_vert->uniform_buffers)
+        ? std::span(pre_vert->uniform_buffers.get(emuenv.mem), pre_vert->buffer_count)
+        : std::span(context->state.vertex_uniform_buffers);
+    std::span<UniformBuffer> frag_buffers = (pre_frag && pre_frag->uniform_buffers)
+        ? std::span(pre_frag->uniform_buffers.get(emuenv.mem), pre_frag->buffer_count)
+        : std::span(context->state.fragment_uniform_buffers);
+
+    gxmSetUniformBuffers(*emuenv.renderer, emuenv.gxm, context, vertex_program_gxp, vert_buffers, gxm_vertex_program.renderer_data->uniform_buffer_sizes,
         emuenv.mem);
-    gxmSetUniformBuffers(*emuenv.renderer, emuenv.gxm, context, fragment_program_gxp, context->state.fragment_uniform_buffers, gxm_fragment_program.renderer_data->uniform_buffer_sizes,
+    gxmSetUniformBuffers(*emuenv.renderer, emuenv.gxm, context, fragment_program_gxp, frag_buffers, gxm_fragment_program.renderer_data->uniform_buffer_sizes,
         emuenv.mem);
 
-    if (context->last_precomputed) {
+    if (context->last_precomputed || pre_vert || pre_frag) {
         // Need to re-set the data
-
-        renderer::set_program(*emuenv.renderer, context->renderer.get(), context->state.vertex_program, false);
-        renderer::set_program(*emuenv.renderer, context->renderer.get(), context->state.fragment_program, true);
+        renderer::set_program(*emuenv.renderer, context->renderer.get(), vert_program_ptr, gxm_vertex_program.renderer_binding, false);
+        renderer::set_program(*emuenv.renderer, context->renderer.get(), frag_program_ptr, gxm_fragment_program.renderer_binding, true);
 
         context->last_precomputed = false;
     }
 
-    // set textures that are dirty
-    const gxp::TextureInfo vert_textures_sync = gxm_vertex_program.renderer_data->textures_used & context->is_vert_texture_dirty;
+    // Sync every sampled texture, not only rebound ones. Dirty flags track rebinds, not content changes.
+    const gxp::TextureInfo vert_textures_sync = gxm_vertex_program.renderer_data->textures_used;
     context->is_vert_texture_dirty &= ~vert_textures_sync;
-    const gxp::TextureInfo frag_textures_sync = gxm_fragment_program.renderer_data->textures_used & context->is_frag_texture_dirty;
+    const gxp::TextureInfo frag_textures_sync = gxm_fragment_program.renderer_data->textures_used;
     context->is_frag_texture_dirty &= ~frag_textures_sync;
     const auto &textures = context->state.textures;
+    // Textures also come from the precomputed state when one is bound.
+    const SceGxmTexture *frag_textures = (pre_frag && pre_frag->textures)
+        ? pre_frag->textures.get(emuenv.mem)
+        : textures.data();
+    const SceGxmTexture *vert_textures = (pre_vert && pre_vert->textures)
+        ? pre_vert->textures.get(emuenv.mem)
+        : (textures.data() + SCE_GXM_MAX_TEXTURE_UNITS);
     for (uint16_t texture_index = 0; texture_index < SCE_GXM_MAX_TEXTURE_UNITS; texture_index++) {
         if (vert_textures_sync[texture_index]) {
             const uint16_t index_position = SCE_GXM_MAX_TEXTURE_UNITS + texture_index;
-            renderer::set_texture(*emuenv.renderer, context->renderer.get(), index_position, textures[index_position]);
+            renderer::set_texture(*emuenv.renderer, context->renderer.get(), index_position, vert_textures[texture_index]);
         }
 
         if (frag_textures_sync[texture_index])
-            renderer::set_texture(*emuenv.renderer, context->renderer.get(), texture_index, textures[texture_index]);
+            renderer::set_texture(*emuenv.renderer, context->renderer.get(), texture_index, frag_textures[texture_index]);
     }
 
     // Update vertex data. We should stores a copy of the data to pass it to GPU later, since another scene
@@ -2473,8 +2537,8 @@ EXPORT(int, sceGxmDrawPrecomputed, SceGxmContext *context, SceGxmPrecomputedDraw
         return RET_ERROR(SCE_GXM_ERROR_NULL_PROGRAM);
     }
 
-    renderer::set_program(*emuenv.renderer, context->renderer.get(), fragment_program_gptr, true);
-    renderer::set_program(*emuenv.renderer, context->renderer.get(), vertex_program_gptr, false);
+    renderer::set_program(*emuenv.renderer, context->renderer.get(), fragment_program_gptr, fragment_program->renderer_binding, true);
+    renderer::set_program(*emuenv.renderer, context->renderer.get(), vertex_program_gptr, vertex_program->renderer_binding, false);
 
     // Set uniforms
     const SceGxmProgram &vertex_program_gxp = *vertex_program->program.get(emuenv.mem);
@@ -2619,6 +2683,7 @@ EXPORT(int, sceGxmEndScene, SceGxmContext *context, SceGxmNotification *vertexNo
     SceGxmNotification empty_notification = { Ptr<uint32_t>(0), 0 };
 
     // Add command to end the scene
+    guest_sched_release_for_block();
     renderer::sync_surface_data(*emuenv.renderer, context->renderer.get(), vertexNotification ? *vertexNotification : empty_notification, fragmentNotification ? *fragmentNotification : empty_notification);
 
     if (context->state.fragment_sync_object) {
@@ -2668,7 +2733,7 @@ EXPORT(int, sceGxmExecuteCommandList, SceGxmContext *context, SceGxmCommandList 
     }
 
     // Restore back our GXM state
-    gxmContextStateRestore(*emuenv.renderer, context, true);
+    gxmContextStateRestore(*emuenv.renderer, context, emuenv.mem, true);
 
     return 0;
 }
@@ -2681,6 +2746,7 @@ EXPORT(int, sceGxmFinish, SceGxmContext *context) {
         return RET_ERROR(SCE_GXM_ERROR_INVALID_THREAD);
 
     // Wait on this context's rendering finish code.
+    guest_sched_release_for_block();
     renderer::finish(*emuenv.renderer, context->renderer.get());
 
     return 0;
@@ -2917,8 +2983,9 @@ EXPORT(int, sceGxmMapMemory, Ptr<void> base, uint32_t size, uint32_t attribs) {
         gxm.memory_mapped_regions.emplace(aligned_base, MemoryMapInfo{ aligned_base, size, attribs });
 
         // little big planet maps regions of size 0
+        // thread_id lets the renderer's stop-the-world handler exclude this blocked caller from its wait.
         if (emuenv.renderer->features.enable_memory_mapping && size > 0)
-            renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryMap, true, aligned_base, size);
+            renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryMap, true, aligned_base, size, static_cast<uint32_t>(thread_id));
 
         return 0;
     }
@@ -2983,6 +3050,7 @@ EXPORT(int, sceGxmNotificationWait, const SceGxmNotification *notification) {
     std::uint32_t volatile *value = notification->address.get(emuenv.mem);
     const std::uint32_t target_value = notification->value;
 
+    guest_sched_release_for_block();
     std::unique_lock<std::mutex> lock(emuenv.renderer->notification_mutex);
     if (*value != target_value) {
         emuenv.renderer->notification_ready.wait(lock, [&]() { return *value == target_value || emuenv.display.abort.load(); });
@@ -3924,7 +3992,7 @@ EXPORT(void, sceGxmSetFragmentProgram, SceGxmContext *context, Ptr<const SceGxmF
         return;
 
     context->state.fragment_program = fragmentProgram;
-    renderer::set_program(*emuenv.renderer, context->renderer.get(), fragmentProgram, true);
+    renderer::set_program(*emuenv.renderer, context->renderer.get(), fragmentProgram, fragmentProgram.get(emuenv.mem)->renderer_binding, true);
 }
 
 EXPORT(int, sceGxmSetFragmentTexture, SceGxmContext *context, uint32_t textureIndex, const SceGxmTexture *texture) {
@@ -4308,7 +4376,7 @@ EXPORT(void, sceGxmSetVertexProgram, SceGxmContext *context, Ptr<const SceGxmVer
         return;
 
     context->state.vertex_program = vertexProgram;
-    renderer::set_program(*emuenv.renderer, context->renderer.get(), vertexProgram, false);
+    renderer::set_program(*emuenv.renderer, context->renderer.get(), vertexProgram, vertexProgram.get(emuenv.mem)->renderer_binding, false);
 }
 
 EXPORT(int, sceGxmSetVertexStream, SceGxmContext *context, uint32_t streamIndex, Ptr<const void> streamData) {
@@ -4478,7 +4546,38 @@ static void free_callbacked(EmuEnvState &emuenv, SceUID thread_id, SceGxmShaderP
 
 template <typename T>
 static void free_callbacked(EmuEnvState &emuenv, SceUID thread_id, SceGxmShaderPatcher *shaderPatcher, Ptr<T> data) {
-    free_callbacked(emuenv, thread_id, shaderPatcher, data.address());
+    // These opaque objects are placement-constructed in guest callback memory, but contain
+    // host-side vectors/shared_ptrs. Release those resources before returning the allocation.
+    // Snapshot the callback parameters first because data may be the shader patcher itself.
+    const SceGxmShaderPatcherParams params = shaderPatcher->params;
+    data.get(emuenv.mem)->~T();
+    if (!params.hostFreeCallback) {
+        LOG_ERROR("Empty hostFreeCallback");
+    }
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    thread->run_callback(params.hostFreeCallback.address(), { params.userData.address(), data.address() });
+}
+
+static std::shared_ptr<renderer::ProgramBinding> make_fragment_program_binding(const SceGxmFragmentProgram &program, const MemState &mem) {
+    auto binding = std::make_shared<renderer::ProgramBinding>();
+    const SceGxmProgram *gxp = program.program.get(mem);
+    const auto *gxp_bytes = reinterpret_cast<const uint8_t *>(gxp);
+    binding->gxp.assign(gxp_bytes, gxp_bytes + gxp->size);
+    binding->fragment_program = program.renderer_data;
+    binding->is_maskupdate = program.is_maskupdate;
+    return binding;
+}
+
+static std::shared_ptr<renderer::ProgramBinding> make_vertex_program_binding(const SceGxmVertexProgram &program, const MemState &mem) {
+    auto binding = std::make_shared<renderer::ProgramBinding>();
+    const SceGxmProgram *gxp = program.program.get(mem);
+    const auto *gxp_bytes = reinterpret_cast<const uint8_t *>(gxp);
+    binding->gxp.assign(gxp_bytes, gxp_bytes + gxp->size);
+    binding->vertex_program = program.renderer_data;
+    binding->streams = program.streams;
+    binding->attributes = program.attributes;
+    binding->key_hash = program.key_hash;
+    return binding;
 }
 
 EXPORT(int, sceGxmShaderPatcherAddRefFragmentProgram, SceGxmShaderPatcher *shaderPatcher, SceGxmFragmentProgram *fragmentProgram) {
@@ -4552,9 +4651,12 @@ EXPORT(int, sceGxmShaderPatcherCreateFragmentProgram, SceGxmShaderPatcher *shade
     fp->is_maskupdate = false;
     fp->program = programId->program;
 
-    if (!renderer::create(fp->renderer_data, *emuenv.renderer, *programId->program.get(mem), blendInfo, emuenv.renderer->gxp_ptr_map)) {
+    std::unique_ptr<renderer::FragmentProgram> renderer_data;
+    if (!renderer::create(renderer_data, *emuenv.renderer, *programId->program.get(mem), blendInfo, emuenv.renderer->gxp_ptr_map)) {
         return RET_ERROR(SCE_GXM_ERROR_DRIVER);
     }
+    fp->renderer_data = std::move(renderer_data);
+    fp->renderer_binding = make_fragment_program_binding(*fp, mem);
 
     shaderPatcher->fragment_program_cache.emplace(key, *fragmentProgram);
 
@@ -4579,9 +4681,12 @@ EXPORT(int, sceGxmShaderPatcherCreateMaskUpdateFragmentProgram, SceGxmShaderPatc
     fp->program = Ptr<const SceGxmProgram>(alloc_callbacked(emuenv, thread_id, shaderPatcher->params, size_mask_gxp));
     memcpy(const_cast<SceGxmProgram *>(fp->program.get(mem)), mask_gxp, size_mask_gxp);
 
-    if (!renderer::create(fp->renderer_data, *emuenv.renderer, *fp->program.get(mem), nullptr, emuenv.renderer->gxp_ptr_map)) {
+    std::unique_ptr<renderer::FragmentProgram> renderer_data;
+    if (!renderer::create(renderer_data, *emuenv.renderer, *fp->program.get(mem), nullptr, emuenv.renderer->gxp_ptr_map)) {
         return RET_ERROR(SCE_GXM_ERROR_DRIVER);
     }
+    fp->renderer_data = std::move(renderer_data);
+    fp->renderer_binding = make_fragment_program_binding(*fp, mem);
 
     return 0;
 }
@@ -4631,9 +4736,12 @@ EXPORT(int, sceGxmShaderPatcherCreateVertexProgram, SceGxmShaderPatcher *shaderP
         vp->attributes.insert(vp->attributes.end(), &attributes[0], &attributes[attributeCount]);
     }
 
-    if (!renderer::create(vp->renderer_data, *emuenv.renderer, *programId->program.get(mem), emuenv.renderer->gxp_ptr_map, vp->attributes)) {
+    std::unique_ptr<renderer::VertexProgram> renderer_data;
+    if (!renderer::create(renderer_data, *emuenv.renderer, *programId->program.get(mem), emuenv.renderer->gxp_ptr_map, vp->attributes)) {
         return RET_ERROR(SCE_GXM_ERROR_DRIVER);
     }
+    vp->renderer_data = std::move(renderer_data);
+    vp->renderer_binding = make_vertex_program_binding(*vp, mem);
 
     shaderPatcher->vertex_program_cache.emplace(key, *vertexProgram);
 
@@ -4658,6 +4766,13 @@ EXPORT(int, sceGxmShaderPatcherForceUnregisterProgram, SceGxmShaderPatcher *shad
 
     SceGxmRegisteredProgram *rp = programId.get(emuenv.mem);
 
+    // Drain the renderer before tearing the cached wrappers down, exactly as Release{Fragment,Vertex}Program
+    // do. Queued draws hold their own shared ProgramBinding so the record is safe regardless, but this is a
+    // bulk teardown path (Killzone's death/checkpoint reload) and the precomputed-state path still carries
+    // guest pointers, so finish outstanding work before the guest allocation is recycled.
+    guest_sched_release_for_block();
+    renderer::finish(*emuenv.renderer, nullptr);
+
     // look for existing programs and free them
     if (rp->program.get(emuenv.mem)->is_vertex()) {
         for (auto it = shaderPatcher->vertex_program_cache.begin(); it != shaderPatcher->vertex_program_cache.end();) {
@@ -4666,7 +4781,7 @@ EXPORT(int, sceGxmShaderPatcherForceUnregisterProgram, SceGxmShaderPatcher *shad
                 while (vertex_program->compile_threads_on.load(std::memory_order_acquire) > 0)
                     std::this_thread::yield();
 
-                free_callbacked(emuenv, thread_id, shaderPatcher, it->second.address());
+                free_callbacked(emuenv, thread_id, shaderPatcher, it->second);
                 it = shaderPatcher->vertex_program_cache.erase(it);
             } else {
                 ++it;
@@ -4679,7 +4794,7 @@ EXPORT(int, sceGxmShaderPatcherForceUnregisterProgram, SceGxmShaderPatcher *shad
                 while (frag_program->compile_threads_on.load(std::memory_order_acquire) > 0)
                     std::this_thread::yield();
 
-                free_callbacked(emuenv, thread_id, shaderPatcher, it->second.address());
+                free_callbacked(emuenv, thread_id, shaderPatcher, it->second);
                 it = shaderPatcher->fragment_program_cache.erase(it);
             } else {
                 ++it;
@@ -4775,8 +4890,11 @@ EXPORT(int, sceGxmShaderPatcherReleaseFragmentProgram, SceGxmShaderPatcher *shad
     SceGxmFragmentProgram *const fp = fragmentProgram.get(emuenv.mem);
     --fp->reference_count;
     if (fp->reference_count == 0) {
+        guest_sched_release_for_block();
         while (fp->compile_threads_on.load(std::memory_order_acquire) > 0)
             std::this_thread::yield();
+
+        renderer::finish(*emuenv.renderer, nullptr);
 
         for (FragmentProgramCache::const_iterator it = shaderPatcher->fragment_program_cache.begin(); it != shaderPatcher->fragment_program_cache.end(); ++it) {
             if (it->second == fragmentProgram) {
@@ -4798,8 +4916,11 @@ EXPORT(int, sceGxmShaderPatcherReleaseVertexProgram, SceGxmShaderPatcher *shader
     SceGxmVertexProgram *const vp = vertexProgram.get(emuenv.mem);
     --vp->reference_count;
     if (vp->reference_count == 0) {
+        guest_sched_release_for_block();
         while (vp->compile_threads_on.load(std::memory_order_acquire) > 0)
             std::this_thread::yield();
+
+        renderer::finish(*emuenv.renderer, nullptr);
 
         for (VertexProgramCache::const_iterator it = shaderPatcher->vertex_program_cache.begin(); it != shaderPatcher->vertex_program_cache.end(); ++it) {
             if (it->second == vertexProgram) {
@@ -4868,8 +4989,9 @@ EXPORT(int, sceGxmSyncObjectDestroy, Ptr<SceGxmSyncObject> syncObject) {
         std::lock_guard<std::mutex> lock(emuenv.gxm.sync_objects_mutex);
         emuenv.gxm.sync_objects.erase(syncObject.get(emuenv.mem));
     }
-    renderer::destroy(syncObject.get(emuenv.mem), *emuenv.renderer);
-    free(emuenv.mem, syncObject);
+    renderer::destroy(syncObject.get(emuenv.mem), *emuenv.renderer, [&mem = emuenv.mem, syncObject]() {
+        free(mem, syncObject);
+    });
 
     return 0;
 }
@@ -4877,6 +4999,7 @@ EXPORT(int, sceGxmSyncObjectDestroy, Ptr<SceGxmSyncObject> syncObject) {
 EXPORT(int, sceGxmTerminate) {
     TRACY_FUNC(sceGxmTerminate);
     // Make sure everything is done in SDL side before killing Vita thread
+    guest_sched_release_for_block();
     emuenv.gxm.display_queue.wait_empty();
     gxm::destroy_all_contexts(emuenv, false);
     gxm::destroy_all_render_targets(emuenv, false);
@@ -4930,7 +5053,7 @@ EXPORT(uint32_t, sceGxmTextureGetLodMin, const SceGxmTexture *texture) {
         return 0;
     }
 
-    return texture->lod_min0 | (texture->lod_min1 << 2);
+    return texture->true_lod_min();
 }
 
 EXPORT(int, sceGxmTextureGetMagFilter, const SceGxmTexture *texture) {
@@ -5246,8 +5369,8 @@ EXPORT(int, sceGxmTextureSetLodMin, SceGxmTexture *texture, uint32_t lodMin) {
         return RET_ERROR(SCE_GXM_ERROR_UNSUPPORTED);
     }
 
-    texture->lod_min0 = lodMin & 3;
-    texture->lod_min1 = lodMin >> 2;
+    texture->lod_min0 = lodMin >> 2;
+    texture->lod_min1 = lodMin & 3;
 
     return 0;
 }
@@ -5381,8 +5504,15 @@ EXPORT(int, sceGxmTextureSetUAddrModeSafe, SceGxmTexture *texture, SceGxmTexture
     if (!texture)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
-    if (!verify_texture_mode(texture, mode))
+    if (!verify_texture_mode(texture, mode)) {
+        // Cube textures only support CLAMP on hardware, but some titles (COD:Declassified) set REPEAT/MIRROR — coerce.
+        if ((texture->type << 29) == SCE_GXM_TEXTURE_CUBE || (texture->type << 29) == SCE_GXM_TEXTURE_CUBE_ARBITRARY) {
+            LOG_WARN_ONCE("Cube texture U addr mode {} unsupported — coercing to CLAMP", fmt::underlying(mode));
+            texture->uaddr_mode = SCE_GXM_TEXTURE_ADDR_CLAMP;
+            return 0;
+        }
         return RET_ERROR(SCE_GXM_ERROR_UNSUPPORTED);
+    }
 
     texture->uaddr_mode = mode;
     return 0;
@@ -5405,8 +5535,15 @@ EXPORT(int, sceGxmTextureSetVAddrModeSafe, SceGxmTexture *texture, SceGxmTexture
     if (!texture)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
-    if (!verify_texture_mode(texture, mode))
+    if (!verify_texture_mode(texture, mode)) {
+        // See sceGxmTextureSetUAddrModeSafe: coerce unsupported cube addr modes to CLAMP.
+        if ((texture->type << 29) == SCE_GXM_TEXTURE_CUBE || (texture->type << 29) == SCE_GXM_TEXTURE_CUBE_ARBITRARY) {
+            LOG_WARN_ONCE("Cube texture V addr mode {} unsupported — coercing to CLAMP", fmt::underlying(mode));
+            texture->vaddr_mode = SCE_GXM_TEXTURE_ADDR_CLAMP;
+            return 0;
+        }
         return RET_ERROR(SCE_GXM_ERROR_UNSUPPORTED);
+    }
 
     texture->vaddr_mode = mode;
     return 0;
@@ -5638,6 +5775,7 @@ EXPORT(int, sceGxmTransferFill, uint32_t fillColor, SceGxmTransferFormat destFor
 EXPORT(int, sceGxmTransferFinish) {
     TRACY_FUNC(sceGxmTransferFinish);
     // same as sceGxmFinish
+    guest_sched_release_for_block();
     renderer::finish(*emuenv.renderer, nullptr);
 
     return 0;
@@ -5678,8 +5816,9 @@ EXPORT(int, sceGxmUnmapMemory, Ptr<void> base) {
         *addr = *addr;
     }
 
+    // The renderer-side handler stops the world for the transition (see creation.cpp).
     if (emuenv.renderer->features.enable_memory_mapping && ite->second.size > 0)
-        renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryUnmap, true, aligned_base);
+        renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryUnmap, true, aligned_base, static_cast<uint32_t>(thread_id));
 
     emuenv.gxm.memory_mapped_regions.erase(ite);
     return 0;

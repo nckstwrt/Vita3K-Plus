@@ -96,7 +96,7 @@ spv::Id finalize(spv::Builder &b, spv::Id first, spv::Id second, const Swizzle4 
                 }
 
                 if (!b.isScalar(access_base)) {
-                    ops.push_back(b.createOp(spv::OpVectorExtractDynamic, target_type, { access_base, b.makeIntConstant(access_offset) }));
+                    ops.push_back(extract_vector_component(b, target_type, access_base, b.makeIntConstant(access_offset)));
                 } else {
                     ops.push_back(access_base);
                 }
@@ -430,7 +430,7 @@ static spv::Function *make_pack_func(spv::Builder &b, const FeatureState &featur
 
     spv::Id output = b.makeUintConstant(0);
     for (int i = 0; i < comp_count; ++i) {
-        spv::Id comp = b.createBinOp(spv::OpVectorExtractDynamic, comp_type, extracted, b.makeIntConstant(i));
+        spv::Id comp = extract_vector_component(b, comp_type, extracted, b.makeIntConstant(i));
 
         if (is_signed)
             comp = b.createUnaryOp(spv::OpBitcast, type_ui32, comp);
@@ -651,24 +651,47 @@ static spv::Id make_or_get_buffer_ptr(spv::Builder &b, shader::usse::utils::Spir
 
 void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFunctions &utils, const FeatureState &features, Operand dest, int dest_offset, spv::Id addr, uint32_t component_size, uint32_t nb_components, int buffer_idx, bool is_buffer_store) {
     const spv::Id i32 = b.makeIntType(32);
+    const spv::Id u32 = b.makeUintType(32);
     const spv::Id zero = b.makeIntConstant(0);
 
+    spv::Id buffer_address;
     spv::Id buffer_idx_val;
     if (buffer_idx == -1) {
-        // buffer index is in the upper 4 bits of addr
-        buffer_idx_val = b.createBinOp(spv::OpShiftRightLogical, i32, addr, b.makeIntConstant(28));
-        // remove the buffer index bits from the address
-        addr = b.createBinOp(spv::OpBitwiseAnd, i32, addr, b.makeIntConstant((1 << 28) - 1));
+        const spv::Id biased = b.createBinOp(spv::OpIAdd, i32, addr, b.makeIntConstant(1 << 27));
+        buffer_idx_val = b.createBinOp(spv::OpShiftRightLogical, i32, biased, b.makeIntConstant(28));
+
+        if (params.buffer_count > 0) {
+            const spv::Id max_idx = b.makeIntConstant(params.buffer_count - 1);
+            spv::Id too_big = b.createBinOp(spv::OpSGreaterThan, b.makeBoolType(), buffer_idx_val, max_idx);
+            buffer_idx_val = b.createTriOp(spv::OpSelect, i32, too_big, max_idx, buffer_idx_val);
+            spv::Id negative = b.createBinOp(spv::OpSLessThan, b.makeBoolType(), buffer_idx_val, zero);
+            buffer_idx_val = b.createTriOp(spv::OpSelect, i32, negative, zero, buffer_idx_val);
+        }
+
+        // signed offset = addr - (index << 28)  (may be negative)
+        const spv::Id idx_hi = b.createBinOp(spv::OpShiftLeftLogical, i32, buffer_idx_val, b.makeIntConstant(28));
+        addr = b.createBinOp(spv::OpISub, i32, addr, idx_hi);
+
+        // crash safety: treat out-of-range decoded buffer offsets as 0 instead of allowing large invalid GPU addresses that would fault
+        constexpr int safe_offset_max = 0x1000000; // 16 MiB, far larger than any real uniform buffer
+        spv::Id off_hi = b.createBinOp(spv::OpSGreaterThan, b.makeBoolType(), addr, b.makeIntConstant(safe_offset_max));
+        spv::Id off_lo = b.createBinOp(spv::OpSLessThan, b.makeBoolType(), addr, b.makeIntConstant(-safe_offset_max));
+        spv::Id off_bad = b.createBinOp(spv::OpLogicalOr, b.makeBoolType(), off_hi, off_lo);
+        addr = b.createTriOp(spv::OpSelect, i32, off_bad, zero, addr);
     } else {
         buffer_idx_val = b.makeIntConstant(buffer_idx);
     }
 
-    spv::Id buffer_address = utils::create_access_chain(b, spv::StorageClassUniform, params.render_info_id, { b.makeIntConstant(params.buffer_addresses_id), buffer_idx_val });
+    buffer_address = utils::create_access_chain(b, spv::StorageClassUniform, params.render_info_id, { b.makeIntConstant(params.buffer_addresses_id), buffer_idx_val });
     buffer_address = b.createLoad(buffer_address, spv::NoPrecision);
     // add the offset from the base address
-    buffer_address = add_uvec2_uint(b, buffer_address, addr);
+    buffer_address = add_uvec2_int(b, buffer_address, addr);
 
     if (component_size == sizeof(uint32_t)) {
+        spv::Id aligned_low_bits = b.createCompositeExtract(buffer_address, u32, 0);
+        aligned_low_bits = b.createBinOp(spv::OpBitwiseAnd, u32, aligned_low_bits, b.makeUintConstant(~0b11u));
+        buffer_address = b.createCompositeInsert(aligned_low_bits, buffer_address, b.getTypeId(buffer_address), 0);
+
         int buffer_idx_vec4 = 0;
         if (nb_components >= 4) {
             // first copy them 4 by 4 (using the fact that we can do 4-byte aligned reads)
@@ -722,9 +745,9 @@ void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params,
         for (uint32_t component_idx = 0; component_idx < nb_components; component_idx++) {
             spv::Id component_addr = add_uvec2_uint(b, buffer_address, b.makeUintConstant(component_idx * component_size));
             // we must make it 4-byte aligned
-            spv::Id addr_low_bits = b.createCompositeExtract(component_addr, i32, 0);
-            spv::Id alignment = b.createBinOp(spv::OpBitwiseAnd, i32, addr_low_bits, b.makeIntConstant(0b11));
-            addr_low_bits = b.createBinOp(spv::OpBitwiseAnd, i32, addr_low_bits, b.makeIntConstant(~0b11));
+            spv::Id addr_low_bits = b.createCompositeExtract(component_addr, u32, 0);
+            spv::Id alignment = b.createUnaryOp(spv::OpBitcast, i32, b.createBinOp(spv::OpBitwiseAnd, u32, addr_low_bits, b.makeUintConstant(0b11u)));
+            addr_low_bits = b.createBinOp(spv::OpBitwiseAnd, u32, addr_low_bits, b.makeUintConstant(~0b11u));
             component_addr = b.createCompositeInsert(addr_low_bits, component_addr, b.getTypeId(component_addr), 0);
 
             // now we can finally load it
@@ -876,6 +899,29 @@ static spv::Id apply_modifiers(spv::Builder &b, const SpirvUtilFunctions &utils,
 
 spv::Id load(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFunctions &utils, const FeatureState &features, Operand op, const Imm4 dest_mask, int shift_offset) {
     spv::Id type_f32 = b.makeFloatType(32);
+
+    if (op.bank == RegisterBank::GLOBAL) {
+        // g16 in the GLOBAL bank is the hardware face flag (non-zero = front-facing)
+        if (op.num == GLOBAL_REG_FRONT_FACING && params.front_facing_id != 0) {
+            const bool integral = !is_float_data_type(op.type);
+            const spv::Id scalar_type = integral ? b.makeUintType(32) : type_f32;
+            const spv::Id one = integral ? b.makeUintConstant(1) : b.makeFloatConstant(1.0f);
+            const spv::Id zero = integral ? b.makeUintConstant(0) : b.makeFloatConstant(0.0f);
+
+            const spv::Id is_front = b.createLoad(params.front_facing_id, spv::NoPrecision);
+            spv::Id flag = b.createTriOp(spv::OpSelect, scalar_type, is_front, one, zero);
+
+            const auto comp_count = dest_mask_to_comp_count(dest_mask);
+            if (comp_count > 1) {
+                std::vector<spv::Id> comps(comp_count, flag);
+                flag = b.createCompositeConstruct(b.makeVectorType(scalar_type, static_cast<int>(comp_count)), comps);
+            }
+
+            return apply_modifiers(b, utils, op.flags, flag);
+        }
+
+        LOG_WARN_ONCE("Unhandled USSE global register g{} read as zero", op.num);
+    }
 
     if (op.bank == RegisterBank::FPCONSTANT) {
         const bool integral_unsigned = (op.type == DataType::UINT32) || (op.type == DataType::UINT16);
@@ -1265,12 +1311,8 @@ spv::Id unpack(spv::Builder &b, SpirvUtilFunctions &utils, const FeatureState &f
         spv::Id extracted = target;
 
         if (!b.isScalar(target) && !b.isConstant(target)) {
-            std::vector<spv::Id> extract_ops;
-            extract_ops.push_back(target);
-            extract_ops.push_back(b.makeIntConstant(static_cast<int>(i)));
-
             if (target_comp_count > 1) {
-                extracted = b.createOp(spv::OpVectorExtractDynamic, type_f32, extract_ops);
+                extracted = extract_vector_component(b, type_f32, target, b.makeIntConstant(static_cast<int>(i)));
             }
         }
 
@@ -1396,20 +1438,20 @@ void store(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFuncti
                     if (b.isScalar(source) || total_comp_source == 1) {
                         ops.push_back(source);
                     } else {
-                        ops.push_back(b.createOp(spv::OpVectorExtractDynamic, vec_comp_type, { source, b.makeIntConstant(std::min(source_value_taken_count++, (int)total_comp_source - 1)) }));
+                        ops.push_back(extract_vector_component(b, vec_comp_type, source, b.makeIntConstant(std::min(source_value_taken_count++, (int)total_comp_source - 1))));
                     }
                 } else {
                     if (elem == spv::NoResult) {
                         // Replace it
                         const int actual_offset_start_to_store = insert_offset + (i + nearest_swizz_on) / num_comp_in_float;
                         elem = b.createOp(spv::OpAccessChain, comp_type, { bank_base, b.makeIntConstant(actual_offset_start_to_store >> 2) });
-                        elem = b.createOp(spv::OpVectorExtractDynamic, b.makeFloatType(32), { b.createLoad(elem, spv::NoPrecision), b.makeIntConstant(actual_offset_start_to_store % 4) });
+                        elem = extract_vector_component(b, b.makeFloatType(32), b.createLoad(elem, spv::NoPrecision), b.makeIntConstant(actual_offset_start_to_store % 4));
 
                         // Extract to f16
                         elem = unpack_one(b, utils, features, elem, dest.type);
                     }
 
-                    ops.push_back(b.createOp(spv::OpVectorExtractDynamic, vec_comp_type, { elem, b.makeIntConstant(j) }));
+                    ops.push_back(extract_vector_component(b, vec_comp_type, elem, b.makeIntConstant(j)));
                 }
             }
 
@@ -1442,7 +1484,7 @@ void store(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFuncti
     if (total_comp_source == 1) {
         insert_offset += nearest_swizz_on / get_packed_component_count(dest.type);
         elem = b.createOp(spv::OpAccessChain, comp_type, { bank_base, b.makeIntConstant(insert_offset >> 2) });
-        spv::Id inserted = b.createOp(spv::OpVectorInsertDynamic, bank_base_elem_type, { b.createLoad(elem, spv::NoPrecision), source, b.makeIntConstant(insert_offset % 4) });
+        spv::Id inserted = insert_vector_component(b, bank_base_elem_type, b.createLoad(elem, spv::NoPrecision), source, b.makeIntConstant(insert_offset % 4));
 
         b.createStore(inserted, elem);
         return;
@@ -1515,6 +1557,24 @@ spv::Id make_vector_or_scalar_type(spv::Builder &b, spv::Id component, int size)
         return component;
     }
     return b.makeVectorType(component, size);
+}
+
+spv::Id extract_vector_component(spv::Builder &b, spv::Id type, spv::Id vector, spv::Id index) {
+    if (!b.isScalar(vector) && b.isConstantScalar(index)) {
+        const unsigned comp = b.getConstantScalar(index);
+        if (comp < static_cast<unsigned>(b.getNumComponents(vector)))
+            return b.createCompositeExtract(vector, type, comp);
+    }
+    return b.createBinOp(spv::OpVectorExtractDynamic, type, vector, index);
+}
+
+spv::Id insert_vector_component(spv::Builder &b, spv::Id type, spv::Id vector, spv::Id component, spv::Id index) {
+    if (!b.isScalar(vector) && b.isConstantScalar(index)) {
+        const unsigned comp = b.getConstantScalar(index);
+        if (comp < static_cast<unsigned>(b.getNumComponents(vector)))
+            return b.createCompositeInsert(component, vector, type, comp);
+    }
+    return b.createTriOp(spv::OpVectorInsertDynamic, type, vector, component, index);
 }
 
 spv::Id unwrap_type(spv::Builder &b, spv::Id type) {
@@ -1630,6 +1690,27 @@ spv::Id add_uvec2_uint(spv::Builder &b, spv::Id vec, spv::Id to_add) {
     spv::Id carry = b.createCompositeExtract(lower_add, u32, 1);
     spv::Id upper = b.createCompositeExtract(vec, u32, 1);
     upper = b.createBinOp(spv::OpIAdd, u32, upper, carry);
+    lower = b.createCompositeExtract(lower_add, u32, 0);
+    return b.createCompositeConstruct(uvec2, { lower, upper });
+}
+
+spv::Id add_uvec2_int(spv::Builder &b, spv::Id vec, spv::Id to_add_signed) {
+    const spv::Id u32 = b.makeUintType(32);
+    const spv::Id i32 = b.makeIntType(32);
+    const spv::Id uvec2 = b.makeVectorType(u32, 2);
+    const spv::Id add_result_type = b.makeStructResultType(u32, u32);
+
+    spv::Id to_add_i = b.isUintType(b.getTypeId(to_add_signed)) ? b.createUnaryOp(spv::OpBitcast, i32, to_add_signed) : to_add_signed;
+    spv::Id sign = b.createBinOp(spv::OpShiftRightArithmetic, i32, to_add_i, b.makeIntConstant(31));
+    sign = b.createUnaryOp(spv::OpBitcast, u32, sign);
+    spv::Id to_add = b.createUnaryOp(spv::OpBitcast, u32, to_add_i);
+
+    spv::Id lower = b.createCompositeExtract(vec, u32, 0);
+    spv::Id lower_add = b.createBinOp(spv::OpIAddCarry, add_result_type, lower, to_add);
+    spv::Id carry = b.createCompositeExtract(lower_add, u32, 1);
+    spv::Id upper = b.createCompositeExtract(vec, u32, 1);
+    upper = b.createBinOp(spv::OpIAdd, u32, upper, carry);
+    upper = b.createBinOp(spv::OpIAdd, u32, upper, sign); // sign extension of the offset
     lower = b.createCompositeExtract(lower_add, u32, 0);
     return b.createCompositeConstruct(uvec2, { lower, upper });
 }
