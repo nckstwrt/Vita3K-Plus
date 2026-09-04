@@ -34,6 +34,8 @@ https://github.com/nckstwrt/Vita3K-Plus/releases
 - **Gundam Breaker 3** - Almost all fixed. Still issues with main character's graphics.
 - **SteamWorld Dig** - Loads and plays
 - **UPPERS** - Graphics Fixed
+- **Madden 13** - Face textures fixed
+- **Oddworld: New'n'Tasty** - Graphics Fixed
 - Defaults now to External Host for Windows and Native Buffer on Android. **Use these Memory Mapping options for the best compatibility**
 - Lots of memory, timing and sound improvements
 - Thanks to Reyes for all his help testing!
