@@ -9,6 +9,13 @@ def signingKeyAlias = System.getenv("SIGNING_KEY_ALIAS")
 def signingKeyPassword = System.getenv("SIGNING_KEY_PASSWORD")
 def hasCiSigning = signingStorePath && signingStorePassword && signingKeyAlias && signingKeyPassword
 
+// res/values/strings.xml is the single English source of truth. Android treats the
+// unqualified values/ bucket as "no locale match", so with per-app locales the
+// effective list is [selected, system]: picking "en" finds no `en` bucket, falls
+// through to the system locale and resolves Chinese instead. Deriving a real `en`
+// bucket at build time keeps English selectable without duplicating the file in git.
+def generatedEnResDir = layout.buildDirectory.dir("generated/res/localeEn")
+
 android {
 	namespace = "org.vita3k.emulator"
 	compileSdk = 35
@@ -91,6 +98,9 @@ android {
 			java {
 				srcDirs += ['../../external/sdl/android-project/app/src/main/java']
 			}
+			res {
+				srcDirs += generatedEnResDir
+			}
 		}
 	}
 
@@ -109,6 +119,24 @@ android {
 		jniLibs {
 			useLegacyPackaging = true
 		}
+	}
+}
+
+// Derived resource: never edit, never commit. Regenerated from values/strings.xml
+// on every build, so the two can never drift.
+def copyEnStrings = tasks.register('copyEnStrings', Copy) {
+	from('src/main/res/values') {
+		include 'strings.xml'
+	}
+	into generatedEnResDir.map { it.dir('values-en') }
+}
+
+// Several AGP tasks consume the res source dirs (merge*Resources,
+// map*SourceSetPaths, process*NavigationResources, ...). Rather than enumerate
+// AGP internals, make every task that reads the generated dir depend on it.
+tasks.configureEach { task ->
+	if (task.name != 'copyEnStrings' && task.name =~ /(?i)(Resources|SourceSetPaths)$/) {
+		task.dependsOn copyEnStrings
 	}
 }
 
