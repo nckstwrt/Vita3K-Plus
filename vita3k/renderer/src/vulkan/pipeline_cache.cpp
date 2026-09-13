@@ -17,6 +17,7 @@
 
 #include <renderer/vulkan/pipeline_cache.h>
 
+#include <renderer/functions.h>
 #include <renderer/vulkan/gxm_to_vulkan.h>
 #include <renderer/vulkan/state.h>
 #include <renderer/vulkan/types.h>
@@ -27,7 +28,14 @@
 #include <shader/spirv_recompiler.h>
 
 #include <util/fs.h>
+#include <util/hash.h>
 #include <util/log.h>
+
+#include <array>
+#include <bit>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 #include <SDL3/SDL_cpuinfo.h>
 
@@ -41,6 +49,23 @@ namespace renderer::vulkan {
 // Size of the record containing what is needed for the pipeline construction (what is after is dynamic state)
 constexpr size_t record_pipeline_len = offsetof(GxmRecordState, vertex_streams);
 
+static uint64_t hash_pipeline_record(const GxmRecordState &record) {
+    alignas(8) uint8_t block[record_pipeline_len];
+    memcpy(block, &record, record_pipeline_len);
+    const auto zero = [&](const auto &field) {
+        const size_t off = reinterpret_cast<const uint8_t *>(&field) - reinterpret_cast<const uint8_t *>(&record);
+        memset(block + off, 0, sizeof(field));
+    };
+    zero(record.region_clip_mode);
+    zero(record.back_polygon_mode);
+    zero(record.back_depth_func);
+    zero(record.back_depth_write_mode);
+    zero(record.back_side_fragment_program_mode);
+    if (record.two_sided != SCE_GXM_TWO_SIDED_ENABLED)
+        zero(record.back_stencil_state_op);
+    return XXH3_64bits(block, record_pipeline_len);
+}
+
 // structure containing everything needed to compile a pipeline
 struct CompileRequest {
     // iterator to the pipeline location
@@ -49,8 +74,9 @@ struct CompileRequest {
     // this is everything we need to compile the shader on another thread (as the original data will change)
     SceGxmPrimitiveType type;
     vk::RenderPass render_pass;
-    SceGxmVertexProgram *vertex_program_gxm;
-    SceGxmFragmentProgram *fragment_program_gxm;
+    std::shared_ptr<ProgramBinding> vertex_program_binding;
+    std::shared_ptr<ProgramBinding> fragment_program_binding;
+    bool has_color_surface_data;
     shader::Hints hints;
 
     // the content of the record useful for the pipeline creation
@@ -113,25 +139,35 @@ void PipelineCache::init(bool support_rasterized_order_access) {
     {
         // layout for the mask, color attachment as input, being an input attachment or a storage image
         // depending on whether or not we are using shader interlock
-        std::array<vk::DescriptorSetLayoutBinding, 2> layout_binding;
+        std::array<vk::DescriptorSetLayoutBinding, 3> layout_binding;
         const vk::DescriptorType intput_image_descriptor = state.features.support_shader_interlock
             ? vk::DescriptorType::eStorageImage
             : vk::DescriptorType::eInputAttachment;
-        layout_binding[0] = vk::DescriptorSetLayoutBinding{
+        uint32_t binding_count = 0;
+        layout_binding[binding_count++] = vk::DescriptorSetLayoutBinding{
             .binding = 0,
             .descriptorType = intput_image_descriptor,
             .descriptorCount = 1,
             .stageFlags = vk::ShaderStageFlagBits::eFragment
         };
-        layout_binding[1] = vk::DescriptorSetLayoutBinding{
-            .binding = 1,
-            .descriptorType = vk::DescriptorType::eStorageImage,
-            .descriptorCount = 1,
-            .stageFlags = vk::ShaderStageFlagBits::eFragment
-        };
+        if (state.features.use_mask_bit)
+            layout_binding[binding_count++] = vk::DescriptorSetLayoutBinding{
+                .binding = 1,
+                .descriptorType = vk::DescriptorType::eStorageImage,
+                .descriptorCount = 1,
+                .stageFlags = vk::ShaderStageFlagBits::eFragment
+            };
+        if (state.features.preserve_f16_nan_as_u16)
+            // raw u16x4 alias of the color attachment (set 1, binding 2 in the shaders)
+            layout_binding[binding_count++] = vk::DescriptorSetLayoutBinding{
+                .binding = 2,
+                .descriptorType = vk::DescriptorType::eStorageImage,
+                .descriptorCount = 1,
+                .stageFlags = vk::ShaderStageFlagBits::eFragment
+            };
 
         vk::DescriptorSetLayoutCreateInfo descriptor_info{
-            .bindingCount = state.features.use_mask_bit ? 2U : 1U,
+            .bindingCount = binding_count,
             .pBindings = layout_binding.data()
         };
         attachments_layout = state.device.createDescriptorSetLayout(descriptor_info);
@@ -391,11 +427,12 @@ void PipelineCache::cleanup() {
 
     for (int i = 0; i < 2; i++)
         for (int j = 0; j < 2; j++)
-            for (int k = 0; k < 2; k++) {
-                for (auto &[fmt, pass] : render_passes[i][j][k])
-                    state.device.destroy(pass);
-                render_passes[i][j][k].clear();
-            }
+            for (int k = 0; k < 2; k++)
+                for (int l = 0; l < 2; l++) {
+                    for (auto &[fmt, pass] : render_passes[i][j][k][l])
+                        state.device.destroy(pass);
+                    render_passes[i][j][k][l].clear();
+                }
 
     for (auto &[fmt, pass] : shader_interlock_pass)
         state.device.destroy(pass);
@@ -536,8 +573,14 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
     return shader_stage_info;
 }
 
-vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force_load, bool force_store, bool is_color_transient, bool no_color) {
-    auto &render_passes_map = no_color ? shader_interlock_pass : render_passes[is_color_transient][force_load][force_store];
+vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool depth_load, bool stencil_load, bool force_store, bool is_color_transient, bool no_color, bool has_raw_attachment) {
+    const bool with_raw_attachment = has_raw_attachment && !no_color && !is_color_transient && state.features.preserve_f16_nan_as_u16 && format == vk::Format::eR16G16B16A16Sfloat;
+
+    auto &render_passes_map = no_color
+        ? shader_interlock_pass
+        : (with_raw_attachment
+                  ? render_passes_with_raw[depth_load][stencil_load][force_store]
+                  : render_passes[is_color_transient][depth_load][stencil_load][force_store]);
 
     auto it = render_passes_map.find(format);
 
@@ -546,12 +589,12 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
 
     // create a new render pass for this format
 
-    vk::AttachmentReference color_ref{
-        .attachment = 0,
-        .layout = vk::ImageLayout::eGeneral
+    vk::AttachmentReference color_refs[2] = {
+        { .attachment = 0, .layout = vk::ImageLayout::eGeneral },
+        { .attachment = 1, .layout = vk::ImageLayout::eGeneral }
     };
     vk::AttachmentReference ds_ref{
-        .attachment = no_color ? 0U : 1U,
+        .attachment = no_color ? 0U : (with_raw_attachment ? 2U : 1U),
         .layout = vk::ImageLayout::eDepthStencilAttachmentOptimal
     };
     vk::SubpassDescription subpass{
@@ -563,8 +606,10 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
         if (support_coherent_framebuffer_fetch)
             subpass.flags = vk::SubpassDescriptionFlagBits::eRasterizationOrderAttachmentColorAccessEXT;
 
-        subpass.setColorAttachments(color_ref);
-        subpass.setInputAttachments(color_ref);
+        subpass.colorAttachmentCount = with_raw_attachment ? 2 : 1;
+        subpass.pColorAttachments = color_refs;
+        subpass.inputAttachmentCount = 1;
+        subpass.pInputAttachments = color_refs;
     }
 
     vk::AttachmentDescription color_attachment{
@@ -576,16 +621,25 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
         .finalLayout = vk::ImageLayout::eGeneral
     };
 
-    vk::AttachmentLoadOp load_op = force_load ? vk::AttachmentLoadOp::eLoad : vk::AttachmentLoadOp::eClear;
+    vk::AttachmentDescription raw_attachment{
+        .format = vk::Format::eR16G16B16A16Uint,
+        .samples = vk::SampleCountFlagBits::e1,
+        .loadOp = vk::AttachmentLoadOp::eLoad,
+        .storeOp = vk::AttachmentStoreOp::eStore,
+        .initialLayout = vk::ImageLayout::eGeneral,
+        .finalLayout = vk::ImageLayout::eGeneral
+    };
+
     vk::AttachmentStoreOp store_op = force_store ? vk::AttachmentStoreOp::eStore : vk::AttachmentStoreOp::eDontCare;
     vk::AttachmentDescription ds_attachment{
         .format = state.deep_stencil_use,
         .samples = vk::SampleCountFlagBits::e1,
-        .loadOp = load_op,
+        .loadOp = depth_load ? vk::AttachmentLoadOp::eLoad : vk::AttachmentLoadOp::eClear,
         .storeOp = store_op,
-        .stencilLoadOp = load_op,
+        .stencilLoadOp = stencil_load ? vk::AttachmentLoadOp::eLoad : vk::AttachmentLoadOp::eClear,
         .stencilStoreOp = store_op,
-        .initialLayout = force_load ? vk::ImageLayout::eDepthStencilReadOnlyOptimal : vk::ImageLayout::eUndefined,
+        // eUndefined would allow discarding a loaded aspect, so use it only when neither aspect is loaded
+        .initialLayout = (depth_load || stencil_load) ? vk::ImageLayout::eDepthStencilReadOnlyOptimal : vk::ImageLayout::eUndefined,
         .finalLayout = vk::ImageLayout::eDepthStencilReadOnlyOptimal
     };
 
@@ -599,9 +653,10 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
         .srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eLateFragmentTests,
         .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests,
         .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eDepthStencilAttachmentWrite,
-        .dstAccessMask = vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eDepthStencilAttachmentRead
+        .dstAccessMask = vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eDepthStencilAttachmentRead | vk::AccessFlagBits::eDepthStencilAttachmentWrite
     };
 
+    // BUG: This is dead code (as immediately overwritten below)
     if (state.features.support_shader_interlock && no_color) {
         // we must wait for the previous shaders to be done
         dependencies[1].dstStageMask = vk::PipelineStageFlagBits::eFragmentShader;
@@ -647,13 +702,14 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
     };
 
     vk::RenderPassCreateInfo pass_info{};
-    vk::AttachmentDescription attachments[] = { color_attachment, ds_attachment };
+    vk::AttachmentDescription attachments[] = { color_attachment, with_raw_attachment ? raw_attachment : ds_attachment, ds_attachment };
     pass_info.setAttachments(attachments);
+    pass_info.attachmentCount = with_raw_attachment ? 3 : 2;
     pass_info.setSubpasses(subpass);
     pass_info.setDependencies(dependencies);
     if (no_color) {
         // only add the ds attachment
-        pass_info.pAttachments = &attachments[1];
+        pass_info.pAttachments = &attachments[2];
         pass_info.attachmentCount = 1;
         // no need for the self-dependency
         pass_info.setDependencyCount(2);
@@ -661,10 +717,222 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
 
     render_passes_map[format] = state.device.createRenderPass(pass_info);
 
+    {
+        // Remember exactly how this render pass was built. A pipeline is only ever rejected
+        // *relative to* its subpass, so a failure report is close to useless without this.
+        std::string desc = fmt::format(
+            "format={} attachments={} no_color={} raw={} transient={} depth_load={} stencil_load={} force_store={}"
+            " subpass_flags=0x{:X} color_att={} input_att={} ds_att={}",
+            vk::to_string(format), pass_info.attachmentCount, no_color, with_raw_attachment, is_color_transient,
+            depth_load, stencil_load, force_store, static_cast<uint32_t>(static_cast<VkSubpassDescriptionFlags>(subpass.flags)),
+            subpass.colorAttachmentCount, subpass.inputAttachmentCount, ds_ref.attachment);
+        std::lock_guard<std::mutex> guard(diagnostics_mutex);
+        render_pass_descriptions[std::bit_cast<uint64_t>(static_cast<VkRenderPass>(render_passes_map[format]))] = std::move(desc);
+    }
+
     return render_passes_map[format];
 }
 
-vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(const SceGxmVertexProgram &vertex_program, MemState &mem) {
+// --- SPIR-V introspection ---------------------------------------------------------------------
+// Just enough of a walker to answer the questions a rejected pipeline raises: what capabilities
+// does the module need, and what does its interface look like? A driver that refuses a module
+// nearly always does so because of one of those two things.
+static const char *spirv_capability_name(uint32_t cap) {
+    switch (cap) {
+    case 0: return "Matrix";
+    case 1: return "Shader";
+    case 9: return "Float16";
+    case 10: return "Float64";
+    case 11: return "Int64";
+    case 22: return "Int16";
+    case 25: return "ImageGatherExtended";
+    case 32: return "ClipDistance";
+    case 33: return "CullDistance";
+    case 34: return "ImageCubeArray";
+    case 35: return "SampleRateShading";
+    case 39: return "Int8";
+    case 40: return "InputAttachment";
+    case 42: return "MinLod";
+    case 43: return "Sampled1D";
+    case 44: return "Image1D";
+    case 45: return "SampledCubeArray";
+    case 46: return "SampledBuffer";
+    case 47: return "ImageBuffer";
+    case 49: return "StorageImageExtendedFormats";
+    case 50: return "ImageQuery";
+    case 51: return "DerivativeControl";
+    case 55: return "StorageImageReadWithoutFormat";
+    case 56: return "StorageImageWriteWithoutFormat";
+    case 61: return "GroupNonUniform";
+    case 4427: return "DrawParameters";
+    case 4433: return "StorageBuffer16BitAccess";
+    case 4434: return "UniformAndStorageBuffer16BitAccess";
+    case 4436: return "StorageInputOutput16";
+    case 4448: return "StorageBuffer8BitAccess";
+    case 4449: return "UniformAndStorageBuffer8BitAccess";
+    case 5301: return "ShaderNonUniform";
+    case 5302: return "RuntimeDescriptorArray";
+    case 5345: return "VulkanMemoryModel";
+    case 5347: return "PhysicalStorageBufferAddresses";
+    case 5363: return "FragmentShaderSampleInterlockEXT";
+    case 5372: return "FragmentShaderShadingRateInterlockEXT";
+    case 5378: return "FragmentShaderPixelInterlockEXT";
+    case 5379: return "DemoteToHelperInvocation";
+    default: return nullptr;
+    }
+}
+
+static std::string spirv_literal_string(const uint32_t *words, size_t max_words) {
+    std::string out;
+    for (size_t i = 0; i < max_words; i++) {
+        for (int b = 0; b < 4; b++) {
+            const char c = static_cast<char>((words[i] >> (8 * b)) & 0xFF);
+            if (c == '\0')
+                return out;
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+static std::string describe_spirv_module(const uint32_t *code, size_t word_count) {
+    if (word_count < 5 || code[0] != 0x07230203)
+        return "<not a valid SPIR-V module>";
+
+    std::vector<std::string> capabilities;
+    std::vector<std::string> extensions;
+    std::string entry_point;
+    uint32_t interface_count = 0;
+    std::map<uint32_t, uint32_t> var_storage_class; // variable id -> storage class
+    std::map<uint32_t, uint32_t> var_location; // variable/target id -> Location decoration
+    std::map<uint32_t, std::pair<uint32_t, uint32_t>> var_set_binding; // id -> (set, binding)
+    std::map<uint32_t, uint32_t> var_builtin;
+    std::map<uint32_t, std::string> var_name;
+    std::vector<uint32_t> spec_const_ids;
+
+    size_t i = 5;
+    while (i < word_count) {
+        const uint32_t instr = code[i];
+        const uint16_t op = instr & 0xFFFF;
+        const uint16_t len = instr >> 16;
+        if (len == 0 || i + len > word_count)
+            break;
+        const uint32_t *w = &code[i];
+
+        switch (op) {
+        case 17: // OpCapability
+            if (len >= 2) {
+                const char *name = spirv_capability_name(w[1]);
+                capabilities.push_back(name ? name : fmt::format("Cap{}", w[1]));
+            }
+            break;
+        case 10: // OpExtension
+            if (len >= 2)
+                extensions.push_back(spirv_literal_string(&w[1], len - 1));
+            break;
+        case 15: // OpEntryPoint: model, id, name..., interface ids
+            if (len >= 4) {
+                const std::string name = spirv_literal_string(&w[3], len - 3);
+                const size_t name_words = (name.size() / 4) + 1;
+                interface_count = static_cast<uint32_t>(len - 3 - name_words);
+                entry_point = fmt::format("{} (model {}) interface_vars={}", name, w[1], interface_count);
+            }
+            break;
+        case 5: // OpName
+            if (len >= 3)
+                var_name[w[1]] = spirv_literal_string(&w[2], len - 2);
+            break;
+        case 71: // OpDecorate: target, decoration, operands...
+            if (len >= 3) {
+                const uint32_t target = w[1];
+                const uint32_t decoration = w[2];
+                if (decoration == 30 && len >= 4) // Location
+                    var_location[target] = w[3];
+                else if (decoration == 11 && len >= 4) // BuiltIn
+                    var_builtin[target] = w[3];
+                else if (decoration == 34 && len >= 4) // DescriptorSet
+                    var_set_binding[target].first = w[3];
+                else if (decoration == 33 && len >= 4) // Binding
+                    var_set_binding[target].second = w[3];
+                else if (decoration == 1 && len >= 4) // SpecId
+                    spec_const_ids.push_back(w[3]);
+            }
+            break;
+        case 59: // OpVariable: result type, result id, storage class
+            if (len >= 4)
+                var_storage_class[w[2]] = w[3];
+            break;
+        default:
+            break;
+        }
+        i += len;
+    }
+
+    auto list_vars = [&](uint32_t storage_class) {
+        std::string out;
+        for (const auto &[id, sc] : var_storage_class) {
+            if (sc != storage_class)
+                continue;
+            const auto loc = var_location.find(id);
+            const auto bi = var_builtin.find(id);
+            if (loc == var_location.end() && bi == var_builtin.end())
+                continue; // unlocated / unnamed globals are not interesting here
+            const auto nm = var_name.find(id);
+            if (!out.empty())
+                out += ", ";
+            if (bi != var_builtin.end())
+                out += fmt::format("{}=builtin{}", nm != var_name.end() ? nm->second : fmt::format("%{}", id), bi->second);
+            else
+                out += fmt::format("{}@loc{}", nm != var_name.end() ? nm->second : fmt::format("%{}", id), loc->second);
+        }
+        return out.empty() ? std::string("none") : out;
+    };
+
+    std::string descriptors;
+    for (const auto &[id, sb] : var_set_binding) {
+        const auto nm = var_name.find(id);
+        if (!descriptors.empty())
+            descriptors += ", ";
+        descriptors += fmt::format("{}=set{}.binding{}", nm != var_name.end() ? nm->second : fmt::format("%{}", id), sb.first, sb.second);
+    }
+
+    auto join = [](const std::vector<std::string> &items) {
+        std::string out;
+        for (const std::string &item : items)
+            out += (out.empty() ? "" : ", ") + item;
+        return out.empty() ? std::string("none") : out;
+    };
+    std::vector<std::string> spec_ids;
+    for (uint32_t id : spec_const_ids)
+        spec_ids.push_back(std::to_string(id));
+
+    return fmt::format(
+        "words={} entry=[{}]\n"
+        "      capabilities: {}\n"
+        "      extensions: {}\n"
+        "      inputs: {}\n"
+        "      outputs: {}\n"
+        "      uniform_constants: {}\n"
+        "      spec_constant_ids: {}",
+        word_count, entry_point,
+        join(capabilities),
+        join(extensions),
+        list_vars(1), // Input
+        list_vars(3), // Output
+        descriptors.empty() ? std::string("none") : descriptors,
+        join(spec_ids));
+}
+
+std::string PipelineCache::describe_shader(const Sha256Hash &hash) {
+    const std::string file_name = fmt::format("vk{}-{}.spv", shader::CURRENT_VERSION, hex_string(hash));
+    const std::vector<uint32_t> source = renderer::pre_load_shader_spirv(state.shaders_path / file_name);
+    if (source.empty())
+        return fmt::format("<could not read {} back from the shader cache>", file_name);
+
+    return describe_spirv_module(source.data(), source.size());
+}
+
+vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(const ProgramBinding &vertex_program) {
     // pointer to these objects are returned (so it needs to be static)
     // and each thread needs one (hence the thread_local)
     static thread_local std::vector<vk::VertexInputBindingDescription> binding_descr;
@@ -673,7 +941,7 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
     attr_descr.clear();
 
     // Vertex attributes.
-    VertexProgram *vkvert = vertex_program.renderer_data.get();
+    VertexProgram *vkvert = vertex_program.vertex_program.get();
 
     uint32_t used_streams = 0;
 
@@ -791,11 +1059,10 @@ void PipelineCache::compiler_thread(MemState &mem) {
             // use this as an instruction to stop the thread
             break;
 
-        vk::Pipeline pipeline = compile_pipeline(request->type, request->render_pass, *request->vertex_program_gxm, *request->fragment_program_gxm, *request->get_record(), request->hints, mem);
-        *request->pipeline = pipeline;
-
-        request->vertex_program_gxm->compile_threads_on.fetch_sub(1, std::memory_order_release);
-        request->fragment_program_gxm->compile_threads_on.fetch_sub(1, std::memory_order_release);
+        vk::Pipeline pipeline = compile_pipeline(request->type, request->render_pass, *request->vertex_program_binding, *request->fragment_program_binding, *request->get_record(), request->has_color_surface_data, request->hints, mem);
+        // mark a refused pipeline as failed rather than leaving it null, which would make every
+        // later draw queue the same doomed compilation again
+        *request->pipeline = pipeline ? pipeline : std::bit_cast<vk::Pipeline, uint64_t>(~1ULL);
 
         const auto time_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         next_pipeline_cache_save = time_s + pipeline_cache_save_delay;
@@ -815,17 +1082,17 @@ static vk::StencilOpState convert_op_state(const GxmStencilStateOp &state) {
     };
 }
 
-vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::RenderPass render_pass, const SceGxmVertexProgram &vertex_program_gxm, const SceGxmFragmentProgram &fragment_program_gxm, const GxmRecordState &record, const shader::Hints &hints, MemState &mem) {
-    const VertexProgram &vertex_program = *vertex_program_gxm.renderer_data;
-    const SceGxmProgram *gxm_fragment_shader = fragment_program_gxm.program.get(mem);
+vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::RenderPass render_pass, const ProgramBinding &vertex_program_binding, const ProgramBinding &fragment_program_binding, const GxmRecordState &record, bool has_color_surface_data, const shader::Hints &hints, MemState &mem) {
+    const VertexProgram &vertex_program = *vertex_program_binding.vertex_program;
+    const SceGxmProgram *gxm_fragment_shader = fragment_program_binding.program();
     const VKFragmentProgram &fragment_program = *reinterpret_cast<VKFragmentProgram *>(
-        fragment_program_gxm.renderer_data.get());
+        fragment_program_binding.fragment_program.get());
 
     // the vertex input state must be computed before shader are retrieved in case symbols are stripped
-    const vk::PipelineVertexInputStateCreateInfo vertex_input = get_vertex_input_state(vertex_program_gxm, mem);
+    const vk::PipelineVertexInputStateCreateInfo vertex_input = get_vertex_input_state(vertex_program_binding);
 
-    const vk::PipelineShaderStageCreateInfo vertex_shader = retrieve_shader(vertex_program_gxm.program.get(mem), vertex_program.hash, true, fragment_program_gxm.is_maskupdate, mem, hints);
-    const vk::PipelineShaderStageCreateInfo fragment_shader = retrieve_shader(gxm_fragment_shader, fragment_program.hash, false, fragment_program_gxm.is_maskupdate, mem, hints, record.is_gamma_corrected);
+    const vk::PipelineShaderStageCreateInfo vertex_shader = retrieve_shader(vertex_program_binding.program(), vertex_program.hash, true, fragment_program_binding.is_maskupdate, mem, hints);
+    const vk::PipelineShaderStageCreateInfo fragment_shader = retrieve_shader(gxm_fragment_shader, fragment_program.hash, false, fragment_program_binding.is_maskupdate, mem, hints, record.is_gamma_corrected);
     const vk::PipelineShaderStageCreateInfo shader_stages[] = { vertex_shader, fragment_shader };
     // disable the fragment shader if gxm asks us to
     const bool is_fragment_disabled = record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED || gxm_fragment_shader->has_no_effect();
@@ -840,6 +1107,7 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     const bool use_shader_interlock = state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
 
     const vk::PipelineRasterizationStateCreateInfo rasterizer{
+        .depthClampEnable = (enable_depth_clamp && state.physical_device_features.depthClamp) ? VK_TRUE : VK_FALSE,
         .polygonMode = translate_polygon_mode(record.front_polygon_mode),
         .cullMode = translate_cull_mode(record.cull_mode),
         // front face is always counter clockwise
@@ -863,21 +1131,28 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     };
 
     vk::PipelineColorBlendStateCreateInfo color_blending{};
-    if (support_coherent_framebuffer_fetch && gxm_fragment_shader->is_frag_color_used())
+    if (support_coherent_framebuffer_fetch)
         color_blending.flags = vk::PipelineColorBlendStateCreateFlagBits::eRasterizationOrderAttachmentAccessEXT;
 
     const bool frag_has_no_output = static_cast<bool>(gxm_fragment_shader->program_flags & SCE_GXM_PROGRAM_FLAG_OUTPUT_UNDEFINED);
+    std::array<vk::PipelineColorBlendAttachmentState, 2> blend_attachments;
+    blend_attachments[1] = vk::PipelineColorBlendAttachmentState{
+        .blendEnable = VK_FALSE,
+        .colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG | vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA
+    };
     if (is_fragment_disabled || frag_has_no_output || use_shader_interlock) {
         // The write mask must be empty as the lack of a fragment shader results in undefined values
-        static const vk::PipelineColorBlendAttachmentState blending = {
+        blend_attachments[0] = vk::PipelineColorBlendAttachmentState{
             .blendEnable = VK_FALSE,
             .colorWriteMask = vk::ColorComponentFlags()
         };
-        color_blending.setAttachments(blending);
+        blend_attachments[1].colorWriteMask = vk::ColorComponentFlags();
     } else {
-        const vk::PipelineColorBlendAttachmentState &blending = fragment_program.blending;
-        color_blending.setAttachments(blending);
+        blend_attachments[0] = fragment_program.blending;
     }
+    const bool with_raw_attachment = state.features.preserve_f16_nan_as_u16 && !use_shader_interlock && record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16 && has_color_surface_data;
+    color_blending.attachmentCount = with_raw_attachment ? 2 : 1;
+    color_blending.pAttachments = blend_attachments.data();
 
     vk::PipelineLayout pipeline_layout = pipeline_layouts[vertex_program.texture_count][fragment_program.texture_count];
 
@@ -919,60 +1194,312 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         .subpass = 0
     };
 
-    const auto result = state.device.createGraphicsPipeline(pipeline_cache, pipeline_info);
-    if (result.result != vk::Result::eSuccess) {
-        LOG_CRITICAL("Failed to create pipeline.");
+    // The stock Adreno driver can SIGSEGV inside createGraphicsPipeline
+    // If the log ends on this line this exact vert/frag pair killed the driver's compiler
+    if (state.is_adreno_stock)
+        LOG_INFO("[PIPE] stock-Adreno: compiling pipeline vert={} frag={} ({})", hex_string(vertex_program.hash),
+            hex_string(fragment_program.hash), is_fragment_disabled ? "frag-disabled" : "frag-enabled");
+
+    // vulkan.hpp THROWS on an error result here, so a driver refusing the pipeline used to take
+    // the whole emulator down before the check below could run. Some drivers (notably Mesa/Turnip)
+    // also report an internal shader-compiler rejection as ErrorOutOfHostMemory rather than a
+    // specific error.
+    try {
+        const auto result = state.device.createGraphicsPipeline(pipeline_cache, pipeline_info);
+        if (result.result != vk::Result::eSuccess) {
+            LOG_CRITICAL("Failed to create pipeline: {}", vk::to_string(result.result));
+            return nullptr;
+        }
+
+        pipelines_created++;
+        {
+            constexpr bool log_pipeline_keys = false; // ~700 lines per run
+            static std::atomic<uint32_t> pipekey_lines{ 0 };
+            const uint32_t n = pipekey_lines.fetch_add(1, std::memory_order_relaxed);
+            if (log_pipeline_keys && n < 4000) {
+                const auto &sf = record.front_stencil_state_op;
+                const auto &sb = record.back_stencil_state_op;
+                LOG_INFO("[PIPEKEY] #{} vert={} frag={} blend={:016x} layout={:016x} prim={} fmt=0x{:x} cull={} two={} poly={} dfunc={} dwrite={} stF={}/{}/{}/{} stB={}/{}/{}/{} fmode={} fdis={} mask={} gamma={} rp=0x{:x}",
+                    n, hex_string(vertex_program.hash).substr(0, 10), hex_string(fragment_program.hash).substr(0, 10),
+                    fragment_program.blending_hash, vertex_program_binding.key_hash, static_cast<int>(type),
+                    static_cast<uint32_t>(record.color_base_format), static_cast<int>(record.cull_mode), static_cast<int>(record.two_sided),
+                    static_cast<int>(record.front_polygon_mode), static_cast<int>(record.front_depth_func), static_cast<int>(record.front_depth_write_mode),
+                    static_cast<int>(sf.func), static_cast<int>(sf.stencil_fail), static_cast<int>(sf.depth_fail), static_cast<int>(sf.depth_pass),
+                    static_cast<int>(sb.func), static_cast<int>(sb.stencil_fail), static_cast<int>(sb.depth_fail), static_cast<int>(sb.depth_pass),
+                    static_cast<int>(record.front_side_fragment_program_mode), is_fragment_disabled ? 1 : 0,
+                    record.is_maskupdate ? 1 : 0, record.is_gamma_corrected ? 1 : 0,
+                    std::bit_cast<uint64_t>(static_cast<VkRenderPass>(render_pass)));
+            }
+        }
+        return result.value;
+    } catch (const vk::SystemError &err) {
+        const uint32_t failure_index = pipelines_failed++;
+        LOG_CRITICAL("Failed to create pipeline #{} ({} succeeded so far): {}", failure_index,
+            pipelines_created.load(), err.what());
+        LOG_CRITICAL("  vert shader: {}", hex_string(vertex_program.hash));
+        LOG_CRITICAL("  frag shader: {} (fragment {})", hex_string(fragment_program.hash),
+            is_fragment_disabled ? "disabled" : "enabled");
+        LOG_CRITICAL("  colour base format: 0x{:X} raw_attachment: {} shader_interlock: {} blend: {} attachments: {}",
+            static_cast<uint32_t>(record.color_base_format), with_raw_attachment, use_shader_interlock,
+            static_cast<bool>(fragment_program.blending.blendEnable), color_blending.attachmentCount);
+
+        // Dump absolutely everything for the first few failures. Anything less means another
+        // round trip, and the state that gets left out is always the state that mattered.
+        if (failures_dumped++ < max_failures_dumped) {
+            std::string render_pass_desc;
+            {
+                std::lock_guard<std::mutex> guard(diagnostics_mutex);
+                auto it = render_pass_descriptions.find(std::bit_cast<uint64_t>(static_cast<VkRenderPass>(render_pass)));
+                render_pass_desc = (it == render_pass_descriptions.end()) ? "<unknown render pass>" : it->second;
+            }
+
+            LOG_CRITICAL("=== FULL PIPELINE DUMP (failure #{}) ===", failure_index);
+            LOG_CRITICAL("  render pass: {}", render_pass_desc);
+            LOG_CRITICAL("  support_coherent_framebuffer_fetch: {} colour blend flags: 0x{:X}",
+                support_coherent_framebuffer_fetch,
+                static_cast<uint32_t>(static_cast<VkPipelineColorBlendStateCreateFlags>(color_blending.flags)));
+            LOG_CRITICAL("  stages: {} (vertex entry main_vs, fragment entry main_fs) vert_spec_info: {} frag_spec_info: {}",
+                shader_stage_count, static_cast<bool>(vertex_shader.pSpecializationInfo),
+                static_cast<bool>(fragment_shader.pSpecializationInfo));
+            LOG_CRITICAL("  pipeline layout: vertex_textures={} fragment_textures={}",
+                vertex_program.texture_count, fragment_program.texture_count);
+            LOG_CRITICAL("  input assembly: topology={} primitive_restart={}",
+                vk::to_string(input_assembly.topology), static_cast<bool>(input_assembly.primitiveRestartEnable));
+            LOG_CRITICAL("  rasterizer: depth_clamp={} discard={} polygon={} cull={} front_face={} depth_bias={} line_width={}",
+                static_cast<bool>(rasterizer.depthClampEnable), static_cast<bool>(rasterizer.rasterizerDiscardEnable),
+                vk::to_string(rasterizer.polygonMode), vk::to_string(rasterizer.cullMode),
+                vk::to_string(rasterizer.frontFace), static_cast<bool>(rasterizer.depthBiasEnable), rasterizer.lineWidth);
+            LOG_CRITICAL("  multisample: samples={} sample_shading={}",
+                vk::to_string(multisampling.rasterizationSamples), static_cast<bool>(multisampling.sampleShadingEnable));
+            LOG_CRITICAL("  depth/stencil: test={} write={} compare={} stencil_test={} front(fail={} pass={} depth_fail={} cmp={}) back(fail={} pass={} depth_fail={} cmp={})",
+                static_cast<bool>(ds_info.depthTestEnable), static_cast<bool>(ds_info.depthWriteEnable),
+                vk::to_string(ds_info.depthCompareOp), static_cast<bool>(ds_info.stencilTestEnable),
+                vk::to_string(ds_info.front.failOp), vk::to_string(ds_info.front.passOp),
+                vk::to_string(ds_info.front.depthFailOp), vk::to_string(ds_info.front.compareOp),
+                vk::to_string(ds_info.back.failOp), vk::to_string(ds_info.back.passOp),
+                vk::to_string(ds_info.back.depthFailOp), vk::to_string(ds_info.back.compareOp));
+            for (uint32_t att = 0; att < color_blending.attachmentCount; att++) {
+                const auto &b = blend_attachments[att];
+                LOG_CRITICAL("  blend[{}]: enable={} colour(src={} dst={} op={}) alpha(src={} dst={} op={}) write_mask=0x{:X}",
+                    att, static_cast<bool>(b.blendEnable), vk::to_string(b.srcColorBlendFactor),
+                    vk::to_string(b.dstColorBlendFactor), vk::to_string(b.colorBlendOp),
+                    vk::to_string(b.srcAlphaBlendFactor), vk::to_string(b.dstAlphaBlendFactor),
+                    vk::to_string(b.alphaBlendOp), static_cast<uint32_t>(static_cast<VkColorComponentFlags>(b.colorWriteMask)));
+            }
+            std::string dyn;
+            for (uint32_t d = 0; d < dynamic_info.dynamicStateCount; d++)
+                dyn += (dyn.empty() ? "" : ", ") + vk::to_string(dynamic_info.pDynamicStates[d]);
+            LOG_CRITICAL("  dynamic states ({}): {}", dynamic_info.dynamicStateCount, dyn);
+            LOG_CRITICAL("  vertex input: {} bindings, {} attributes",
+                vertex_input.vertexBindingDescriptionCount, vertex_input.vertexAttributeDescriptionCount);
+            for (uint32_t b = 0; b < vertex_input.vertexBindingDescriptionCount; b++) {
+                const auto &bd = vertex_input.pVertexBindingDescriptions[b];
+                LOG_CRITICAL("    binding {}: stride={} rate={}", bd.binding, bd.stride, vk::to_string(bd.inputRate));
+            }
+            for (uint32_t a = 0; a < vertex_input.vertexAttributeDescriptionCount; a++) {
+                const auto &ad = vertex_input.pVertexAttributeDescriptions[a];
+                LOG_CRITICAL("    attribute loc={} binding={} format={} offset={}", ad.location, ad.binding,
+                    vk::to_string(ad.format), ad.offset);
+            }
+            LOG_CRITICAL("  VERTEX SHADER {}\n      {}", hex_string(vertex_program.hash), describe_shader(vertex_program.hash));
+            LOG_CRITICAL("  FRAGMENT SHADER {}\n      {}", hex_string(fragment_program.hash), describe_shader(fragment_program.hash));
+            LOG_CRITICAL("  spv files live in: {}", state.shaders_path.string());
+            LOG_CRITICAL("=== END PIPELINE DUMP ===");
+
+            // and now find out which single piece of state the driver is objecting to
+            bisect_pipeline_failure(pipeline_info);
+        }
         return nullptr;
     }
+}
 
-    return result.value;
+// Recreate the same pipeline several times, each time with one aspect neutralised, and report
+// which variants the driver accepts. Whatever change makes it succeed is the cause.
+void PipelineCache::bisect_pipeline_failure(const vk::GraphicsPipelineCreateInfo &failing_info) {
+    LOG_CRITICAL("=== PIPELINE KNOCKOUT BISECT: retrying with individual state neutralised ===");
+
+    auto attempt = [&](const char *what, const vk::GraphicsPipelineCreateInfo &info) {
+        try {
+            const auto res = state.device.createGraphicsPipeline(pipeline_cache, info);
+            if (res.result == vk::Result::eSuccess) {
+                LOG_CRITICAL("  [OK  ] {}", what);
+                state.device.destroyPipeline(res.value);
+            } else {
+                LOG_CRITICAL("  [FAIL] {} -> {}", what, vk::to_string(res.result));
+            }
+        } catch (const vk::SystemError &e) {
+            LOG_CRITICAL("  [FAIL] {} -> {}", what, e.what());
+        }
+    };
+
+    // 1. vertex stage only: isolates "is the vertex shader itself acceptable?"
+    {
+        vk::GraphicsPipelineCreateInfo info = failing_info;
+        vk::PipelineRasterizationStateCreateInfo raster = *failing_info.pRasterizationState;
+        raster.rasterizerDiscardEnable = VK_TRUE;
+        info.stageCount = 1;
+        info.pRasterizationState = &raster;
+        attempt("vertex stage only (rasterizer discard)", info);
+    }
+
+    // 2. colour blend flags flipped: tests the rasterization-order-attachment-access match
+    {
+        vk::PipelineColorBlendStateCreateInfo blend = *failing_info.pColorBlendState;
+        blend.flags ^= vk::PipelineColorBlendStateCreateFlagBits::eRasterizationOrderAttachmentAccessEXT;
+        vk::GraphicsPipelineCreateInfo info = failing_info;
+        info.pColorBlendState = &blend;
+        attempt(fmt::format("colour blend flags toggled to 0x{:X}",
+                    static_cast<uint32_t>(static_cast<VkPipelineColorBlendStateCreateFlags>(blend.flags)))
+                    .c_str(),
+            info);
+    }
+
+    // 3. no blending at all, full write mask
+    {
+        vk::PipelineColorBlendAttachmentState plain{
+            .blendEnable = VK_FALSE,
+            .colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG
+                | vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA
+        };
+        std::array<vk::PipelineColorBlendAttachmentState, 2> plains{ plain, plain };
+        vk::PipelineColorBlendStateCreateInfo blend = *failing_info.pColorBlendState;
+        blend.pAttachments = plains.data();
+        vk::GraphicsPipelineCreateInfo info = failing_info;
+        info.pColorBlendState = &blend;
+        attempt("blending disabled", info);
+    }
+
+    // 4. default rasterization state
+    {
+        const vk::PipelineRasterizationStateCreateInfo raster{ .lineWidth = 1.0f };
+        vk::GraphicsPipelineCreateInfo info = failing_info;
+        info.pRasterizationState = &raster;
+        attempt("default rasterization state", info);
+    }
+
+    // 5. depth and stencil tests off
+    {
+        const vk::PipelineDepthStencilStateCreateInfo ds{};
+        vk::GraphicsPipelineCreateInfo info = failing_info;
+        info.pDepthStencilState = &ds;
+        attempt("depth/stencil tests disabled", info);
+    }
+
+    // 6. no dynamic state (static viewport and scissor instead)
+    {
+        const vk::Viewport vp{ .width = 1.0f, .height = 1.0f, .maxDepth = 1.0f };
+        const vk::Rect2D sc{ .extent = { 1, 1 } };
+        vk::PipelineViewportStateCreateInfo viewport{};
+        viewport.setViewports(vp);
+        viewport.setScissors(sc);
+        vk::PipelineRasterizationStateCreateInfo raster = *failing_info.pRasterizationState;
+        raster.depthBiasEnable = VK_FALSE;
+        vk::GraphicsPipelineCreateInfo info = failing_info;
+        info.pDynamicState = nullptr;
+        info.pViewportState = &viewport;
+        info.pRasterizationState = &raster;
+        attempt("no dynamic state (static viewport/scissor, no depth bias)", info);
+    }
+
+    // 7. empty vertex input
+    {
+        const vk::PipelineVertexInputStateCreateInfo vertex_input{};
+        vk::GraphicsPipelineCreateInfo info = failing_info;
+        info.pVertexInputState = &vertex_input;
+        attempt("empty vertex input state", info);
+    }
+
+    LOG_CRITICAL("=== END KNOCKOUT BISECT ===");
 }
 
 vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem) {
     const GxmRecordState &record = context.record;
-    // get the hash of the current context
-    uint64_t key = XXH3_64bits(&record, record_pipeline_len);
+    uint64_t key = hash_pipeline_record(record);
+    uint64_t raw_key = XXH3_64bits(&record, record_pipeline_len);
 
     // add the hash of the blending
-    SceGxmFragmentProgram &fragment_program_gxm = *record.fragment_program.get(mem);
+    const std::shared_ptr<ProgramBinding> &fragment_program_binding = record.fragment_program_binding;
     const VKFragmentProgram &fragment_program = *reinterpret_cast<VKFragmentProgram *>(
-        fragment_program_gxm.renderer_data.get());
+        fragment_program_binding->fragment_program.get());
     key ^= fragment_program.blending_hash;
+    raw_key ^= fragment_program.blending_hash;
 
     // add the hash of the attribute and stream layout
-    SceGxmVertexProgram &vertex_program_gxm = *record.vertex_program.get(mem);
-    key ^= vertex_program_gxm.key_hash;
+    const std::shared_ptr<ProgramBinding> &vertex_program_binding = record.vertex_program_binding;
+    key ^= vertex_program_binding->key_hash;
+    raw_key ^= vertex_program_binding->key_hash;
 
     // and also add the primitive type
     key ^= static_cast<uint64_t>(type);
+    raw_key ^= static_cast<uint64_t>(type);
 
     // can't use constexpr because of apple clang...
     const vk::Pipeline pipeline_compiling = std::bit_cast<vk::Pipeline, uint64_t>(~0ULL);
+    // a pipeline the driver refused: remembered so we don't recompile (and re-log) it on every
+    // single draw, which turns one rejected pipeline into a freeze and a gigabyte of log
+    const vk::Pipeline pipeline_failed = std::bit_cast<vk::Pipeline, uint64_t>(~1ULL);
     // if the pipeline is in the pipeline cache, we can expect its creation time to be almost instantaneous
     bool already_in_cache = false;
 
     auto it = pipelines.find(key);
     if (it != pipelines.end()) {
         if (it->second != nullptr) {
-            if (it->second == pipeline_compiling)
-                // pipeline is still compiling
+            if (it->second == pipeline_failed)
                 return nullptr;
-            else
-                return it->second;
+            if (raw_pipeline_keys_seen.insert(raw_key).second)
+                state.pipelines_redundant_avoided++;
+            if (it->second == pipeline_compiling)
+                return nullptr;
+            return it->second;
         }
         already_in_cache = true;
     } else {
         // the pipeline hash was not in the cache;
         it = pipelines.insert({ key, pipeline_compiling }).first;
     }
+    raw_pipeline_keys_seen.insert(raw_key);
 
     // get the correct renderpass here
-    const SceGxmProgram *gxm_fragment_shader = fragment_program_gxm.program.get(mem);
+    const SceGxmProgram *gxm_fragment_shader = fragment_program_binding->program();
     const bool use_shader_interlock = state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
     const vk::RenderPass render_pass = use_shader_interlock ? context.current_shader_interlock_pass : context.current_render_pass;
     // update the shader hints
     context.shader_hints.color_format = record.color_surface.colorFormat;
-    context.shader_hints.attributes = &vertex_program_gxm.attributes;
+    context.shader_hints.attributes = &vertex_program_binding->attributes;
+
+    constexpr bool log_texture_hint_changes = false; // costs a mutex + map lookup per draw
+    if constexpr (log_texture_hint_changes) {
+        static std::mutex texhint_mutex;
+        static std::unordered_map<const SceGxmProgram *, std::array<SceGxmTextureFormat, SCE_GXM_MAX_TEXTURE_UNITS>> texhint_seen;
+        static uint32_t texhint_stale_count = 0;
+        std::array<SceGxmTextureFormat, SCE_GXM_MAX_TEXTURE_UNITS> now{};
+        for (uint32_t i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++)
+            now[i] = context.shader_hints.fragment_textures[i];
+
+        std::lock_guard<std::mutex> texhint_lock(texhint_mutex);
+        auto [texhint_it, texhint_inserted] = texhint_seen.try_emplace(gxm_fragment_shader, now);
+        if (texhint_inserted) {
+            std::string fmts;
+            for (uint32_t i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++)
+                fmts += fmt::format(" [{}]=0x{:08X}", i, static_cast<uint32_t>(now[i]));
+            LOG_INFO("[TEXHINT] first draw of fragment program {}:{}", fmt::ptr(gxm_fragment_shader), fmts);
+        } else if (texhint_it->second != now) {
+            texhint_stale_count++;
+            if (texhint_stale_count <= 500) {
+                std::string diff;
+                for (uint32_t i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++)
+                    if (texhint_it->second[i] != now[i])
+                        diff += fmt::format(" [{}] 0x{:08X} -> 0x{:08X}", i,
+                            static_cast<uint32_t>(texhint_it->second[i]), static_cast<uint32_t>(now[i]));
+                LOG_WARN("[TEXHINT] STALE #{}: fragment program {} is being drawn with texture formats "
+                         "different from the ones its cached shader was generated for:{}",
+                    texhint_stale_count, fmt::ptr(gxm_fragment_shader), diff);
+                if (texhint_stale_count == 500)
+                    LOG_WARN("[TEXHINT] (further STALE lines suppressed)");
+            }
+            texhint_it->second = now;
+        }
+    }
 
     // note: the flag can_use_deferred_compilation is not considered here because it causes way too many false positives
     const bool compile_pipeline_async = !already_in_cache && consider_for_async && use_async_compilation;
@@ -984,23 +1511,20 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
             .pipeline = &it->second,
             .type = type,
             .render_pass = render_pass,
-            .vertex_program_gxm = &vertex_program_gxm,
-            .fragment_program_gxm = &fragment_program_gxm,
+            .vertex_program_binding = vertex_program_binding,
+            .fragment_program_binding = fragment_program_binding,
+            .has_color_surface_data = static_cast<bool>(record.color_surface.data),
             .hints = context.shader_hints
         };
         memcpy(request->record_data, &record, record_pipeline_len);
         it->second = pipeline_compiling;
-
-        // we must not delete these programs until the worker is done
-        vertex_program_gxm.compile_threads_on.fetch_add(1, std::memory_order_relaxed);
-        fragment_program_gxm.compile_threads_on.fetch_add(1, std::memory_order_relaxed);
 
         pipeline_compile_queue.enqueue(pipeline_compile_queue_token, request);
 
         return nullptr;
     } else {
         // can't wait, compile it right now
-        vk::Pipeline result = compile_pipeline(type, render_pass, vertex_program_gxm, fragment_program_gxm, record, context.shader_hints, mem);
+        vk::Pipeline result = compile_pipeline(type, render_pass, *vertex_program_binding, *fragment_program_binding, record, static_cast<bool>(record.color_surface.data), context.shader_hints, mem);
 
         const auto time_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         next_pipeline_cache_save = time_s + pipeline_cache_save_delay;
@@ -1008,7 +1532,7 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
         if (!already_in_cache)
             state.shaders_count_compiled++;
 
-        it->second = result;
+        it->second = result ? result : pipeline_failed;
 
         return result;
     }

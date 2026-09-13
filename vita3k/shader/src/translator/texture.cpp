@@ -17,6 +17,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <shader/spirv_recompiler.h>
+#include <shader/uniform_block.h>
 #include <shader/usse_decoder_helpers.h>
 #include <shader/usse_disasm.h>
 #include <shader/usse_translator.h>
@@ -43,7 +44,7 @@ static spv::Id get_uv_coeffs(spv::Builder &b, const spv::Id std_builtins, spv::I
     if (lod == spv::NoResult) {
         // compute the lod here
         const spv::Id query_lod = b.createOp(spv::OpImageQueryLod, v2f32, { sampled_image, coords });
-        lod = b.createOp(spv::OpVectorExtractDynamic, f32, { query_lod, b.makeIntConstant(0) });
+        lod = utils::extract_vector_component(b, f32, query_lod, b.makeIntConstant(0));
     }
 
     const spv::Id layer = b.createUnaryOp(spv::OpConvertFToS, i32, lod);
@@ -70,7 +71,7 @@ spv::Id shader::usse::USSETranslatorVisitor::do_fetch_texture(const spv::Id tex,
     auto coord_id = coord.first;
 
     if (coord.second != static_cast<int>(DataType::F32)) {
-        coord_id = m_b.createOp(spv::OpVectorExtractDynamic, type_f32, { m_b.createLoad(coord_id, spv::NoPrecision), m_b.makeIntConstant(0) });
+        coord_id = utils::extract_vector_component(m_b, type_f32, m_b.createLoad(coord_id, spv::NoPrecision), m_b.makeIntConstant(0));
         coord_id = utils::unpack_one(m_b, m_util_funcs, m_features, coord_id, static_cast<DataType>(coord.second));
 
         // Shuffle if number of components is larger than 2
@@ -84,6 +85,107 @@ spv::Id shader::usse::USSETranslatorVisitor::do_fetch_texture(const spv::Id tex,
     }
 
     assert(m_b.getTypeClass(m_b.getContainedTypeId(m_b.getTypeId(coord_id))) == spv::OpTypeFloat);
+
+    // Cast-sampler UV re-anchor
+    constexpr int cast_mask_width = 16;
+    if (dim == 2 && m_spirv_params.frag_coord_id != spv::NoResult
+        && texture_index >= 0 && texture_index < cast_mask_width) {
+        spv::Id coord_xy = coord_id;
+        const bool has_extra_comps = m_b.getNumComponents(coord_id) > 2;
+        if (has_extra_comps)
+            coord_xy = m_b.createOp(spv::OpVectorShuffle, type_f32_v[2], { { true, coord_id }, { true, coord_id }, { false, 0 }, { false, 1 } });
+
+        const auto load_frag_uniform = [&](FragUniformFieldId field) {
+            spv::Id ptr = utils::create_access_chain(m_b, spv::StorageClassUniform, m_spirv_params.render_info_id, { m_b.makeIntConstant(field) });
+            return m_b.createLoad(ptr, spv::NoPrecision);
+        };
+
+        const spv::Id mask_f = load_frag_uniform(FRAG_UNIFORM_cast_sampler_mask);
+        const spv::Id phase_f = load_frag_uniform(FRAG_UNIFORM_cast_phase_mask);
+        const spv::Id res_mult = load_frag_uniform(FRAG_UNIFORM_res_multiplier);
+        const spv::Id inv_w = load_frag_uniform(FRAG_UNIFORM_inv_frag_width);
+        const spv::Id inv_h = load_frag_uniform(FRAG_UNIFORM_inv_frag_height);
+
+        const spv::Id type_u32 = m_b.makeUintType(32);
+        const spv::Id type_bool = m_b.makeBoolType();
+        const spv::Id type_bool_v2 = m_b.makeVectorType(type_bool, 2);
+
+        // unit_is_cast = ((uint(mask) >> texture_index) & 1) != 0
+        spv::Id mask_u = m_b.createUnaryOp(spv::OpConvertFToU, type_u32, mask_f);
+        spv::Id bit = m_b.createBinOp(spv::OpShiftRightLogical, type_u32, mask_u, m_b.makeUintConstant(texture_index));
+        bit = m_b.createBinOp(spv::OpBitwiseAnd, type_u32, bit, m_b.makeUintConstant(1));
+        spv::Id unit_is_cast = m_b.createBinOp(spv::OpINotEqual, type_bool, bit, m_b.makeUintConstant(0));
+        // ... && res_multiplier != 1.0
+        spv::Id not_1x = m_b.createBinOp(spv::OpFUnordNotEqual, type_bool, res_mult, m_b.makeFloatConstant(1.0f));
+        spv::Id active = m_b.createBinOp(spv::OpLogicalAnd, type_bool, unit_is_cast, not_1x);
+
+        // screen_uv = gl_FragCoord.xy * inv_size
+        spv::Id frag_coord = m_b.createLoad(m_spirv_params.frag_coord_id, spv::NoPrecision);
+        spv::Id screen_uv = m_b.createOp(spv::OpVectorShuffle, type_f32_v[2], { { true, frag_coord }, { true, frag_coord }, { false, 0 }, { false, 1 } });
+        spv::Id inv_size = m_b.createCompositeConstruct(type_f32_v[2], { inv_w, inv_h });
+        screen_uv = m_b.createBinOp(spv::OpFMul, type_f32_v[2], screen_uv, inv_size);
+
+        // adjusted = screen_uv + (coord - screen_uv) / res_multiplier
+        spv::Id delta = m_b.createBinOp(spv::OpFSub, type_f32_v[2], coord_xy, screen_uv);
+        spv::Id res_mult_v2 = m_b.createCompositeConstruct(type_f32_v[2], { res_mult, res_mult });
+        spv::Id delta_scaled = m_b.createBinOp(spv::OpFDiv, type_f32_v[2], delta, res_mult_v2);
+        spv::Id adjusted = m_b.createBinOp(spv::OpFAdd, type_f32_v[2], screen_uv, delta_scaled);
+
+        // X: baked word-pair offset (|dx|>eps) -> re-anchor if plausible; else snap to this view's word (phase)
+        const spv::Id threshold = m_b.makeFloatConstant(0.005f);
+        const spv::Id eps = m_b.makeFloatConstant(5e-5f);
+        spv::Id abs_delta = m_b.createBuiltinCall(type_f32_v[2], std_builtins, GLSLstd450FAbs, { delta });
+
+        const spv::Id coord_x = utils::extract_vector_component(m_b, type_f32, coord_xy, m_b.makeIntConstant(0));
+        const spv::Id coord_y = utils::extract_vector_component(m_b, type_f32, coord_xy, m_b.makeIntConstant(1));
+        const spv::Id adj_x = utils::extract_vector_component(m_b, type_f32, adjusted, m_b.makeIntConstant(0));
+        const spv::Id adj_y = utils::extract_vector_component(m_b, type_f32, adjusted, m_b.makeIntConstant(1));
+        const spv::Id adx = utils::extract_vector_component(m_b, type_f32, abs_delta, m_b.makeIntConstant(0));
+        const spv::Id ady = utils::extract_vector_component(m_b, type_f32, abs_delta, m_b.makeIntConstant(1));
+
+        // snapped_x = (2*floor(u*W_cast/2) + phase + 0.5) / W_cast, W_cast from textureSize
+        spv::Id phase_u = m_b.createUnaryOp(spv::OpConvertFToU, type_u32, phase_f);
+        spv::Id phase_bit = m_b.createBinOp(spv::OpShiftRightLogical, type_u32, phase_u, m_b.makeUintConstant(texture_index));
+        phase_bit = m_b.createBinOp(spv::OpBitwiseAnd, type_u32, phase_bit, m_b.makeUintConstant(1));
+        const spv::Id phase_flt = m_b.createUnaryOp(spv::OpConvertUToF, type_f32, phase_bit);
+        const spv::Id type_i32 = m_b.makeIntType(32);
+        const spv::Id type_i32_v2 = m_b.makeVectorType(type_i32, 2);
+        const spv::Id image_type = m_b.makeImageType(type_f32, spv::Dim2D, false, false, false, 1, spv::ImageFormatUnknown);
+        const spv::Id image = m_b.createUnaryOp(spv::OpImage, image_type, tex);
+        spv::Id cast_size = m_b.createOp(spv::OpImageQuerySizeLod, type_i32_v2, { image, m_b.makeIntConstant(0) });
+        spv::Id cast_w = utils::extract_vector_component(m_b, type_i32, cast_size, m_b.makeIntConstant(0));
+        cast_w = m_b.createUnaryOp(spv::OpConvertSToF, type_f32, cast_w);
+        spv::Id store_col = m_b.createBinOp(spv::OpFMul, type_f32, coord_x, cast_w);
+        store_col = m_b.createBinOp(spv::OpFMul, type_f32, store_col, m_b.makeFloatConstant(0.5f));
+        store_col = m_b.createBuiltinCall(type_f32, std_builtins, GLSLstd450Floor, { store_col });
+        spv::Id snapped_x = m_b.createBinOp(spv::OpFMul, type_f32, store_col, m_b.makeFloatConstant(2.0f));
+        snapped_x = m_b.createBinOp(spv::OpFAdd, type_f32, snapped_x, phase_flt);
+        snapped_x = m_b.createBinOp(spv::OpFAdd, type_f32, snapped_x, m_b.makeFloatConstant(0.5f));
+        snapped_x = m_b.createBinOp(spv::OpFDiv, type_f32, snapped_x, cast_w);
+
+        const spv::Id has_offset = m_b.createBinOp(spv::OpFOrdGreaterThan, type_bool, adx, eps);
+        const spv::Id reanchor_ok = m_b.createBinOp(spv::OpFOrdLessThanEqual, type_bool, adx, threshold);
+        spv::Id x_offset_path = m_b.createTriOp(spv::OpSelect, type_f32, reanchor_ok, adj_x, coord_x);
+        spv::Id x_active = m_b.createTriOp(spv::OpSelect, type_f32, has_offset, x_offset_path, snapped_x);
+        const spv::Id new_x = m_b.createTriOp(spv::OpSelect, type_f32, active, x_active, coord_x);
+
+        // Y keeps the plain re-anchor (harmless identity for zero delta; big deltas untouched)
+        spv::Id y_ok = m_b.createBinOp(spv::OpFOrdLessThanEqual, type_bool, ady, threshold);
+        y_ok = m_b.createBinOp(spv::OpLogicalAnd, type_bool, y_ok, active);
+        const spv::Id new_y = m_b.createTriOp(spv::OpSelect, type_f32, y_ok, adj_y, coord_y);
+
+        spv::Id new_xy = m_b.createCompositeConstruct(type_f32_v[2], { new_x, new_y });
+
+        if (has_extra_comps) {
+            // splice x,y back, keep remaining components
+            if (m_b.getNumComponents(coord_id) == 3)
+                coord_id = m_b.createOp(spv::OpVectorShuffle, type_f32_v[3], { { true, new_xy }, { true, coord_id }, { false, 0 }, { false, 1 }, { false, 4 } });
+            else
+                coord_id = m_b.createOp(spv::OpVectorShuffle, type_f32_v[4], { { true, new_xy }, { true, coord_id }, { false, 0 }, { false, 1 }, { false, 4 }, { false, 5 } });
+        } else {
+            coord_id = new_xy;
+        }
+    }
 
     // the texture viewport is only useful for surfaces and they are never cubes
     // also for the time being ignore sampleProj ops
@@ -101,7 +203,7 @@ spv::Id shader::usse::USSETranslatorVisitor::do_fetch_texture(const spv::Id tex,
         } else {
             // extract the x,y and proj coordinate
             spv::Id coord_xy = m_b.createOp(spv::OpVectorShuffle, type_f32_v[2], { { true, coord_id }, { true, coord_id }, { false, 0 }, { false, 1 } });
-            spv::Id third_comp = m_b.createBinOp(spv::OpVectorExtractDynamic, type_f32, coord_id, m_b.makeIntConstant(2));
+            spv::Id third_comp = utils::extract_vector_component(m_b, type_f32, coord_id, m_b.makeIntConstant(2));
             third_comp = m_b.createCompositeConstruct(type_f32_v[2], { third_comp, third_comp });
 
             // multiply the offset by the third component
@@ -151,6 +253,37 @@ spv::Id shader::usse::USSETranslatorVisitor::do_fetch_texture(const spv::Id tex,
 
     image_sample = m_b.createOp(op, type_f32_v[4], params);
 
+    if (m_spirv_params.frag_coord_id != spv::NoResult && m_spirv_params.render_info_id != spv::NoResult
+        && texture_index >= 0 && texture_index < 16) {
+        const spv::Id type_u32 = m_b.makeUintType(32);
+        const spv::Id type_u32_v4 = m_b.makeVectorType(type_u32, 4);
+        const spv::Id type_bool = m_b.makeBoolType();
+
+        spv::Id mask_ptr = utils::create_access_chain(m_b, spv::StorageClassUniform, m_spirv_params.render_info_id, { m_b.makeIntConstant(FRAG_UNIFORM_raw_cast_mask) });
+        spv::Id mask_u = m_b.createUnaryOp(spv::OpConvertFToU, type_u32, m_b.createLoad(mask_ptr, spv::NoPrecision));
+        spv::Id bit = m_b.createBinOp(spv::OpShiftRightLogical, type_u32, mask_u, m_b.makeUintConstant(texture_index));
+        bit = m_b.createBinOp(spv::OpBitwiseAnd, type_u32, bit, m_b.makeUintConstant(1));
+        spv::Id unit_is_raw = m_b.createBinOp(spv::OpINotEqual, type_bool, bit, m_b.makeUintConstant(0));
+
+        spv::Id scaled = m_b.createBinOp(spv::OpVectorTimesScalar, type_f32_v[4], image_sample, m_b.makeFloatConstant(65535.0f));
+        spv::Id rounded = m_b.createBuiltinCall(type_f32_v[4], std_builtins, GLSLstd450Round, { scaled });
+        spv::Id halves = m_b.createUnaryOp(spv::OpConvertFToU, type_u32_v4, rounded);
+
+        auto word = [&](int lo, int hi) {
+            spv::Id l = m_b.createCompositeExtract(halves, type_u32, lo);
+            spv::Id h = m_b.createCompositeExtract(halves, type_u32, hi);
+            h = m_b.createBinOp(spv::OpShiftLeftLogical, type_u32, h, m_b.makeUintConstant(16));
+            spv::Id w = m_b.createBinOp(spv::OpBitwiseOr, type_u32, l, h);
+            return m_b.createUnaryOp(spv::OpBitcast, type_f32, w);
+        };
+        spv::Id zero_f = m_b.makeFloatConstant(0.0f);
+        spv::Id rebuilt = m_b.createCompositeConstruct(type_f32_v[4], { word(0, 1), word(2, 3), zero_f, zero_f });
+
+        const spv::Id type_bool_v4 = m_b.makeVectorType(type_bool, 4);
+        const spv::Id unit_is_raw_v4 = m_b.createCompositeConstruct(type_bool_v4, { unit_is_raw, unit_is_raw, unit_is_raw, unit_is_raw });
+        image_sample = m_b.createTriOp(spv::OpSelect, type_f32_v[4], unit_is_raw_v4, rebuilt, image_sample);
+    }
+
     if (get_data_type_size(dest_type) < 4 && dest_type != DataType::UINT16 && dest_type != DataType::INT16)
         m_b.setPrecision(image_sample, spv::DecorationRelaxedPrecision);
 
@@ -184,7 +317,8 @@ void shader::usse::USSETranslatorVisitor::do_texture_queries(const NonDependentT
         spv::Id fetch_result = do_fetch_texture(m_b.createLoad(texture_query.sampler, spv::NoPrecision), texture_query.sampler_index, texture_query.dim, coord_inst, store_op.type, proj ? 4 : 0, 0);
         store_op.num = texture_query.dest_offset;
 
-        const Imm4 mask = (1U << texture_query.component_count) - 1;
+        const uint8_t stored_components = texture_query.store_component_count ? texture_query.store_component_count : texture_query.component_count;
+        const Imm4 mask = (1U << stored_components) - 1;
 
         store(store_op, fetch_result, mask);
     }
@@ -234,7 +368,7 @@ bool USSETranslatorVisitor::smp(
             return true;
         }
 
-        if (sb_mode != 0 || lod_mode != 2) {
+        if (sb_mode != 0) {
             LOG_ERROR("Unhandled load using texture buffer with sb mode {} and lod mode {}", sb_mode, lod_mode);
             return true;
         }
@@ -248,7 +382,7 @@ bool USSETranslatorVisitor::smp(
     const SamplerInfo &sampler = is_texture_buffer_load ? m_spirv_params.samplers.begin()->second : m_spirv_params.samplers.at(inst.opr.src1.num);
 
     constexpr DataType tb_dest_fmt[] = {
-        DataType::F32,
+        DataType::UNK, // As per: https://github.com/Vita3K/Vita3K/pull/4097 (The texel stays in the texture's integral format, packed - previously: F32)
         DataType::UNK,
         DataType::F16,
         DataType::F32
@@ -320,7 +454,7 @@ bool USSETranslatorVisitor::smp(
 
         // query info
         const spv::Id query_lod = m_b.createOp(spv::OpImageQueryLod, type_f32_v[2], { image_sampler, coords });
-        const spv::Id lod = m_b.createBinOp(spv::OpVectorExtractDynamic, type_f32, query_lod, m_b.makeIntConstant(0));
+        const spv::Id lod = utils::extract_vector_component(m_b, type_f32, query_lod, m_b.makeIntConstant(0));
 
         // xy are the uv coefficients
         spv::Id uv = get_uv_coeffs(m_b, std_builtins, image_sampler, coords, lod);
@@ -334,8 +468,8 @@ bool USSETranslatorVisitor::smp(
         uv = utils::convert_to_int(m_b, m_util_funcs, uv, DataType::UINT8, true);
         tri_frac = utils::convert_to_int(m_b, m_util_funcs, tri_frac, DataType::UINT8, true);
 
-        const spv::Id u = m_b.createBinOp(spv::OpVectorExtractDynamic, type_ui32, uv, m_b.makeIntConstant(0));
-        const spv::Id v = m_b.createBinOp(spv::OpVectorExtractDynamic, type_ui32, uv, m_b.makeIntConstant(1));
+        const spv::Id u = utils::extract_vector_component(m_b, type_ui32, uv, m_b.makeIntConstant(0));
+        const spv::Id v = utils::extract_vector_component(m_b, type_ui32, uv, m_b.makeIntConstant(1));
 
         const spv::Id result = m_b.createCompositeConstruct(v4u32, { u, v, tri_frac, lod_level });
         inst.opr.dest.type = DataType::UINT8;
@@ -391,18 +525,26 @@ bool USSETranslatorVisitor::smp(
             std::vector<int> sampler_indices;
             std::vector<int> index_to_segment;
             constexpr int sa_count = 32 * 4;
-            // if dim is 2, do not look for cubes and if dim is 3, only look for cubes
-            const bool request_cube = dim == 3;
+            // the instruction dim is only the coord count the compiler allocated, so a 2D texture can still turn up in an SMP3d switch
+            spv::Id coords_2d = coords;
+            if (dim == 3)
+                coords_2d = m_b.createOp(spv::OpVectorShuffle, type_f32_v[2], { { true, coords }, { true, coords }, { false, 0 }, { false, 1 } });
             for (auto &smp : m_spirv_params.samplers) {
                 if (smp.first < sa_count)
                     continue;
 
-                if (request_cube != smp.second.is_cube)
+                if (dim == 2 && smp.second.is_cube)
                     continue;
 
                 samplers.push_back(&smp.second);
                 index_to_segment.push_back(sampler_indices.size());
                 sampler_indices.push_back(smp.first - sa_count);
+            }
+
+            if (samplers.empty()) {
+                LOG_ERROR("Texture buffer load with dim {} has no compatible sampler", dim);
+                store(inst.opr.dest, utils::make_uniform_vector_from_type(m_b, type_f32_v[4], 0.0f), 0b1111);
+                return true;
             }
 
             std::vector<spv::Block *> segment_blocks;
@@ -414,7 +556,8 @@ bool USSETranslatorVisitor::smp(
                 if (tb_dest_fmt[fconv_type] == DataType::UNK)
                     inst.opr.dest.type = smp->component_type;
 
-                spv::Id result = do_fetch_texture(m_b.createLoad(smp->id, spv::NoPrecision), smp->index, dim, { coords, static_cast<int>(DataType::F32) }, inst.opr.dest.type, lod_mode, extra1);
+                const int case_dim = smp->is_cube ? 3 : 2;
+                spv::Id result = do_fetch_texture(m_b.createLoad(smp->id, spv::NoPrecision), smp->index, case_dim, { smp->is_cube ? coords : coords_2d, static_cast<int>(DataType::F32) }, inst.opr.dest.type, lod_mode, extra1, extra2);
                 const Imm4 dest_mask = (1U << smp->component_count) - 1;
                 store(inst.opr.dest, result, dest_mask);
 
@@ -449,7 +592,7 @@ bool USSETranslatorVisitor::smp(
                 std::vector<spv::Id> comps_alone;
                 for (int pixel = 0; pixel < 4; pixel++) {
                     for (int comp = 0; comp < sampler.component_count; comp++) {
-                        comps_alone.push_back(m_b.createBinOp(spv::OpVectorExtractDynamic, comp_type, g4_comps[comp], m_b.makeIntConstant(pixel)));
+                        comps_alone.push_back(utils::extract_vector_component(m_b, comp_type, g4_comps[comp], m_b.makeIntConstant(pixel)));
                     }
                 }
 
@@ -470,8 +613,8 @@ bool USSETranslatorVisitor::smp(
                 // however, looking at the generated shader code in some games, it looks like the coefficients are
                 // expected to be in this order but reversed...
                 const spv::Id one = m_b.makeFloatConstant(1.0);
-                const spv::Id u = m_b.createBinOp(spv::OpVectorExtractDynamic, type_f32, uv, m_b.makeIntConstant(0));
-                const spv::Id v = m_b.createBinOp(spv::OpVectorExtractDynamic, type_f32, uv, m_b.makeIntConstant(1));
+                const spv::Id u = utils::extract_vector_component(m_b, type_f32, uv, m_b.makeIntConstant(0));
+                const spv::Id v = utils::extract_vector_component(m_b, type_f32, uv, m_b.makeIntConstant(1));
 
                 const spv::Id onemu = m_b.createBinOp(spv::OpFSub, type_f32, one, u);
                 m_b.setPrecision(onemu, spv::DecorationRelaxedPrecision);

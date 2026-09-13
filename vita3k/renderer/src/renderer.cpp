@@ -19,6 +19,10 @@
 #include <renderer/state.h>
 #include <renderer/types.h>
 
+#include <atomic>
+#include <chrono>
+#include <mutex>
+
 #include <dialog/state.h>
 #include <overlay/common_dialog.h>
 #include <overlay/display_manager.h>
@@ -46,6 +50,11 @@ void State::update_overlays() {
             m_shaders_compiled_count += newly_compiled;
             shaders_count_compiled = 0;
             m_shaders_compiled_time = now;
+            if (current_backend == Backend::Vulkan) {
+                constexpr bool log_pipeline_bursts = false;
+                if constexpr (log_pipeline_bursts)
+                    LOG_INFO("[PIPELINE] {} pipeline(s) compiled in this burst ({} since this notice began); key normalisation has avoided {} redundant compile(s) so far this session", newly_compiled, m_shaders_compiled_count, pipelines_redundant_avoided);
+            }
 
             auto notice = overlay_manager->get<overlay::shader_compile_notice>();
             if (!notice)
@@ -170,8 +179,10 @@ void set_stencil_ref(State &state, Context *ctx, bool is_front, unsigned char sr
     renderer::add_state_set_command(ctx, renderer::GXMState::StencilRef, is_front, sref);
 }
 
-void set_program(State &state, Context *ctx, Ptr<const void> program, const bool is_fragment) {
-    renderer::add_state_set_command(ctx, renderer::GXMState::Program, program, is_fragment);
+void set_program(State &state, Context *ctx, Ptr<const void> program, const std::shared_ptr<ProgramBinding> &binding, bool is_fragment) {
+    auto *binding_payload = new std::shared_ptr<ProgramBinding>(binding);
+    if (!renderer::add_state_set_command(ctx, renderer::GXMState::Program, program, binding_payload, is_fragment))
+        delete binding_payload;
 }
 
 void set_cull_mode(State &state, Context *ctx, SceGxmCullMode cull) {

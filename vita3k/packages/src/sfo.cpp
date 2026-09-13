@@ -25,6 +25,8 @@
 
 #include <packages/sfo.h>
 
+#include <util/log.h>
+
 #include <boost/algorithm/string/trim.hpp>
 
 #include <algorithm>
@@ -74,9 +76,10 @@ bool get_data_by_key(std::string &out_data, SfoFile &file, const std::string &ke
     return true;
 }
 
-void get_param_info(sfo::SfoAppInfo &app_info, const vfs::FileBuffer &param, int sys_lang) {
+bool get_param_info(sfo::SfoAppInfo &app_info, const vfs::FileBuffer &param, int sys_lang) {
     SfoFile sfo_handle;
-    sfo::load(sfo_handle, param);
+    if (!sfo::load(sfo_handle, param))
+        return false;
     sfo::get_data_by_key(app_info.app_version, sfo_handle, "APP_VER");
     if (app_info.app_version[0] == '0')
         app_info.app_version.erase(app_info.app_version.begin());
@@ -101,7 +104,17 @@ bool load(SfoFile &sfile, const std::vector<uint8_t> &content) {
         return false;
     }
 
+    if (content.size() < sizeof(SfoHeader)) {
+        LOG_ERROR("param.sfo rejected: buffer too small ({} bytes, header needs {})", content.size(), sizeof(SfoHeader));
+        return false;
+    }
+
     memcpy(&sfile.header, content.data(), sizeof(SfoHeader));
+
+    if (sfile.header.magic != 0x46535121) {
+        LOG_ERROR("param.sfo rejected: bad magic 0x{:08X} (expected 0x46535000), buffer size {}", sfile.header.magic, content.size());
+        return false;
+    }
 
     sfile.entries.resize(sfile.header.tables_entries + 1);
 

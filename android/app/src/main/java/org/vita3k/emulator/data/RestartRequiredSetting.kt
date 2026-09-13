@@ -12,7 +12,8 @@ enum class RestartRequiredSetting(val nativeId: Int, @StringRes val labelResId: 
     ResolutionMultiplier(5, R.string.settings_gpu_resolution),
     MemoryMapping(6, R.string.settings_gpu_memory_mapping),
     AudioBackend(7, R.string.settings_audio_backend),
-    ValidationLayer(8, R.string.settings_debug_validation_layer);
+    ValidationLayer(8, R.string.settings_debug_validation_layer),
+    AccurateThreadScheduling(9, R.string.settings_gpu_accurate_scheduling);
 
     companion object {
         fun fromNative(values: IntArray): List<RestartRequiredSetting> {
