@@ -331,9 +331,11 @@ struct Rack : public MempoolObject {
 
     std::vector<Ptr<Voice>> voices;
     std::vector<std::unique_ptr<Module>> modules;
+    Ptr<void> user_data;
 
     explicit Rack(System *mama, const Ptr<void> memspace, const uint32_t memspace_size);
 
+    SceNgsCallbackInfo release_callback_info(const MemState &mem);
     static uint32_t get_required_memspace_size(MemState &mem, SceNgsRackDescription *description);
 };
 
@@ -357,6 +359,7 @@ bool init_system(State &ngs, const MemState &mem, SceNgsSystemInitParams *parame
 void release_system(State &ngs, const MemState &mem, System *system);
 bool init_rack(State &ngs, const MemState &mem, System *system, SceNgsBufferInfo *init_info, const SceNgsRackDescription *description);
 void release_rack(State &ngs, const MemState &mem, System *system, Rack *rack);
+void invoke_callback(KernelState &kernel, const MemState &mem, const SceUID thread_id, Ptr<void> callback, const SceNgsCallbackInfo &info);
 
 void voice_definition_init(State &ngs, MemState &mem);
 Ptr<VoiceDefinition> get_voice_definition(State &ngs, MemState &mem, ngs::BussType type);

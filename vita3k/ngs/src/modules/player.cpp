@@ -24,6 +24,10 @@
 
 namespace ngs {
 
+static int32_t valid_buffer_index(const int32_t index) {
+    return (index >= 0 && index < SCE_NGS_PLAYER_MAX_BUFFERS) ? index : -1;
+}
+
 std::unique_ptr<ModuleLogicalState> PlayerModule::create_logical_state() const {
     return std::make_unique<PlayerLogicalState>();
 }
@@ -40,7 +44,7 @@ void PlayerModule::on_state_change(const MemState &mem, ModuleData &data, const 
     if (data.parent->state == VOICE_STATE_ACTIVE && previous == VOICE_STATE_AVAILABLE) {
         state->samples_generated_since_key_on = 0;
         state->bytes_consumed_since_key_on = 0;
-        state->current_buffer = params->start_buffer;
+        state->current_buffer = valid_buffer_index(params->start_buffer);
         state->current_byte_position_in_buffer = params->start_bytes;
         logical->current_loop_count = 0;
         logical->decoded_pcm.clear();
@@ -51,7 +55,7 @@ void PlayerModule::on_state_change(const MemState &mem, ModuleData &data, const 
 
         std::memset(&logical->adpcm_history, 0, sizeof(logical->adpcm_history));
     } else if (data.parent->is_keyed_off) {
-        state->current_buffer = params->start_buffer;
+        state->current_buffer = valid_buffer_index(params->start_buffer);
         state->current_byte_position_in_buffer = params->start_bytes;
         logical->current_loop_count = 0;
         logical->rate_resampler.reset();
@@ -184,6 +188,7 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
     constexpr int8_t max_starved_ticks = 16;
 
     while (static_cast<int>(logical->decoded_pcm.available_frames()) < granularity) {
+        state->current_buffer = valid_buffer_index(state->current_buffer);
         if ((state->current_buffer == -1)
             || !params->buffer_params[state->current_buffer].buffer
             || (params->buffer_params[state->current_buffer].bytes_count == 0)) {
@@ -220,7 +225,7 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
             // Enable looping over the buffer if needed
             if (params->buffer_params[state->current_buffer].loop_count != -1
                 && logical->current_loop_count > params->buffer_params[state->current_buffer].loop_count) {
-                state->current_buffer = params->buffer_params[state->current_buffer].next_buffer_index;
+                state->current_buffer = valid_buffer_index(params->buffer_params[state->current_buffer].next_buffer_index);
                 logical->current_loop_count = 0;
 
                 if (state->current_buffer == -1) {

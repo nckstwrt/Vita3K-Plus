@@ -31,6 +31,10 @@ namespace ngs {
 SwrContext *Atrac9Module::swr_mono_to_stereo = nullptr;
 SwrContext *Atrac9Module::swr_stereo = nullptr;
 
+static int32_t valid_buffer_index(const int32_t index) {
+    return (index >= 0 && index < SCE_NGS_AT9_MAX_BUFFER_PARAMS) ? index : -1;
+}
+
 std::unique_ptr<ModuleLogicalState> Atrac9Module::create_logical_state() const {
     return std::make_unique<Atrac9LogicalState>();
 }
@@ -107,7 +111,7 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
         state->current_byte_position_in_buffer = 0;
 
         if ((bufparam.loop_count != -1) && (logical->current_loop_count > bufparam.loop_count)) {
-            state->current_buffer = bufparam.next_buffer_index;
+            state->current_buffer = valid_buffer_index(bufparam.next_buffer_index);
             logical->current_loop_count = 0;
 
             if (state->current_buffer == -1) {
@@ -275,6 +279,12 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
         state->current_byte_position_in_buffer += runtime->decoder->get_es_size();
     }
 
+    if (got_decode_error) {
+        // the tail of the superframe never decoded (playing it replays the previous one)
+        std::fill(runtime->decoded_superframe_samples.begin() + decoded_superframe_pos,
+            runtime->decoded_superframe_samples.end(), 0);
+    }
+
     {
         float sf_peak = 0.0f;
         const float *sf = reinterpret_cast<const float *>(runtime->decoded_superframe_samples.data());
@@ -387,6 +397,7 @@ bool Atrac9Module::process(KernelState &kern, const MemState &mem, const SceUID 
     Atrac9RuntimeState *runtime = data.get_runtime_state<Atrac9RuntimeState>();
     assert(state);
 
+    state->current_buffer = valid_buffer_index(state->current_buffer);
     if (state->current_buffer == -1) {
         return true;
     }

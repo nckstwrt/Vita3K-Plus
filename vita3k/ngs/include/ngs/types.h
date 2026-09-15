@@ -49,7 +49,7 @@ struct SceNgsRackDescription {
     int32_t channels_per_voice;
     int32_t max_patches_per_input;
     int32_t patches_per_output;
-    Ptr<void> unk14;
+    Ptr<void> user_data;
 };
 
 struct SceNgsCallbackInfo {

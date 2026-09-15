@@ -281,17 +281,17 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
     }
 
     while (!operations_pending.empty()) {
-        OperationPending &op = operations_pending.front();
+        const OperationPending op = operations_pending.front();
+        operations_pending.pop();
 
         switch (op.type) {
-        case PendingType::ReleaseRack:
+        case PendingType::ReleaseRack: {
+            const SceNgsCallbackInfo info = op.release_data.rack->release_callback_info(mem);
             release_rack(*op.release_data.state, mem, op.system, op.release_data.rack);
-            // run callback (we know it is defined)
-            kern.get_thread(thread_id)->run_callback(op.release_data.callback, { Ptr<void>(op.release_data.rack, mem).address() });
+            ngs::invoke_callback(kern, mem, thread_id, Ptr<void>(op.release_data.callback), info);
             break;
         }
-
-        operations_pending.pop();
+        }
     }
 
     is_updating = false;

@@ -330,24 +330,35 @@ bool Voice::set_preset(const MemState &mem, const SceNgsVoicePreset *preset) {
 
 void Voice::invoke_callback(KernelState &kernel, const MemState &mem, const SceUID thread_id, Ptr<void> callback, Ptr<void> user_data,
     const uint32_t module_id, const uint32_t reason1, const uint32_t reason2, Address reason_ptr) {
+    const SceNgsCallbackInfo info{
+        Ptr<void>(this, mem), Ptr<void>(rack, mem), module_id, reason1, reason2, Ptr<void>(reason_ptr), user_data
+    };
+    ngs::invoke_callback(kernel, mem, thread_id, callback, info);
+}
+
+void invoke_callback(KernelState &kernel, const MemState &mem, const SceUID thread_id, Ptr<void> callback, const SceNgsCallbackInfo &info) {
     if (!callback) {
         return;
     }
 
+    // the thread can be gone by the time a deferred callback runs
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
-    const Address callback_info_addr = stack_alloc(*thread->cpu, sizeof(SceNgsCallbackInfo));
+    if (!thread) {
+        return;
+    }
 
-    SceNgsCallbackInfo *info = Ptr<SceNgsCallbackInfo>(callback_info_addr).get(mem);
-    info->rack_handle = Ptr<void>(rack, mem);
-    info->voice_handle = Ptr<void>(this, mem);
-    info->module_id = module_id;
-    info->callback_reason = reason1;
-    info->callback_reason_2 = reason2;
-    info->callback_ptr = Ptr<void>(reason_ptr);
-    info->userdata = user_data;
+    const Address callback_info_addr = stack_alloc(*thread->cpu, sizeof(SceNgsCallbackInfo));
+    *Ptr<SceNgsCallbackInfo>(callback_info_addr).get(mem) = info;
 
     thread->run_callback(callback.address(), { callback_info_addr });
     stack_free(*thread->cpu, sizeof(SceNgsCallbackInfo));
+}
+
+SceNgsCallbackInfo Rack::release_callback_info(const MemState &mem) {
+    SceNgsCallbackInfo info{};
+    info.rack_handle = Ptr<void>(this, mem);
+    info.userdata = user_data;
+    return info;
 }
 
 uint32_t System::get_required_memspace_size(SceNgsSystemInitParams *parameters) {
@@ -435,6 +446,7 @@ bool init_rack(State &ngs, const MemState &mem, System *system, SceNgsBufferInfo
     rack->channels_per_voice = description->channels_per_voice;
     rack->max_patches_per_input = description->max_patches_per_input;
     rack->patches_per_output = description->patches_per_output;
+    rack->user_data = description->user_data;
 
     // Alloc spaces for voice
     rack->voices.resize(description->voice_count);
@@ -476,6 +488,31 @@ void release_rack(State &ngs, const MemState &mem, System *system, Rack *rack) {
     // this function should only be called outside of ngs update and with the scheduler mutex acquired (except when releasing the system)
     if (!rack)
         return;
+
+    // patches of other racks point at voices about to be destroyed
+    for (Rack *source_rack : system->racks) {
+        if (!source_rack || source_rack == rack)
+            continue;
+
+        for (const auto &voice : source_rack->voices) {
+            Voice *source = voice.get(mem);
+            if (!source)
+                continue;
+
+            const std::lock_guard<std::mutex> guard(*source->voice_mutex);
+            for (const auto &output : source->patches) {
+                for (const Ptr<Patch> &handle : output) {
+                    Patch *patch = handle.get(mem);
+                    const Voice *dest = patch ? patch->dest.get(mem) : nullptr;
+                    if (dest && dest->rack == rack) {
+                        patch->output_sub_index = -1;
+                        patch->dest = Ptr<Voice>();
+                        patch->dest_index = -1;
+                    }
+                }
+            }
+        }
+    }
 
     // remove all queued voices
     for (const auto &voice : rack->voices) {

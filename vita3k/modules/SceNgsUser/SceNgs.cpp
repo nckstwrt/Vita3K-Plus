@@ -21,6 +21,7 @@
 
 #include <kernel/state.h>
 #include <kernel/thread/thread_state.h>
+#include <mutex>
 #include <ngs/state.h>
 #include <ngs/system.h>
 #include <unordered_map>
@@ -59,6 +60,37 @@ struct SceNgsPatchDeliveryInfo {
 };
 
 static_assert(sizeof(SceNgsPatchDeliveryInfo) == 20);
+
+static ngs::Voice *find_patch_source_voice(ngs::State &ngs, const MemState &mem, const Ptr<ngs::Patch> patch,
+    std::unique_lock<std::recursive_mutex> &scheduler_lock) {
+    for (ngs::System *system : ngs.systems) {
+        if (!system)
+            continue;
+
+        std::unique_lock<std::recursive_mutex> lock(system->voice_scheduler.mutex);
+        for (ngs::Rack *rack : system->racks) {
+            if (!rack)
+                continue;
+
+            for (const Ptr<ngs::Voice> &voice_handle : rack->voices) {
+                ngs::Voice *voice = voice_handle.get(mem);
+                if (!voice)
+                    continue;
+
+                for (const auto &output : voice->patches) {
+                    for (const Ptr<ngs::Patch> &owned : output) {
+                        if (owned.address() == patch.address()) {
+                            scheduler_lock = std::move(lock);
+                            return voice;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return nullptr;
+}
 
 enum SceNgsErrorCode : uint32_t {
     SCE_NGS_OK = 0,
@@ -222,9 +254,14 @@ EXPORT(SceInt32, sceNgsPatchGetInfo, ngs::Patch *patch, SceNgsPatchAudioPropInfo
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
-    ngs::Voice *source = patch->source.get(emuenv.mem);
+    std::unique_lock<std::recursive_mutex> scheduler_lock;
+    ngs::Voice *source = find_patch_source_voice(emuenv.ngs, emuenv.mem, Ptr<ngs::Patch>(patch, emuenv.mem), scheduler_lock);
+    if (!source) {
+        return RET_ERROR(SCE_NGS_ERROR);
+    }
+
     ngs::Voice *dest = patch->dest.get(emuenv.mem);
-    if (!source || !dest) {
+    if (!dest) {
         return RET_ERROR(SCE_NGS_ERROR);
     }
 
@@ -255,7 +292,8 @@ EXPORT(int, sceNgsPatchRemoveRouting, Ptr<ngs::Patch> patch) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
-    ngs::Voice *source = patch.get(emuenv.mem)->source.get(emuenv.mem);
+    std::unique_lock<std::recursive_mutex> scheduler_lock;
+    ngs::Voice *source = find_patch_source_voice(emuenv.ngs, emuenv.mem, patch, scheduler_lock);
     if (!source || !source->remove_patch(emuenv.mem, patch)) {
         return RET_ERROR(SCE_NGS_ERROR);
     }
@@ -332,14 +370,11 @@ EXPORT(SceInt32, sceNgsRackRelease, ngs::Rack *rack, Ptr<void> callback) {
 
     std::unique_lock<std::recursive_mutex> lock(rack->system->voice_scheduler.mutex);
     if (!rack->system->voice_scheduler.is_updating) {
-        const Address released_handle = Ptr<void>(rack, emuenv.mem).address();
-        const Address release_cb = callback.address();
+        const SceNgsCallbackInfo info = rack->release_callback_info(emuenv.mem);
         ngs::release_rack(emuenv.ngs, emuenv.mem, rack->system, rack);
-        if (release_cb) {
+        if (callback) {
             lock.unlock();
-            const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
-            if (thread)
-                thread->run_callback(release_cb, { released_handle });
+            ngs::invoke_callback(emuenv.kernel, emuenv.mem, thread_id, callback, info);
         }
     } else if (!callback) {
         // wait for the update to finish
