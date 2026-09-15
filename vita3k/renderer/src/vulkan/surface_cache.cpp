@@ -2037,6 +2037,7 @@ Framebuffer &VKSurfaceCache::retrieve_framebuffer_handle(MemState &mem, SceGxmCo
     } else {
         color_result.view = target->color.view;
         color_result.base_image = &target->color;
+        last_written_surface = nullptr;
     }
 
     if (depth_stencil) {
@@ -2156,8 +2157,11 @@ bool VKSurfaceCache::check_for_surface(MemState &mem, Address source_address, Ca
             surface_cmd = vkutil::create_single_time_command(state.device, state.multithread_command_pool);
 
             context.render_cmd = surface_cmd;
+            // this can run mid-scene so the scene's own surface must survive the sync
+            ColorSurfaceCacheInfo *const prev_last_written = last_written_surface;
             last_written_surface = &surface;
             returned_info = perform_surface_sync();
+            last_written_surface = (prev_last_written == &surface) ? nullptr : prev_last_written;
             context.render_cmd = prev_cmd;
 
             surface_cmd.end();
@@ -2315,6 +2319,13 @@ bool VKSurfaceCache::sync_surface_for_gpu_read(Address address, uint32_t size) {
 }
 
 ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
+    struct ForgetWrittenSurface {
+        ColorSurfaceCacheInfo *&surface;
+        ~ForgetWrittenSurface() {
+            surface = nullptr;
+        }
+    } forget_written_surface{ last_written_surface };
+
     // surface sync is supported only if memory mapping is enabled
     if (!state.features.enable_memory_mapping)
         return nullptr;

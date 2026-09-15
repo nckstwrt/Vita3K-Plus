@@ -29,9 +29,6 @@
 
 TRACY_MODULE_NAME(SceNgs);
 
-// Voice whose sceNgsVoiceGetOutputPatch just came up empty; the paired SetVolumesMatrix follows on this thread.
-static thread_local ngs::Voice *last_missing_output_patch_voice = nullptr;
-
 struct SceNgsVolumeMatrix {
     SceFloat32 matrix[SCE_NGS_MAX_SYSTEM_CHANNELS][SCE_NGS_MAX_SYSTEM_CHANNELS];
 };
@@ -70,7 +67,8 @@ enum SceNgsErrorCode : uint32_t {
     SCE_NGS_ERROR_INVALID_STATE = 0x804A0010,
     SCE_NGS_ERROR_PARAM_OUT_OF_RANGE = 0x804A0009,
     SCE_NGS_ERROR_INVALID_HANDLE = 0x804A000C,
-    SCE_NGS_SIZE_MISMATCH = 0x804A000D
+    SCE_NGS_SIZE_MISMATCH = 0x804A000D,
+    SCE_NGS_ERROR_PATCH_NOT_AVAIL = 0x804A000E
 };
 
 enum SceNgsVoiceState : uint32_t {
@@ -755,7 +753,7 @@ EXPORT(SceInt32, sceNgsVoiceGetOutputPatch, ngs::Voice *voice, const SceInt32 ou
     }
 
     if ((output_index >= static_cast<SceInt32>(voice->rack->vdef->output_count)) || (output_subindex >= voice->rack->patches_per_output)) {
-        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        return RET_ERROR(SCE_NGS_ERROR_PATCH_NOT_AVAIL);
     }
 
     *patch = voice->patches[output_index][output_subindex];
@@ -765,10 +763,8 @@ EXPORT(SceInt32, sceNgsVoiceGetOutputPatch, ngs::Voice *voice, const SceInt32 ou
         *patch = Ptr<ngs::Patch>(0);
     }
 
-    // Remember the voice so the paired SetVolumesMatrix can capture the implicit master-routing gain.
-    last_missing_output_patch_voice = patch_missing ? voice : nullptr;
-
-    return 0;
+    // games test this result to decide whether to create the routing themselves
+    return patch_missing ? static_cast<SceInt32>(SCE_NGS_ERROR_PATCH_NOT_AVAIL) : SCE_NGS_OK;
 }
 
 EXPORT(int, sceNgsVoiceGetParamsOutOfRange) {
@@ -965,17 +961,6 @@ EXPORT(SceInt32, sceNgsVoicePatchSetVolumesMatrix, ngs::Patch *patch, const SceN
     TRACY_FUNC(sceNgsVoicePatchSetVolumesMatrix, patch, matrix);
     if (!emuenv.cfg.current_config.ngs_enable)
         return 0;
-
-    // Gain for a routing GetOutputPatch could not hand back: capture it as the voice's implicit master-mix volume.
-    if ((!patch || patch->output_sub_index == -1) && matrix && last_missing_output_patch_voice) {
-        ngs::Voice *voice = last_missing_output_patch_voice;
-        last_missing_output_patch_voice = nullptr;
-
-        const std::lock_guard<std::mutex> guard(*voice->voice_mutex);
-        memcpy(voice->implicit_volume_matrix, matrix->matrix, sizeof(voice->implicit_volume_matrix));
-
-        return SCE_NGS_OK;
-    }
 
     if (!patch || patch->output_sub_index == -1)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);

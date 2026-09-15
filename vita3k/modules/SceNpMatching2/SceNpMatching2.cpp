@@ -24,11 +24,15 @@
 TRACY_MODULE_NAME(SceNpMatching2);
 
 enum SceNpMatching2ErrorCode {
-    SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_STARTED = 0x80550C08
+    SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_STARTED = 0x80550C08,
+    SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT = 0x80550C0A
 };
 
-constexpr uint32_t SCE_NP_MATCHING2_CONTEXT_EVENT_START = 2;
-constexpr uint32_t MATCHING2_NO_SERVER_ERROR = 0x80410123;
+// A context start reports its completion or its failure as STARTED with cause CONTEXT_ACTION
+constexpr uint32_t SCE_NP_MATCHING2_CONTEXT_EVENT_STARTED = 0x6F02;
+constexpr uint32_t SCE_NP_MATCHING2_EVENT_CAUSE_CONTEXT_ACTION = 11;
+// Processing to start the context was aborted, as on a network disconnection
+constexpr uint32_t SCE_NP_COMMUNITY_ERROR_ABORTED = 0x80550707;
 
 EXPORT(int, sceNpMatching2AbortContextStart) {
     return UNIMPLEMENTED();
@@ -47,7 +51,7 @@ EXPORT(int, sceNpMatching2ContextStart, SceUInt32 ctxId, SceUInt32 pad, SceUInt3
         return RET_ERROR(SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_STARTED);
     }
 
-    matching2.pending.push_back({ ctxId, SCE_NP_MATCHING2_CONTEXT_EVENT_START, 0, MATCHING2_NO_SERVER_ERROR });
+    matching2.pending.push_back({ ctxId, SCE_NP_MATCHING2_CONTEXT_EVENT_STARTED, SCE_NP_MATCHING2_EVENT_CAUSE_CONTEXT_ACTION, SCE_NP_COMMUNITY_ERROR_ABORTED });
     return 0;
 }
 
@@ -59,7 +63,7 @@ EXPORT(int, sceNpMatching2ContextStop, SceUInt32 ctxId) {
 EXPORT(int, sceNpMatching2CreateContext, Ptr<void> npId, Ptr<void> commId, Ptr<void> passphrase, SceUInt16 *ctxId) {
     TRACY_FUNC(sceNpMatching2CreateContext, npId, commId, passphrase, ctxId);
     if (!ctxId)
-        return UNIMPLEMENTED();
+        return RET_ERROR(SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT);
 
     NpMatching2State &matching2 = emuenv.np.matching2;
     std::lock_guard<std::mutex> lock(matching2.mutex);

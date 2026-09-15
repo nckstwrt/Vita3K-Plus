@@ -506,6 +506,16 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
         hash[0] ^= static_cast<uint8_t>(0xC0 + one_channel_source);
         version_suffix = fmt::format("c{}", one_channel_source);
     }
+    if (!is_vertex && program->is_native_color() && hints.output_register_format != SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED) {
+        hash[1] ^= static_cast<uint8_t>(0x80 + hints.output_register_format);
+        version_suffix += fmt::format("r{}", static_cast<int>(hints.output_register_format));
+    }
+    const SceGxmColorBaseFormat surface_base = gxm::get_base_format(hints.color_format);
+    if (!is_vertex && (program->is_frag_color_used() || surface_base == SCE_GXM_COLOR_BASE_FORMAT_F32F32)) {
+        for (int i = 0; i < 4; i++)
+            hash[2 + i] ^= static_cast<uint8_t>(static_cast<uint32_t>(surface_base) >> (8 * i));
+        version_suffix += fmt::format("s{:X}", static_cast<uint32_t>(surface_base));
+    }
 
     const vk::ShaderModule shader_compiling = std::bit_cast<vk::ShaderModule>(~0ULL);
 
@@ -551,7 +561,7 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
 
     const std::string hash_text = hex_string(hash);
 
-    LOG_INFO("Generating vulkan spv shader {}", hash_text);
+    LOG_DEBUG("Generating vulkan spv shader {}", hash_text);
     const std::string shader_version = fmt::format("vk{}{}", shader::CURRENT_VERSION, version_suffix);
 
     shader::usse::SpirvCode source = load_spirv_shader(*program, state.features, true, hints, maskupdate, state.shaders_path, state.shaders_log_path, shader_version, true);
@@ -1444,6 +1454,16 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     key ^= static_cast<uint64_t>(type);
     raw_key ^= static_cast<uint64_t>(type);
 
+    uint64_t variant_bits = 0;
+    const SceGxmProgram *key_fragment_gxp = fragment_program_binding->program();
+    if (key_fragment_gxp && key_fragment_gxp->is_native_color() && fragment_program.output_register_format != SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED)
+        variant_bits |= static_cast<uint64_t>(fragment_program.output_register_format) << 56;
+    const int key_one_channel = gxm::one_channel_source_component(record.color_surface.colorFormat);
+    if (key_one_channel > 0)
+        variant_bits |= static_cast<uint64_t>(key_one_channel) << 48;
+    key ^= variant_bits;
+    raw_key ^= variant_bits;
+
     // can't use constexpr because of apple clang...
     const vk::Pipeline pipeline_compiling = std::bit_cast<vk::Pipeline, uint64_t>(~0ULL);
     // a pipeline the driver refused: remembered so we don't recompile (and re-log) it on every
@@ -1481,7 +1501,7 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
         ? fragment_program_binding->fragment_program->output_register_format
         : SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED;
     // a native-colour program's register format has to agree with the surface it is drawn to
-    if (context.shader_hints.output_register_format != SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED) {
+    if (gxm::LOG_FRAGOUT && context.shader_hints.output_register_format != SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED) {
         static std::mutex fragout_mutex;
         static std::set<std::tuple<const SceGxmProgram *, uint32_t, int>> fragout_seen;
         const std::lock_guard<std::mutex> fragout_lock(fragout_mutex);

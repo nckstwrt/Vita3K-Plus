@@ -125,7 +125,7 @@ EXPORT(int, _sceIoOpen, const char *file, const int flags, const SceMode mode) {
         return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
     }
     const auto opened_fd = open_file(emuenv.io, file, flags, emuenv.vita_fs_path, export_name);
-    LOG_INFO("Opening file: {} -> {}", file, opened_fd < 0 ? fmt::format("FAILED {}", log_hex(static_cast<uint32_t>(opened_fd))) : fmt::format("fd {}", opened_fd));
+    LOG_TRACE("Opening file: {} -> {}", file, opened_fd < 0 ? fmt::format("FAILED {}", log_hex(static_cast<uint32_t>(opened_fd))) : fmt::format("fd {}", opened_fd));
     return opened_fd;
 }
 

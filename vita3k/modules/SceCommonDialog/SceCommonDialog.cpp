@@ -949,9 +949,11 @@ static void check_save_file(const uint32_t index, EmuEnvState &emuenv, const cha
                 vfs::read_file(VitaIoDevice::ux0, icon_buf_tmp, emuenv.vita_fs_path, thumbnail_path);
             } else if (iconBuf && (iconBufSize > 0)) {
                 const Address icon_start = empty_param->iconBuf.address();
-                if (is_valid_addr_range(emuenv.mem, icon_start, icon_start + iconBufSize - 1)) {
-                    icon_buf_tmp.insert(icon_buf_tmp.end(), iconBuf, iconBuf + iconBufSize);
-                } else {
+                const size_t icon_offset = icon_buf_tmp.size();
+                icon_buf_tmp.resize(icon_offset + iconBufSize);
+                // copy page by page so a buffer that straddles two host backings is read correctly
+                if (!debug_safe_copy_guest(emuenv.mem, icon_start, icon_buf_tmp.data() + icon_offset, iconBufSize)) {
+                    icon_buf_tmp.resize(icon_offset);
                     LOG_WARN("Save slot {} empty-param iconBuf 0x{:X} size 0x{:X} is not mapped - icon skipped", index, icon_start, iconBufSize);
                 }
             }

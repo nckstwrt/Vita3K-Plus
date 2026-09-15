@@ -14,5 +14,7 @@ std::optional<std::string> read_driver_library_name_from_meta(const fs::path &me
 std::optional<std::string> resolve_custom_driver_library_name(const fs::path &driver_path);
 bool is_custom_driver_loaded(const std::string &driver_name, uint32_t vendor_id, uint32_t driver_version, std::string_view device_name);
 PFN_vkGetInstanceProcAddr resolve_vk_get_instance_proc_addr(const std::string &driver_name);
+std::string device_summary();
+void log_device_identity();
 
 } // namespace android_driver

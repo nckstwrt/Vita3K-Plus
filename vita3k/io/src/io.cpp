@@ -632,6 +632,7 @@ int truncate_file(const SceUID fd, unsigned long long length, const IOState &io,
     if (fd < 0)
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
 
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
     const auto file = io.std_files.find(fd);
     if (file == io.std_files.end())
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
@@ -726,6 +727,7 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
         }
         LOG_TRACE_IF(log_file_op && log_file_stat, "{}: Statting file: {} ({})", export_name, file, device::construct_normalized_path(device, translated_path));
     } else { // We have previously opened and defined the location
+        const std::lock_guard<std::mutex> lock(io.file_mutex);
         const auto fd_file = io.std_files.find(fd);
         if (fd_file == io.std_files.end())
             return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
@@ -784,12 +786,17 @@ int stat_file_by_fd(IOState &io, const SceUID fd, SceIoStat *statp, const fs::pa
     assert(statp != nullptr);
     memset(statp, '\0', sizeof(SceIoStat));
 
-    const auto std_file = io.std_files.find(fd);
-    if (std_file == io.std_files.end()) {
-        return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+    std::string vita_loc;
+    {
+        const std::lock_guard<std::mutex> lock(io.file_mutex);
+        const auto std_file = io.std_files.find(fd);
+        if (std_file == io.std_files.end()) {
+            return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+        }
+        vita_loc = std_file->second.get_vita_loc();
     }
 
-    return stat_file(io, std_file->second.get_vita_loc(), statp, vita_fs_path, export_name, fd);
+    return stat_file(io, vita_loc.c_str(), statp, vita_fs_path, export_name, fd);
 }
 
 int close_file(IOState &io, const SceUID fd, const char *export_name) {

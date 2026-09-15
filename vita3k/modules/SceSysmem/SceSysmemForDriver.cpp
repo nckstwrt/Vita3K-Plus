@@ -268,24 +268,27 @@ EXPORT(int, ksceKernelFreeMemBlock, SceUID uid) {
 
     free(emuenv.mem, block->second->mappedBase.address());
 
+    // size is sizeof(SceKernelMemBlockInfo); allocation counted the mapped size
     switch (block->second->type) {
     case SCE_KERNEL_MEMBLOCK_TYPE_USER_RX:
     case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW:
     case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE:
-        state->allocated_user -= block->second->size;
+        state->allocated_user -= block->second->mappedSize;
         break;
     case SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW:
-        state->allocated_cdram -= block->second->size;
+        state->allocated_cdram -= block->second->mappedSize;
         break;
     case SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW:
     case SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW:
-        state->allocated_phycont -= block->second->size;
+        state->allocated_phycont -= block->second->mappedSize;
         break;
     default:
-        state->allocated_user -= block->second->size;
+        state->allocated_user -= block->second->mappedSize;
         break;
     }
 
+    // a VM block freed here must not be freed or uncounted again through the VM path
+    state->vm_blocks.erase(uid);
     state->blocks.erase(block);
     return SCE_KERNEL_OK;
 }

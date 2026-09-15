@@ -636,7 +636,7 @@ EXPORT(SceUID, sceIoOpen, const char *file, const int flags, const SceMode mode)
     std::this_thread::sleep_for(std::chrono::milliseconds(emuenv.cfg.current_config.file_loading_delay));
 
     const SceUID opened_fd = open_file(emuenv.io, file, flags, emuenv.vita_fs_path, export_name);
-    LOG_INFO("Opening file: {} flags=0x{:X} -> {}", file, flags, opened_fd < 0 ? fmt::format("FAILED {}", log_hex(static_cast<uint32_t>(opened_fd))) : fmt::format("fd {}", opened_fd));
+    LOG_TRACE("Opening file: {} flags=0x{:X} -> {}", file, flags, opened_fd < 0 ? fmt::format("FAILED {}", log_hex(static_cast<uint32_t>(opened_fd))) : fmt::format("fd {}", opened_fd));
     return opened_fd;
 }
 

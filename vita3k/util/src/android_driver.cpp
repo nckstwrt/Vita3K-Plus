@@ -8,13 +8,18 @@
 #include <SDL3/SDL_system.h>
 #include <android/api-level.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <jni.h>
+#include <sys/ioctl.h>
+#include <sys/system_properties.h>
+#include <unistd.h>
 
 #ifdef USE_ADRENO_TOOLS
 #include <adrenotools/driver.h>
 #endif
 
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <optional>
@@ -491,6 +496,140 @@ PFN_vkGetInstanceProcAddr resolve_vk_get_instance_proc_addr(const std::string &d
     }
 #endif
     return load_system_vk_get_instance_proc_addr();
+}
+
+} // namespace android_driver
+
+namespace {
+
+std::string system_property(const char *name) {
+    char value[PROP_VALUE_MAX] = {};
+    return __system_property_get(name, value) > 0 ? std::string(value) : std::string();
+}
+
+std::string first_line_of(const char *path) {
+    std::ifstream file(path, std::ios_base::in);
+    std::string line;
+    if (file.is_open())
+        std::getline(file, line);
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r' || line.back() == ' '))
+        line.pop_back();
+    return line;
+}
+
+// KGSL uapi subset laid out as in msm_kgsl.h
+struct KgslDevInfo {
+    unsigned int device_id;
+    unsigned int chip_id;
+    unsigned int mmu_enabled;
+    unsigned long gmem_gpubaseaddr;
+    unsigned int gpu_id;
+    size_t gmem_sizebytes;
+};
+
+struct KgslDeviceGetProperty {
+    unsigned int type;
+    void *value;
+    size_t sizebytes;
+};
+
+constexpr unsigned long kgsl_ioctl_device_getproperty = _IOWR(0x09, 0x2, KgslDeviceGetProperty);
+constexpr unsigned int kgsl_prop_device_info = 0x1;
+constexpr unsigned int kgsl_prop_gpu_model = 0x29;
+
+struct DeviceIdentity {
+    std::string manufacturer, brand, model, market_name, codename;
+    std::string android_release, api_level, oneui, fingerprint;
+    std::string soc_manufacturer, soc_model, chipname, board_platform, hardware;
+    std::string sysfs_gpu_model, sysfs_chip_id;
+    bool kgsl_opened = false;
+    bool ioctl_device_info = false;
+    unsigned int ioctl_chip_id = 0;
+    unsigned int ioctl_gpu_id = 0;
+    size_t ioctl_gmem_bytes = 0;
+    std::string ioctl_gpu_model;
+};
+
+const DeviceIdentity &device_identity() {
+    static const DeviceIdentity identity = [] {
+        DeviceIdentity id;
+        id.manufacturer = system_property("ro.product.manufacturer");
+        id.brand = system_property("ro.product.brand");
+        id.model = system_property("ro.product.model");
+        id.market_name = system_property("ro.product.marketname");
+        if (id.market_name.empty())
+            id.market_name = system_property("ro.product.vendor.marketname");
+        id.codename = system_property("ro.product.device");
+        id.android_release = system_property("ro.build.version.release");
+        id.api_level = system_property("ro.build.version.sdk");
+        id.oneui = system_property("ro.build.version.oneui");
+        id.fingerprint = system_property("ro.build.fingerprint");
+        id.soc_manufacturer = system_property("ro.soc.manufacturer");
+        id.soc_model = system_property("ro.soc.model");
+        id.chipname = system_property("ro.hardware.chipname");
+        id.board_platform = system_property("ro.board.platform");
+        id.hardware = system_property("ro.hardware");
+
+        id.sysfs_gpu_model = first_line_of("/sys/class/kgsl/kgsl-3d0/gpu_model");
+        id.sysfs_chip_id = first_line_of("/sys/class/kgsl/kgsl-3d0/gpu_chip_id");
+        if (id.sysfs_chip_id.empty())
+            id.sysfs_chip_id = first_line_of("/sys/class/kgsl/kgsl-3d0/chip_id");
+
+        const int fd = open("/dev/kgsl-3d0", O_RDWR | O_CLOEXEC);
+        if (fd >= 0) {
+            id.kgsl_opened = true;
+            KgslDevInfo info{};
+            KgslDeviceGetProperty info_prop{ kgsl_prop_device_info, &info, sizeof(info) };
+            if (ioctl(fd, kgsl_ioctl_device_getproperty, &info_prop) == 0) {
+                id.ioctl_device_info = true;
+                id.ioctl_chip_id = info.chip_id;
+                id.ioctl_gpu_id = info.gpu_id;
+                id.ioctl_gmem_bytes = info.gmem_sizebytes;
+            }
+            char model[32] = {};
+            KgslDeviceGetProperty model_prop{ kgsl_prop_gpu_model, model, sizeof(model) };
+            if (ioctl(fd, kgsl_ioctl_device_getproperty, &model_prop) == 0)
+                id.ioctl_gpu_model.assign(model, strnlen(model, sizeof(model)));
+            close(fd);
+        }
+        return id;
+    }();
+    return identity;
+}
+
+const std::string &or_dash(const std::string &value) {
+    static const std::string dash = "-";
+    return value.empty() ? dash : value;
+}
+
+} // namespace
+
+namespace android_driver {
+
+std::string device_summary() {
+    const DeviceIdentity &id = device_identity();
+    const std::string &soc = !id.soc_model.empty() ? id.soc_model : !id.chipname.empty() ? id.chipname : id.board_platform;
+    const std::string &gpu = !id.sysfs_gpu_model.empty() ? id.sysfs_gpu_model : id.ioctl_gpu_model;
+    const std::string chip = !id.sysfs_chip_id.empty() ? id.sysfs_chip_id : id.ioctl_device_info ? fmt::format("0x{:08X}", id.ioctl_chip_id) : std::string();
+    return fmt::format("{} {} ({}), Android {} (API {}), SoC {}, GPU {} chip {}", or_dash(id.manufacturer), or_dash(id.model),
+        or_dash(id.codename), or_dash(id.android_release), or_dash(id.api_level), or_dash(soc),
+        gpu.empty() ? std::string("- (no KGSL: not an Adreno device, or access denied)") : gpu, or_dash(chip));
+}
+
+void log_device_identity() {
+    const DeviceIdentity &id = device_identity();
+    LOG_INFO("[DEVICE] {} {} | brand {} | market name {} | codename {}", or_dash(id.manufacturer), or_dash(id.model),
+        or_dash(id.brand), or_dash(id.market_name), or_dash(id.codename));
+    LOG_INFO("[DEVICE] Android {} (API {}) | One UI {} | build {}", or_dash(id.android_release), or_dash(id.api_level),
+        or_dash(id.oneui), or_dash(id.fingerprint));
+    LOG_INFO("[DEVICE] SoC {} {} | chipname {} | board {} | hardware {}", or_dash(id.soc_manufacturer), or_dash(id.soc_model),
+        or_dash(id.chipname), or_dash(id.board_platform), or_dash(id.hardware));
+    LOG_INFO("[DEVICE] KGSL sysfs: gpu_model {} | chip_id {}", or_dash(id.sysfs_gpu_model), or_dash(id.sysfs_chip_id));
+    if (!id.kgsl_opened)
+        LOG_INFO("[DEVICE] KGSL ioctl: /dev/kgsl-3d0 not available (not an Adreno device, or access denied)");
+    else
+        LOG_INFO("[DEVICE] KGSL ioctl: device info {} (chip_id 0x{:08X} gpu_id {} gmem {} KiB) | gpu_model {}", id.ioctl_device_info ? "ok" : "failed",
+            id.ioctl_chip_id, id.ioctl_gpu_id, id.ioctl_gmem_bytes / 1024, or_dash(id.ioctl_gpu_model));
 }
 
 } // namespace android_driver

@@ -299,8 +299,6 @@ struct Voice {
     std::unique_ptr<std::mutex> voice_mutex;
     VoiceProduct products[MAX_VOICE_OUTPUT];
 
-    float implicit_volume_matrix[2][2] = { { 1.0f, 0.0f }, { 0.0f, 1.0f } };
-
     Ptr<void> finished_callback;
     Ptr<void> finished_callback_user_data;
 
@@ -352,10 +350,8 @@ struct System : public MempoolObject {
 };
 
 bool deliver_data(const MemState &mem, const std::vector<Voice *> &voice_queue, Voice *source, const uint8_t output_port, const VoiceProduct &data_to_deliver);
-bool deliver_data_to_master(const MemState &mem, Voice *master, Voice *source, const VoiceProduct &data_to_deliver);
 
 inline constexpr bool default_patch_volume_is_unity = true;
-inline constexpr bool use_implicit_master_routing = true;
 
 bool init_system(State &ngs, const MemState &mem, SceNgsSystemInitParams *parameters, Ptr<void> memspace, const uint32_t memspace_size);
 void release_system(State &ngs, const MemState &mem, System *system);

@@ -49,6 +49,9 @@ static const char *LOG_PATTERN = "%^[%H:%M:%S.%e] |%L| [%!]: %v%$";
 static constexpr size_t ASYNC_LOG_QUEUE_SIZE = 65536;
 static std::vector<spdlog::sink_ptr> sinks;
 static std::once_flag s_async_logging_once;
+#ifdef __ANDROID__
+static std::shared_ptr<spdlog::sinks::android_sink_mt> s_logcat_sink;
+#endif
 
 static std::function<void(std::string, int)> s_log_callback;
 static std::mutex s_log_callback_mutex;
@@ -88,12 +91,24 @@ void set_log_callback(std::function<void(std::string, int)> cb) {
     s_log_callback = std::move(cb);
 }
 
+#ifdef __ANDROID__
+// flushing every line and copying it to logcat only pay for themselves at debug or trace level
+static void apply_android_log_policy(const spdlog::level::level_enum log_level) {
+    const bool verbose = log_level <= spdlog::level::debug;
+    spdlog::flush_on(verbose ? spdlog::level::trace : spdlog::level::err);
+    if (s_logcat_sink)
+        s_logcat_sink->set_level(verbose ? spdlog::level::trace : spdlog::level::off);
+}
+#endif
+
 ExitCode init(const Root &root_paths, bool use_stdout) {
     sinks.clear();
-    if (use_stdout)
 #ifdef __ANDROID__
-        sinks.push_back(std::make_shared<spdlog::sinks::android_sink_mt>());
+    s_logcat_sink = use_stdout ? std::make_shared<spdlog::sinks::android_sink_mt>() : nullptr;
+    if (s_logcat_sink)
+        sinks.push_back(s_logcat_sink);
 #else
+    if (use_stdout)
         sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
 #endif
 
@@ -136,8 +151,9 @@ ExitCode init(const Root &root_paths, bool use_stdout) {
 #endif
 
 #ifdef __ANDROID__
-    // needed, otherwise the log file contains nothing
-    spdlog::flush_on(spdlog::level::trace);
+    // the app is usually killed rather than exited, so buffered lines go out every second; set_level picks the per-line policy
+    spdlog::flush_every(std::chrono::seconds(1));
+    apply_android_log_policy(spdlog::level::trace);
 #endif
 
     register_log_exception_handler();
@@ -165,6 +181,9 @@ ExitCode init(const Root &root_paths, bool use_stdout) {
 
 void set_level(spdlog::level::level_enum log_level) {
     spdlog::set_level(log_level);
+#ifdef __ANDROID__
+    apply_android_log_policy(log_level);
+#endif
 }
 
 ExitCode add_sink(const fs::path &log_path) {

@@ -1149,6 +1149,9 @@ void VKState::log_gpu_configuration(const Config &cfg) {
     LOG_INFO("  device: {} (type {}, vendor 0x{:X}, device 0x{:X})", physical_device_properties.deviceName.data(),
         vk::to_string(physical_device_properties.deviceType), physical_device_properties.vendorID,
         physical_device_properties.deviceID);
+#ifdef __ANDROID__
+    LOG_INFO("  android device: {}", android_driver::device_summary());
+#endif
     LOG_INFO("  api version: {}.{}.{}  driver version: 0x{:X}",
         VK_API_VERSION_MAJOR(physical_device_properties.apiVersion),
         VK_API_VERSION_MINOR(physical_device_properties.apiVersion),

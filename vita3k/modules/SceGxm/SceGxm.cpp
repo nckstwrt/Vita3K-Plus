@@ -4393,6 +4393,10 @@ EXPORT(int, sceGxmSetUniformDataF, void *uniformBuffer, const SceGxmProgramParam
     if (parameter->category != SceGxmParameterCategory::SCE_GXM_PARAMETER_CATEGORY_UNIFORM)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_VALUE);
 
+    const uint64_t parameter_components = static_cast<uint64_t>(parameter->component_count) * std::max<uint32_t>(parameter->array_size, 1);
+    if (static_cast<uint64_t>(componentOffset) + componentCount > parameter_components)
+        return RET_ERROR(SCE_GXM_ERROR_INVALID_VALUE);
+
     size_t size = 0;
     size_t offset = 0;
     bool is_float = false;
@@ -4498,14 +4502,14 @@ EXPORT(int, sceGxmSetUniformDataF, void *uniformBuffer, const SceGxmProgramParam
         int component_left_to_copy = componentCount;
 
         while (component_left_to_copy > 0) {
-            memcpy(dest, source, component_to_copy_remain_per_elem * comp_size);
+            // copy no more than was asked for, pad only after a whole element, and start the next element whole
+            const int copy_count = std::min(component_to_copy_remain_per_elem, component_left_to_copy);
+            memcpy(dest, source, copy_count * comp_size);
+            dest += comp_size * copy_count + (copy_count == component_to_copy_remain_per_elem ? align_bytes : 0);
+            source += copy_count * comp_size;
 
-            // Add and align destination
-            dest += comp_size * component_to_copy_remain_per_elem + align_bytes;
-            source += component_to_copy_remain_per_elem * comp_size;
-
-            component_left_to_copy -= component_to_copy_remain_per_elem;
-            component_to_copy_remain_per_elem = std::min<int>(4, component_to_copy_remain_per_elem);
+            component_left_to_copy -= copy_count;
+            component_to_copy_remain_per_elem = parameter->component_count;
         }
     }
 
@@ -4815,7 +4819,7 @@ EXPORT(int, sceGxmShaderPatcherCreateFragmentProgram, SceGxmShaderPatcher *shade
     fp->is_maskupdate = false;
     fp->program = programId->program;
 
-    {
+    if (gxm::LOG_FRAGOUT) {
         static std::mutex fragout_mutex;
         static std::set<std::tuple<Address, int, int>> fragout_seen;
         const SceGxmProgram &gxp = *programId->program.get(mem);

@@ -27,6 +27,9 @@ struct EmuEnvState;
 struct GxmState;
 
 namespace gxm {
+// [FRAGOUT] logs the output register format decisions of the patcher, pipeline cache and shader translator
+inline constexpr bool LOG_FRAGOUT = false;
+
 // Color.
 SceGxmColorBaseFormat get_base_format(SceGxmColorFormat src);
 size_t bits_per_pixel(SceGxmColorBaseFormat base_format);

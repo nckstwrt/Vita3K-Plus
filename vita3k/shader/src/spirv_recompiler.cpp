@@ -256,7 +256,7 @@ static DataType fragment_output_register_type(const SceGxmProgram &program, cons
         why = "  [requested packed format applied; the body's last write to o0 decides at run time]";
     }
 
-    if (log && requested != SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED)
+    if (gxm::LOG_FRAGOUT && log && requested != SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED)
         LOG_INFO("[FRAGOUT] shader {}: declared output type {} x{}, patcher register format {}, flags 0x{:X} output_in_declared_format={} -> o0 read as data type {} (native_color={} frag_color={}){}",
             hash, static_cast<int>(program.get_fragment_output_type()), program.get_fragment_output_component_count(),
             output_register_format_name(requested), program.program_flags, program.writes_output_in_declared_format(), static_cast<int>(type),
@@ -913,8 +913,16 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
             // a F16 cannot hold a INT16 or UINT16
             precision = spv::NoPrecision;
 
+        const int read_one_channel = gxm::one_channel_source_component(translation_state.hints->color_format);
         auto store_source_result = [&](const bool direct_store = false) {
             if (source != spv::NoResult) {
+                if (read_one_channel > 0 && b.getNumComponents(source) == 4) {
+                    // a one-component image reads back (R, 0, 0, 1). The guest sees that value in its own channel and zero elsewhere
+                    std::vector<spv::IdImmediate> operands{ { true, source }, { true, source } };
+                    for (unsigned i = 0; i < 4; i++)
+                        operands.push_back({ false, (static_cast<int>(i) == read_one_channel) ? 0u : 1u });
+                    source = b.createOp(spv::OpVectorShuffle, b.getTypeId(source), operands);
+                }
                 if (!direct_store && !is_float_data_type(target_to_store.type)) {
                     source = utils::convert_to_int(b, utils, source, target_to_store.type, true);
                 }
@@ -1740,9 +1748,9 @@ static spv::Function *make_frag_finalize_function(spv::Builder &b, const SpirvSh
 
     const int one_channel_source = gxm::one_channel_source_component(translate_state.hints->color_format);
     if (one_channel_source > 0) {
-        const spv::Id f32 = b.makeFloatType(32);
-        const spv::Id chan = b.createCompositeExtract(color, f32, static_cast<unsigned>(one_channel_source));
-        color = b.createCompositeConstruct(b.makeVectorType(f32, 4), { chan, chan, chan, chan });
+        // the host one-component image stores red so move the named channel there and keep alpha for blending
+        const std::vector<spv::IdImmediate> operands{ { true, color }, { true, color }, { false, static_cast<unsigned>(one_channel_source) }, { false, 1u }, { false, 2u }, { false, 3u } };
+        color = b.createOp(spv::OpVectorShuffle, b.getTypeId(color), operands);
     }
 
     if (program.is_frag_color_used() && features.should_use_shader_interlock()) {
@@ -2280,7 +2288,7 @@ static SpirvCode convert_gxp_to_spirv_impl(const SceGxmProgram &program, const s
 
     if (program.is_fragment() && translation_state.hints && fragment_output_uses_requested_format(program, translation_state.hints, translation_state.hash)) {
         parameters.frag_output_holds_declared_type = b.createVariable(spv::NoPrecision, spv::StorageClassPrivate, b.makeBoolType(), "o0_holds_declared_type", b.makeBoolConstant(false));
-        LOG_INFO("[FRAGOUT] shader {}: native colour, patcher register format {}: o0 layout decided by the program's last write to it (typed float result -> declared type, raw move or integer -> requested format)",
+        LOG_INFO_IF(gxm::LOG_FRAGOUT, "[FRAGOUT] shader {}: native colour, patcher register format {}: o0 layout decided by the program's last write to it (typed float result -> declared type, raw move or integer -> requested format)",
             translation_state.hash, output_register_format_name(translation_state.hints->output_register_format));
     }
 
@@ -2424,7 +2432,7 @@ void spirv_disasm_print(const usse::SpirvCode &spirv_binary, std::string *spirv_
     LOG_DEBUG("SPIR-V Disassembly:\n{}", spirv_dump ? *spirv_dump : spirv_disasm.str());
 }
 
-static spv::ImageFormat translate_color_format(const SceGxmColorBaseFormat format) {
+static spv::ImageFormat translate_color_format(const SceGxmColorBaseFormat format, const bool is_vulkan) {
     switch (format) {
     case SCE_GXM_COLOR_BASE_FORMAT_U8U8U8U8:
         return spv::ImageFormat::ImageFormatRgba8;
@@ -2434,6 +2442,11 @@ static spv::ImageFormat translate_color_format(const SceGxmColorBaseFormat forma
 
     case SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16:
         return spv::ImageFormat::ImageFormatRgba16f;
+
+    case SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10:
+    case SCE_GXM_COLOR_BASE_FORMAT_SE5M9M9M9:
+        // Vulkan backs both with RGBA16F images
+        return is_vulkan ? spv::ImageFormat::ImageFormatRgba16f : spv::ImageFormat::ImageFormatRgba8;
 
     case SCE_GXM_COLOR_BASE_FORMAT_U2U10U10U10:
         return spv::ImageFormat::ImageFormatRgb10A2;
@@ -2464,7 +2477,7 @@ GeneratedShader convert_gxp(const SceGxmProgram &program, const std::string &sha
 
     if (!features.support_unknown_format) {
         // take the color format of the current surface, hoping the shader is not used on two surfaces with different formats (this should be the case)
-        translation_state.image_storage_format = translate_color_format(gxm::get_base_format(hints.color_format));
+        translation_state.image_storage_format = translate_color_format(gxm::get_base_format(hints.color_format), translation_state.is_vulkan);
     }
 
     GeneratedShader shader{};

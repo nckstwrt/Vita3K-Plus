@@ -383,7 +383,6 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
                             written_mask |= 1u << e.location;
                 }
                 vp_data->varying_location_mask = written_mask;
-                LOG_INFO("[ITERMASK] vertex program varying mask = 0x{:04X}", written_mask);
             }
             context.curr_frag_ublock.set_iterator_written_mask(vp_data->varying_location_mask);
         }

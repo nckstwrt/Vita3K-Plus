@@ -163,11 +163,16 @@ EXPORT(int, sceKernelFreeMemBlockForVM, SceUID uid) {
 
     assert(uid >= 0);
     const Blocks::const_iterator block = state->vm_blocks.find(uid);
-    assert(block != state->vm_blocks.end());
+    if (block == state->vm_blocks.end())
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_BLOCK_ID);
 
     free(emuenv.mem, block->second->mappedBase.address());
-    state->allocated_user -= block->second->size;
-    state->blocks.erase(block);
+    // only sceKernelAllocMemBlockForVM blocks are counted and listed in blocks
+    const Blocks::const_iterator counted = state->blocks.find(uid);
+    if (counted != state->blocks.end()) {
+        state->allocated_user -= counted->second->mappedSize;
+        state->blocks.erase(counted);
+    }
     state->vm_blocks.erase(block);
 
     return SCE_KERNEL_OK;

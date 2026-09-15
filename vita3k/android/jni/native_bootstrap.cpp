@@ -26,6 +26,7 @@
 #include <config/version.h>
 #include <modules/module_parent.h>
 #include <renderer/functions.h>
+#include <util/android_driver.h>
 #include <util/log.h>
 #include <util/mem_snapshot.h>
 
@@ -98,6 +99,7 @@ bool initialize_session(const fs::path &storage_path, Root &root_paths, std::uni
         const char *build_kind = "debug/unoptimized";
 #endif
         LOG_INFO("BUILD IDENTITY: {} | compiled {} {} (this TU)", build_kind, __DATE__, __TIME__);
+        android_driver::log_device_identity();
         mem_diag::log_memory_snapshot("session-start");
 
         if (!cfg.tu_debug.empty()) {
