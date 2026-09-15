@@ -19,11 +19,14 @@
 
 #include "io/functions.h"
 
+#include <cstdio>
+
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceFios2User);
 
 enum SceFiosErrorCode {
-    SCE_FIOS_OK = 0
+    SCE_FIOS_OK = 0,
+    SCE_FIOS_ERROR_BAD_PTR = 0x80820006
 };
 
 typedef SceUID SceFiosOverlayID;
@@ -110,8 +113,10 @@ EXPORT(int, sceFiosOverlayResolveSync02) {
 
 EXPORT(int, sceFiosOverlayResolveWithRangeSync02, SceUID processId, SceFiosOverlayResolveMode resolveFlag, const char *pInPath, char *pOutPath, SceUInt32 maxPath, SceUInt32 min_order, SceUInt32 max_order) {
     TRACY_FUNC(sceFiosOverlayResolveWithRangeSync02, processId, resolveFlag, pInPath, pOutPath, maxPath, min_order, max_order);
+    if (!pInPath || !pOutPath)
+        return RET_ERROR(SCE_FIOS_ERROR_BAD_PTR);
     const std::string resolved = resolve_path(emuenv.io, pInPath, emuenv.vita_fs_path, min_order, max_order);
-    strncpy(pOutPath, resolved.c_str(), maxPath);
+    std::snprintf(pOutPath, maxPath, "%s", resolved.c_str());
 
     return SCE_FIOS_OK;
 }

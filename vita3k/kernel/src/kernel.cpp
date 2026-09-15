@@ -238,8 +238,9 @@ void KernelState::pause_threads() {
 void KernelState::resume_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
     for (auto &[_, thread] : threads) {
-        if (paused_threads_status[thread->id] == ThreadStatus::run)
-            thread->resume();
+        const auto paused = paused_threads_status.find(thread->id);
+        if (paused != paused_threads_status.end() && paused->second == ThreadStatus::run)
+            thread->release_pause();
     }
     paused_threads_status.clear();
 }

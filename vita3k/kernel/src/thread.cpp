@@ -542,6 +542,10 @@ void ThreadState::run_loop() {
 
         const ThreadStatus old_status = status;
         const uint32_t old_returned_value = returned_value;
+        const bool old_exit_requested = exit_requested;
+        const bool old_delete_requested = delete_requested;
+        exit_requested = false;
+        delete_requested = false;
         status = ThreadStatus::run;
 
         lock.unlock();
@@ -550,6 +554,8 @@ void ThreadState::run_loop() {
             LOG_WARN("Thread end event handler returned {}", log_hex(ret));
         lock.lock();
 
+        exit_requested = exit_requested || old_exit_requested;
+        delete_requested = delete_requested || old_delete_requested;
         status = old_status;
         returned_value = old_returned_value;
     };
@@ -876,6 +882,15 @@ void ThreadState::resume_if_suspended() {
     external_suspend = false;
     suspend_requested = false;
     if (status == ThreadStatus::suspend)
+        update_status(ThreadStatus::run);
+}
+
+void ThreadState::release_pause() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    // clear the pause request whether or not the thread parked and never touch a VM or world-stop suspension
+    suspend_requested = false;
+    external_suspend = false;
+    if (status == ThreadStatus::suspend && !vm_suspended && !world_stopped)
         update_status(ThreadStatus::run);
 }
 

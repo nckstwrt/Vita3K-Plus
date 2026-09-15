@@ -2468,10 +2468,13 @@ static void gxmSetUniformBuffers(renderer::State &state, GxmState &gxm, SceGxmCo
 
         uint32_t bytes_to_copy = sizes.at(i) * 4;
         if (sizes.at(i) == SCE_GXM_MAX_UB_IN_FLOAT_UNIT) {
-            auto ite = gxm.memory_mapped_regions.lower_bound(buffers[i].address());
-            if ((ite != gxm.memory_mapped_regions.end()) && ((ite->first + ite->second.size) > buffers[i].address())) {
-                // Bound the size
-                bytes_to_copy = std::min<uint32_t>(ite->first + ite->second.size - buffers[i].address(), bytes_to_copy);
+            const Address ub_address = buffers[i].address();
+            auto ite = gxm.memory_mapped_regions.upper_bound(ub_address);
+            if (ite != gxm.memory_mapped_regions.begin() && static_cast<uint64_t>(std::prev(ite)->first) + std::prev(ite)->second.size > ub_address) {
+                uint64_t span_end = static_cast<uint64_t>(std::prev(ite)->first) + std::prev(ite)->second.size;
+                for (; ite != gxm.memory_mapped_regions.end() && ite->first <= span_end; ++ite)
+                    span_end = std::max<uint64_t>(span_end, static_cast<uint64_t>(ite->first) + ite->second.size);
+                bytes_to_copy = static_cast<uint32_t>(std::min<uint64_t>(span_end - ub_address, bytes_to_copy));
             }
 
             // Check other UB friends and bound the size

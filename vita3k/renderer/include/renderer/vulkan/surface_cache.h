@@ -27,6 +27,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <mutex>
 #include <optional>
 
 struct SwsContext;
@@ -37,6 +38,7 @@ struct VKContext;
 struct VKRenderTarget;
 struct VKState;
 struct Viewport;
+struct PostSurfaceSyncRequest;
 using CallbackRequestFunction = std::function<void()>;
 
 // used for in-shader texture viewport
@@ -150,6 +152,13 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
 
     // do we need some CPU convert/unswizzling part for surface sync
     bool need_post_surface_sync = false;
+    // the part of the surface the last write-back copied (the only part its post-sync may convert)
+    int32_t post_sync_x0 = 0;
+    int32_t post_sync_y0 = 0;
+    uint32_t post_sync_width = 0;
+    uint32_t post_sync_height = 0;
+    // bumped when the surface is destroyed so a post-sync queued before that drops itself
+    uint32_t generation = 0;
 
     // repack-format surfaces (CPU-converted writeback) sync at most once per throttle window
     std::chrono::steady_clock::time_point last_repack_sync_time{};
@@ -285,6 +294,9 @@ private:
     };
     std::vector<PendingCast> pending_casts;
 
+    // a post-sync holds this while it runs
+    std::mutex post_sync_mutex;
+
     void record_pending_cast(PendingCast &cast, VKContext &context);
 
     // destroy all framebuffers using view as their color or depth-stencil
@@ -388,7 +400,7 @@ public:
     ColorSurfaceCacheInfo *perform_surface_sync();
 
     // Called after the render has been done
-    void perform_post_surface_sync(const MemState &mem, ColorSurfaceCacheInfo *surface);
+    void perform_post_surface_sync(const MemState &mem, const PostSurfaceSyncRequest &request);
 
     // destroy all framebuffers associated with render_target
     // (meaning their color or depth-stencil surface is not backed by memory)

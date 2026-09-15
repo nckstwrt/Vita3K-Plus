@@ -272,7 +272,12 @@ EXPORT(int, sceAppUtilSaveDataDataSave, SceAppUtilSaveDataFileSlot *slot, SceApp
         *requiredSizeKiB = 0;
 
     for (unsigned int i = 0; i < fileNum; i++) {
-        const auto file_path = construct_savedata0_path(files[i].dataPath.get(emuenv.mem));
+        const char *const data_path = files[i].dataPath.get(emuenv.mem);
+        if (!data_path) {
+            LOG_WARN("{}: file entry {} of {} has no path, skipping it", export_name, i, fileNum);
+            continue;
+        }
+        const auto file_path = construct_savedata0_path(data_path);
         switch (files[i].mode) {
         case SCE_APPUTIL_SAVEDATA_DATA_SAVE_MODE_DIRECTORY:
             create_dir(emuenv.io, file_path.c_str(), 0777, emuenv.vita_fs_path, export_name);
@@ -280,19 +285,27 @@ EXPORT(int, sceAppUtilSaveDataDataSave, SceAppUtilSaveDataFileSlot *slot, SceApp
         case SCE_APPUTIL_SAVEDATA_DATA_SAVE_MODE_FILE_TRUNCATE:
             if (files[i].buf) {
                 fd = open_file(emuenv.io, file_path.c_str(), SCE_O_WRONLY | SCE_O_CREAT, emuenv.vita_fs_path, export_name);
+                if (fd < 0)
+                    break;
                 seek_file(fd, static_cast<int>(files[i].offset), SCE_SEEK_SET, emuenv.io, export_name);
                 write_file(fd, files[i].buf.get(emuenv.mem), files[i].bufSize, emuenv.io, export_name);
                 close_file(emuenv.io, fd, export_name);
             }
-            fd = open_file(emuenv.io, file_path.c_str(), SCE_O_WRONLY | SCE_O_APPEND | SCE_O_TRUNC, emuenv.vita_fs_path, export_name);
+            fd = open_file(emuenv.io, file_path.c_str(), SCE_O_WRONLY | SCE_O_APPEND, emuenv.vita_fs_path, export_name);
+            if (fd < 0)
+                break;
             truncate_file(fd, files[i].bufSize + files[i].offset, emuenv.io, export_name);
             close_file(emuenv.io, fd, export_name);
             break;
         case SCE_APPUTIL_SAVEDATA_DATA_SAVE_MODE_FILE:
         default:
             fd = open_file(emuenv.io, file_path.c_str(), SCE_O_WRONLY | SCE_O_CREAT, emuenv.vita_fs_path, export_name);
-            seek_file(fd, static_cast<int>(files[i].offset), SCE_SEEK_SET, emuenv.io, export_name);
-            write_file(fd, files[i].buf.get(emuenv.mem), files[i].bufSize, emuenv.io, export_name);
+            if (fd < 0)
+                break;
+            if (files[i].buf) {
+                seek_file(fd, static_cast<int>(files[i].offset), SCE_SEEK_SET, emuenv.io, export_name);
+                write_file(fd, files[i].buf.get(emuenv.mem), files[i].bufSize, emuenv.io, export_name);
+            }
             close_file(emuenv.io, fd, export_name);
             break;
         }
@@ -402,16 +415,17 @@ EXPORT(SceInt32, sceAppUtilSaveDataSlotSearch, SceAppUtilWorkBuffer *workBuf, co
     auto slotList = result->slotList.get(emuenv.mem);
     for (auto i = cond->from; i < (cond->from + cond->range); i++) {
         if (slotList) {
-            slotList[i].id = -1;
-            slotList[i].status = 0;
-            slotList[i].userParam = 0;
-            slotList[i].emptyParam = Ptr<SceAppUtilSaveDataSlotEmptyParam>(0);
+            const auto slot_index = i - cond->from;
+            slotList[slot_index].id = -1;
+            slotList[slot_index].status = 0;
+            slotList[slot_index].userParam = 0;
+            slotList[slot_index].emptyParam = Ptr<SceAppUtilSaveDataSlotEmptyParam>(0);
         }
 
         const auto fd = open_file(emuenv.io, construct_slotparam_path(i).c_str(), SCE_O_RDONLY, emuenv.vita_fs_path, export_name);
         switch (cond->type) {
         case SCE_APPUTIL_SAVEDATA_SLOT_SEARCH_TYPE_EXIST_SLOT:
-            if (fd > 0) {
+            if (fd >= 0) {
                 if (slotList) {
                     SceAppUtilSaveDataSlotParam param{};
                     read_file(&param, emuenv.io, fd, sizeof(SceAppUtilSaveDataSlotParam), export_name);
@@ -432,7 +446,7 @@ EXPORT(SceInt32, sceAppUtilSaveDataSlotSearch, SceAppUtilWorkBuffer *workBuf, co
         default: break;
         }
 
-        if (fd > 0)
+        if (fd >= 0)
             close_file(emuenv.io, fd, export_name);
     }
 

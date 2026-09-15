@@ -143,7 +143,7 @@ void VKContext::wait_thread_function(const MemState &mem) {
                            wait_for_fences();
                            const std::shared_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
                            renderer::vulkan::surface_sync_internal_write = true;
-                           state.surface_cache.perform_post_surface_sync(mem, request.cache_info);
+                           state.surface_cache.perform_post_surface_sync(mem, request);
                            renderer::vulkan::surface_sync_internal_write = false;
                            stat_post_us += elapsed_us(post_t0);
                        },
@@ -680,7 +680,7 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
         const bool post_sync_after_notifications = surface_info && surface_info->need_post_surface_sync && (surface_info->format == SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10 || surface_info->format == SCE_GXM_COLOR_BASE_FORMAT_SE5M9M9M9);
 
         if (surface_info && surface_info->need_post_surface_sync && !post_sync_after_notifications) {
-            state.request_queue.push(PostSurfaceSyncRequest{ surface_info });
+            state.request_queue.push(PostSurfaceSyncRequest{ *surface_info });
         }
 
         if (notif1.address || notif2.address) {
@@ -691,7 +691,7 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
         }
 
         if (post_sync_after_notifications) {
-            state.request_queue.push(PostSurfaceSyncRequest{ surface_info });
+            state.request_queue.push(PostSurfaceSyncRequest{ *surface_info });
         }
     }
 }

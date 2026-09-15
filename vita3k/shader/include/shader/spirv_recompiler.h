@@ -36,6 +36,8 @@ static constexpr uint32_t CURRENT_VERSION = 16;
 // layout (constant_id = GAMMA_CORRECTION_SPECIALIZATIO_ID) const bool is_srgb = false;
 // Setting this constant to true performs gamma correction in the shader
 static constexpr uint32_t GAMMA_CORRECTION_SPECIALIZATION_ID = 0;
+// Setting this constant to true compiles the surface cast texture paths into a fragment shader
+static constexpr uint32_t SURFACE_CAST_SPECIALIZATION_ID = 1;
 
 enum struct Target {
     GLSLOpenGL,

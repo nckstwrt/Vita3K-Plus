@@ -138,6 +138,7 @@ struct ThreadState {
     void suspend_and_wait();
     void resume(bool step = false);
     void resume_if_suspended();
+    void release_pause();
 
     // Stop-the-world support: distinct from suspend()/vm_suspended so they cannot cancel each other
     void request_world_stop();

@@ -93,6 +93,21 @@ static std::string fallback_theme_root_name(const std::string &content_path) {
     return (separator == std::string::npos) ? trimmed : trimmed.substr(separator + 1);
 }
 
+// an archive entry must stay inside the folder its content installs into
+static bool is_safe_archive_path(std::string_view relative) {
+    if (relative.starts_with('/') || relative.starts_with('\\') || relative.find(':') != std::string_view::npos)
+        return false;
+    while (!relative.empty()) {
+        const size_t separator = relative.find_first_of("/\\");
+        if (relative.substr(0, separator) == "..")
+            return false;
+        if (separator == std::string_view::npos)
+            break;
+        relative.remove_prefix(separator + 1);
+    }
+    return true;
+}
+
 static bool is_nonpdrm(EmuEnvState &emuenv, const fs::path &output_path) {
     const auto app_license_path{ emuenv.vita_fs_path / "ux0/license" / emuenv.app_info.app_title_id / fmt::format("{}.rif", emuenv.app_info.app_content_id) };
     const auto is_patch_found_app_license = (emuenv.app_info.app_category == "gp") && fs::exists(app_license_path);
@@ -111,13 +126,27 @@ static bool is_nonpdrm(EmuEnvState &emuenv, const fs::path &output_path) {
 }
 
 static bool set_content_path(EmuEnvState &emuenv, const bool is_theme, fs::path &dest_path) {
+    // these ids name folders a reinstall removes so an empty or path-like id must never reach them
+    const bool is_theme_content = emuenv.app_info.app_category == "ac" && is_theme;
+    if (!is_theme_content && !sfo::is_safe_folder_name(emuenv.app_info.app_title_id)) {
+        LOG_ERROR("Rejecting content with an unusable title id '{}'", emuenv.app_info.app_title_id);
+        return false;
+    }
     const auto app_path = dest_path / "app" / emuenv.app_info.app_title_id;
 
     if (emuenv.app_info.app_category == "ac") {
         if (is_theme) {
+            if (!sfo::is_safe_folder_name(emuenv.app_info.app_content_id)) {
+                LOG_ERROR("Rejecting a theme with an unusable content id '{}'", emuenv.app_info.app_content_id);
+                return false;
+            }
             dest_path /= fs::path("theme") / emuenv.app_info.app_content_id;
             emuenv.app_info.app_title += " (Theme)";
         } else {
+            if (emuenv.app_info.app_content_id.size() <= 20 || !sfo::is_safe_folder_name(emuenv.app_info.app_content_id.substr(20))) {
+                LOG_ERROR("Rejecting DLC with an unusable content id '{}'", emuenv.app_info.app_content_id);
+                return false;
+            }
             emuenv.app_info.app_content_id = emuenv.app_info.app_content_id.substr(20);
             dest_path /= fs::path("addcont") / emuenv.app_info.app_title_id / emuenv.app_info.app_content_id;
             emuenv.app_info.app_title += " (DLC)";
@@ -196,6 +225,18 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
 
     LOG_INFO("Content {} [{}] installs to {}", emuenv.app_info.app_title, emuenv.app_info.app_title_id, output_path);
 
+    // every destination is checked before a previous install is removed or anything is written
+    for (mz_uint i = 0, count = mz_zip_reader_get_num_files(zip.get()); i < count; i++) {
+        mz_zip_archive_file_stat file_stat;
+        if (!mz_zip_reader_file_stat(zip.get(), i, &file_stat))
+            continue;
+        const std::string_view entry_name = file_stat.m_filename;
+        if (entry_name.starts_with(content_path) && !is_safe_archive_path(entry_name.substr(content_path.size()))) {
+            LOG_ERROR("Rejecting content '{}': archive entry '{}' would extract outside its folder", content_path, entry_name);
+            return false;
+        }
+    }
+
     const auto created = fs::create_directories(output_path);
     if (!created) {
         if (reinstall_callback) {
@@ -226,7 +267,7 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
             continue;
         }
         const std::string m_filename = file_stat.m_filename;
-        if (m_filename.contains(content_path)) {
+        if (m_filename.starts_with(content_path)) {
             file_progress = static_cast<float>(i) / num_files * 100.0f;
             update_progress();
 
@@ -237,7 +278,10 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
             } else {
                 fs::create_directories(file_output.parent_path());
                 LOG_INFO("Extracting {}", file_output);
-                mz_zip_reader_extract_to_file(zip.get(), i, fs_utils::path_to_utf8(file_output).c_str(), 0);
+                if (!mz_zip_reader_extract_to_file(zip.get(), i, fs_utils::path_to_utf8(file_output).c_str(), 0)) {
+                    LOG_ERROR("Failed to extract {}: {}", file_output, miniz_get_error(zip));
+                    return false;
+                }
             }
         }
     }
@@ -365,7 +409,10 @@ static bool install_content(EmuEnvState &emuenv, const fs::path &content_path) {
     const auto is_theme = fs::exists(theme_path);
     auto dst_path{ emuenv.vita_fs_path / "ux0" };
     if (fs_utils::read_data(sfo_path, buffer)) {
-        sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang);
+        if (!sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang)) {
+            LOG_ERROR("Rejecting content at {}: param.sfo failed to parse", content_path);
+            return false;
+        }
         if (!set_content_path(emuenv, is_theme, dst_path))
             return false;
 

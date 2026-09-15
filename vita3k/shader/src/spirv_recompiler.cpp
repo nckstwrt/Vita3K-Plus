@@ -1348,6 +1348,12 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
             b.addDecoration(spv_params.is_srgb_constant, spv::DecorationSpecId, (int)GAMMA_CORRECTION_SPECIALIZATION_ID);
             b.addName(spv_params.is_srgb_constant, "is_srgb");
         }
+
+        if (translation_state.is_vulkan) {
+            spv_params.has_surface_casts_constant = b.makeBoolConstant(false, true);
+            b.addDecoration(spv_params.has_surface_casts_constant, spv::DecorationSpecId, (int)SURFACE_CAST_SPECIALIZATION_ID);
+            b.addName(spv_params.has_surface_casts_constant, "has_surface_casts");
+        }
     }
 
     spv_params.render_info_id = translation_state.render_info_id;

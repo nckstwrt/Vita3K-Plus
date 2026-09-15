@@ -318,6 +318,11 @@ void VKSurfaceCache::flush_all_pending_casts() {
 }
 
 void VKSurfaceCache::destroy_surface(ColorSurfaceCacheInfo &info) {
+    {
+        const std::lock_guard<std::mutex> lock(post_sync_mutex);
+        info.generation++;
+    }
+
     // queued casted copies may reference this surface: record them while everything is alive
     flush_all_pending_casts();
 
@@ -351,6 +356,11 @@ void VKSurfaceCache::destroy_surface(ColorSurfaceCacheInfo &info) {
     if (info.copy_buffer) {
         destroy_queue.add_buffer(*info.copy_buffer);
         info.copy_buffer.reset();
+    }
+    // sized for this surface so a surface reusing the slot must not scale with it
+    if (info.sws_context) {
+        sws_freeContext(info.sws_context);
+        info.sws_context = nullptr;
     }
     if (info.upload_buffer) {
         destroy_queue.add_buffer(*info.upload_buffer);
@@ -395,6 +405,10 @@ void VKSurfaceCache::cleanup() {
 
     for (auto &item : color_surface_queue.items) {
         auto &info = item.content;
+        {
+            const std::lock_guard<std::mutex> lock(post_sync_mutex);
+            info.generation++;
+        }
         for (auto &casted : info.casted_textures) {
             casted.transition_buffer.destroy();
             if (casted.reinterpret_view) {
@@ -487,6 +501,7 @@ bool VKSurfaceCache::try_upload_guest_content(ColorSurfaceCacheInfo &info, MemSt
         && info.swizzle.r == vk::ComponentSwizzle::eR
         && !info.raw_image
         && vk::blockSize(info.texture.format) > 0
+        && gxm::bits_per_pixel(info.format) == static_cast<size_t>(vk::blockSize(info.texture.format)) * 8
         && (info.stride_bytes % vk::blockSize(info.texture.format)) == 0;
     if (!upload_supported) {
         return false;
@@ -2364,7 +2379,7 @@ bool VKSurfaceCache::check_for_surface(MemState &mem, Address source_address, Ca
         state.request_queue.push(CallbackRequest{ new CallbackRequestFunction(std::move(vk_callback)) });
 
         if (returned_info)
-            state.request_queue.push(PostSurfaceSyncRequest{ returned_info });
+            state.request_queue.push(PostSurfaceSyncRequest{ *returned_info });
     }
 
     // now push the callback
@@ -2424,7 +2439,7 @@ void VKSurfaceCache::submit_immediate_surface_sync(ColorSurfaceCacheInfo &surfac
 
         if (returned_info) {
             surface_sync_internal_write = true;
-            perform_post_surface_sync(*mem, returned_info);
+            perform_post_surface_sync(*mem, PostSurfaceSyncRequest{ *returned_info });
             surface_sync_internal_write = false;
         }
         return;
@@ -2446,7 +2461,7 @@ void VKSurfaceCache::submit_immediate_surface_sync(ColorSurfaceCacheInfo &surfac
     state.request_queue.push(CallbackRequest{ new CallbackRequestFunction(std::move(vk_callback)) });
 
     if (returned_info) {
-        state.request_queue.push(PostSurfaceSyncRequest{ returned_info });
+        state.request_queue.push(PostSurfaceSyncRequest{ *returned_info });
     }
 }
 
@@ -2748,6 +2763,12 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
         last_written_surface->need_post_surface_sync = !is_swizzle_identity;
     }
 
+    // a post-sync converts only what this copy writes
+    last_written_surface->post_sync_x0 = sync_x0;
+    last_written_surface->post_sync_y0 = sync_y0;
+    last_written_surface->post_sync_width = sync_w;
+    last_written_surface->post_sync_height = sync_h;
+
     vk::BufferImageCopy copy{
         .bufferOffset = offset,
         .bufferRowLength = pixel_stride,
@@ -2858,12 +2879,42 @@ static void swizzle_text_T(T *pixels, uint32_t nb_pixel, ColorSurfaceCacheInfo *
     }
 }
 
-void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurfaceCacheInfo *surface) {
+template <typename T>
+static void swizzle_rect_T(uint8_t *pixels, uint32_t pixel_stride, uint32_t x0, uint32_t y0, uint32_t width, uint32_t height, ColorSurfaceCacheInfo *surface) {
+    const uint32_t components = vk::componentCount(surface->texture.format) == 2 ? 2 : 4;
+    for (uint32_t y = y0; y < y0 + height; y++)
+        swizzle_text_T<T>(reinterpret_cast<T *>(pixels) + (y * pixel_stride + x0) * components, width, surface);
+}
+
+PostSurfaceSyncRequest::PostSurfaceSyncRequest(ColorSurfaceCacheInfo &surface)
+    : cache_info(&surface)
+    , generation(surface.generation)
+    , x0(surface.post_sync_x0)
+    , y0(surface.post_sync_y0)
+    , width(surface.post_sync_width)
+    , height(surface.post_sync_height) {
+}
+
+void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, const PostSurfaceSyncRequest &request) {
+    ColorSurfaceCacheInfo *const surface = request.cache_info;
     if (surface == nullptr)
         return;
 
+    const std::lock_guard<std::mutex> lock(post_sync_mutex);
+    if (surface->generation != request.generation) {
+        static std::atomic<uint32_t> dropped{ 0 };
+        const uint32_t count = dropped.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (count <= 8 || count % 1000 == 0)
+            LOG_WARN("Surface write-back dropped: its surface was destroyed before the copy finished ({} so far)", count);
+        return;
+    }
+
+    const bool reads_copy_buffer = surface_sync_needs_u4u4u4u4_repack(*surface) || surface_sync_needs_f10_repack(*surface)
+        || surface_sync_needs_se5_repack(*surface) || format_need_additional_memory(surface->format);
+    if (reads_copy_buffer && (!surface->copy_buffer || !surface->copy_buffer->mapped_data))
+        return;
+
     const uint32_t pixel_stride = (surface->stride_bytes * 8) / gxm::bits_per_pixel(surface->format);
-    const uint32_t nb_pixels = pixel_stride * surface->original_height;
     uint8_t *pixels = surface->data.cast<uint8_t>().get(mem);
 
     if (surface_sync_needs_u4u4u4u4_repack(*surface)) {
@@ -2899,15 +2950,19 @@ void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurface
         return;
     }
 
+    const uint32_t x0 = std::min<uint32_t>(static_cast<uint32_t>(request.x0), pixel_stride);
+    const uint32_t y0 = std::min<uint32_t>(static_cast<uint32_t>(request.y0), surface->original_height);
+    const uint32_t width = std::min<uint32_t>(request.width, pixel_stride - x0);
+    const uint32_t height = std::min<uint32_t>(request.height, surface->original_height - y0);
     switch (vk::componentBits(surface->texture.format, 0)) {
     case 8:
-        swizzle_text_T<uint8_t>(pixels, nb_pixels, surface);
+        swizzle_rect_T<uint8_t>(pixels, pixel_stride, x0, y0, width, height, surface);
         break;
     case 16:
-        swizzle_text_T<uint16_t>(reinterpret_cast<uint16_t *>(pixels), nb_pixels, surface);
+        swizzle_rect_T<uint16_t>(pixels, pixel_stride, x0, y0, width, height, surface);
         break;
     case 32:
-        swizzle_text_T<uint32_t>(reinterpret_cast<uint32_t *>(pixels), nb_pixels, surface);
+        swizzle_rect_T<uint32_t>(pixels, pixel_stride, x0, y0, width, height, surface);
         break;
     }
 }

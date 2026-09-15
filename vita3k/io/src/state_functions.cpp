@@ -65,13 +65,16 @@ SceOff FileStats::read(void *input_data, const int element_size, const SceSize e
 }
 
 SceOff FileStats::write(const void *data, const SceSize size, const int count) const {
-    if (!can_write_file())
+    if (!can_write_file() || !wrapped_file)
         return -1;
 
     return fwrite(data, size, count, get_file_pointer());
 }
 
 int FileStats::truncate(const SceSize size) const {
+    if (!wrapped_file)
+        return -1;
+
 #ifdef _WIN32
     return _chsize_s(_fileno(get_file_pointer()), size);
 #else

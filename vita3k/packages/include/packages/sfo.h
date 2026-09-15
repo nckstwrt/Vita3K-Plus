@@ -98,4 +98,7 @@ bool load(SfoFile &sfile, const std::vector<uint8_t> &content);
  * @param sys_lang System language. It is used to get translated strings from `param.sfo`
  */
 bool get_param_info(sfo::SfoAppInfo &app_info, const vfs::FileBuffer &param, int sys_lang);
+
+// whether an id from param.sfo can name an install folder i.e. not empty, . or .., and no separators, drive colons or NULs
+bool is_safe_folder_name(const std::string &name);
 } // namespace sfo

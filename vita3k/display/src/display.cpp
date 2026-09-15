@@ -126,6 +126,7 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
     std::thread watchdog(freeze_watchdog_thread, std::ref(emuenv));
 
     while (!display.abort.load()) {
+        std::vector<ThreadStatePtr> vblank_ready;
         {
             const std::lock_guard<std::mutex> guard(display.mutex);
 
@@ -153,14 +154,16 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             for (std::size_t i = 0; i < display.vblank_wait_infos.size();) {
                 auto &vblank_wait_info = display.vblank_wait_infos[i];
                 if (vblank_wait_info.target_vcount <= display.vblank_count) {
-                    ThreadStatePtr target_wait = vblank_wait_info.target_thread;
-
-                    target_wait->update_status(ThreadStatus::run);
+                    vblank_ready.push_back(vblank_wait_info.target_thread);
                     display.vblank_wait_infos.erase(display.vblank_wait_infos.begin() + i);
                 } else {
                     i++;
                 }
             }
+        }
+        for (const ThreadStatePtr &target_wait : vblank_ready) {
+            const std::lock_guard<std::mutex> target_lock(target_wait->mutex);
+            target_wait->update_status(ThreadStatus::run);
         }
         // Periodic thread dump for diagnosing partial hangs
         if (emuenv.cfg.hang_dump_seconds > 0) {
@@ -444,13 +447,16 @@ void wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePt
     }
 
     if (is_cb) {
-        for (auto &[_, cb] : display.vblank_callbacks) {
-            if (cb->get_owner_thread_id() == wait_thread->id) {
-                std::string name = cb->get_name();
-                cb->execute(kernel, [name]() {
-                });
+        std::vector<CallbackPtr> owned;
+        {
+            const std::lock_guard<std::mutex> guard(display.mutex);
+            for (const auto &[_, cb] : display.vblank_callbacks) {
+                if (cb->get_owner_thread_id() == wait_thread->id)
+                    owned.push_back(cb);
             }
         }
+        for (const CallbackPtr &cb : owned)
+            cb->execute(kernel, []() {});
     }
 }
 

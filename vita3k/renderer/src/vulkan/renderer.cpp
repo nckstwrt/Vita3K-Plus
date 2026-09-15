@@ -2154,26 +2154,27 @@ void VKState::unmap_memory(MemState &mem, Ptr<void> address) {
 }
 
 std::tuple<vk::Buffer, uint32_t> VKState::get_matching_mapping(const Ptr<void> address) {
-    auto mapped_memory = mapped_memories.lower_bound(address.address());
-    if (mapped_memory == mapped_memories.end()
-        || mapped_memory->first + mapped_memory->second.size < address.address()) {
-        LOG_ERROR("Could not find matching mapped buffer for vertex stream");
-        return { nullptr, 0 };
+    // the nearest base below can be a range mapped inside a larger one and end before the address so walk down to the one holding it
+    for (auto mapped_memory = mapped_memories.lower_bound(address.address()); mapped_memory != mapped_memories.end(); ++mapped_memory) {
+        if (static_cast<uint64_t>(mapped_memory->first) + mapped_memory->second.size > address.address()) {
+            mapped_memory->second.last_gpu_use = submit_serial + 1;
+            return std::make_tuple(mapped_memory->second.buffer, address.address() - mapped_memory->first + mapped_memory->second.gpu_offset);
+        }
     }
 
-    mapped_memory->second.last_gpu_use = submit_serial + 1;
-    return std::make_tuple(mapped_memory->second.buffer, address.address() - mapped_memory->first + mapped_memory->second.gpu_offset);
+    LOG_ERROR("Could not find matching mapped buffer for vertex stream");
+    return { nullptr, 0 };
 }
 
 uint64_t VKState::get_matching_device_address(const Address address) {
-    auto mapped_memory = mapped_memories.lower_bound(address);
-    if (mapped_memory == mapped_memories.end()
-        || mapped_memory->first + mapped_memory->second.size < address) {
-        LOG_ERROR("Could not find matching mapped buffer for vertex stream");
-        return 0;
+    // the same walk as get_matching_mapping
+    for (auto mapped_memory = mapped_memories.lower_bound(address); mapped_memory != mapped_memories.end(); ++mapped_memory) {
+        if (static_cast<uint64_t>(mapped_memory->first) + mapped_memory->second.size > address)
+            return mapped_memory->second.buffer_address + address - mapped_memory->first;
     }
 
-    return mapped_memory->second.buffer_address + address - mapped_memory->first;
+    LOG_ERROR("Could not find matching mapped buffer for vertex stream");
+    return 0;
 }
 
 int VKState::get_max_anisotropic_filtering() {

@@ -637,14 +637,16 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
             pixels = texture_data_decompressed.data();
             break;
         case SCE_GXM_TEXTURE_BASE_FORMAT_U2F10F10F10:
-            // don't change what openGL is doing (which is completely wrong)
-            if (!is_vulkan || support_a2rgb10) {
+            // openGL keeps its (wrong) path
+            if (!is_vulkan) {
                 LOG_INFO_ONCE("Your device support SCE_GXM_TEXTURE_BASE_FORMAT_U2F10F10F10");
                 break;
             }
             texture_data_decompressed.resize(pixels_per_stride * memory_height * 8);
             convert_u2f10f10f10_to_f16f16f16f16(texture_data_decompressed.data(), pixels, pixels_per_stride, memory_height, fmt);
             pixels = texture_data_decompressed.data();
+            bytes_per_pixel = 8;
+            bpp = 64;
             upload_format = SCE_GXM_TEXTURE_BASE_FORMAT_F16F16F16F16;
             break;
         case SCE_GXM_TEXTURE_BASE_FORMAT_X8U24:

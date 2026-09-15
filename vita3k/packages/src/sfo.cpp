@@ -78,10 +78,11 @@ bool get_data_by_key(std::string &out_data, SfoFile &file, const std::string &ke
 
 bool get_param_info(sfo::SfoAppInfo &app_info, const vfs::FileBuffer &param, int sys_lang) {
     SfoFile sfo_handle;
+    app_info = {};
     if (!sfo::load(sfo_handle, param))
         return false;
     sfo::get_data_by_key(app_info.app_version, sfo_handle, "APP_VER");
-    if (app_info.app_version[0] == '0')
+    if (!app_info.app_version.empty() && app_info.app_version[0] == '0')
         app_info.app_version.erase(app_info.app_version.begin());
     sfo::get_data_by_key(app_info.app_category, sfo_handle, "CATEGORY");
     sfo::get_data_by_key(app_info.app_content_id, sfo_handle, "CONTENT_ID");
@@ -100,7 +101,12 @@ bool get_param_info(sfo::SfoAppInfo &app_info, const vfs::FileBuffer &param, int
     return true;
 }
 
+bool is_safe_folder_name(const std::string &name) {
+    return !name.empty() && name != "." && name != ".." && name.find_first_of("/\\:") == std::string::npos && name.find('\0') == std::string::npos;
+}
+
 bool load(SfoFile &sfile, const std::vector<uint8_t> &content) {
+    sfile = {};
     if (content.empty()) {
         return false;
     }
@@ -117,65 +123,75 @@ bool load(SfoFile &sfile, const std::vector<uint8_t> &content) {
         return false;
     }
 
-    sfile.entries.resize(sfile.header.tables_entries + 1);
-
-    for (uint32_t i = 0; i < sfile.header.tables_entries; i++) {
-        memcpy(&sfile.entries[i].entry, content.data() + sizeof(SfoHeader) + i * sizeof(SfoIndexTableEntry), sizeof(SfoIndexTableEntry));
+    const size_t entry_count = sfile.header.tables_entries;
+    const size_t key_table_start = sfile.header.key_table_start;
+    const size_t data_table_start = sfile.header.data_table_start;
+    if (entry_count > (content.size() - sizeof(SfoHeader)) / sizeof(SfoIndexTableEntry)
+        || key_table_start < sizeof(SfoHeader) + entry_count * sizeof(SfoIndexTableEntry)
+        || data_table_start < key_table_start || data_table_start > content.size()) {
+        LOG_ERROR("param.sfo rejected: {} entries with the key table at {} and the data table at {} do not fit {} bytes", entry_count, key_table_start, data_table_start, content.size());
+        return false;
     }
 
-    sfile.entries[sfile.header.tables_entries].entry.key_offset = sfile.header.data_table_start - sfile.header.key_table_start;
+    bool all_parsed = true;
+    sfile.entries.resize(entry_count);
+    for (size_t i = 0; i < entry_count; i++) {
+        SfoFile::SfoEntry &entry = sfile.entries[i];
+        memcpy(&entry.entry, content.data() + sizeof(SfoHeader) + i * sizeof(SfoIndexTableEntry), sizeof(SfoIndexTableEntry));
 
-    // Parse each SFO entry and extract its associated key
-    for (uint32_t i = 0; i < sfile.header.tables_entries; i++) {
-        // Calculate the size of the key for the current entry by subtracting the offsets
-        uint32_t keySize = sfile.entries[i + 1].entry.key_offset - sfile.entries[i].entry.key_offset;
+        const size_t key_offset = entry.entry.key_offset;
+        const size_t key_table_size = data_table_start - key_table_start;
+        if (key_offset >= key_table_size) {
+            LOG_ERROR("param.sfo rejected: entry {} key offset {} is outside the {} byte key table", i, key_offset, key_table_size);
+            return false;
+        }
+        const uint8_t *const key_begin = content.data() + key_table_start + key_offset;
+        const auto *const key_end = static_cast<const uint8_t *>(memchr(key_begin, '\0', key_table_size - key_offset));
+        if (!key_end) {
+            LOG_ERROR("param.sfo rejected: entry {} key is not terminated inside the key table", i);
+            return false;
+        }
+        entry.data.first.assign(reinterpret_cast<const char *>(key_begin), static_cast<size_t>(key_end - key_begin));
 
-        // Resize the 'key' data to hold the correct amount of characters for the key
-        sfile.entries[i].data.first.resize(keySize);
-
-        // Calculate the starting address of the key data in the content buffer
-        const auto key_begin = content.begin() + sfile.header.key_table_start + sfile.entries[i].entry.key_offset;
-
-        // Extract the key data from the content buffer and assign it to 'key' as a string
-        // Subtract 1 from keySize to avoid including the null terminator
-        sfile.entries[i].data.first = std::string(key_begin, key_begin + keySize - 1);
-    }
-
-    // Parse each SFO entry and extract its associated data
-    for (uint32_t i = 0; i < sfile.header.tables_entries; i++) {
-        const uint32_t dataSize = sfile.entries[i].entry.data_len;
-
-        // Resize the destination string to match the data size
-        sfile.entries[i].data.second.resize(dataSize);
-
-        // Compute the data's starting position in the content buffer
-        const auto data_begin = content.begin() + sfile.header.data_table_start + sfile.entries[i].entry.data_offset;
-
-        // Copy the raw data into a temporary buffer
-        std::vector<char> data(data_begin, data_begin + dataSize);
+        const size_t data_offset = entry.entry.data_offset;
+        const size_t data_len = entry.entry.data_len;
+        if (data_offset > content.size() - data_table_start || data_len > content.size() - data_table_start - data_offset) {
+            LOG_ERROR("param.sfo rejected: {} data at {} ({} bytes) is outside the {} byte buffer", entry.data.first, data_offset, data_len, content.size());
+            return false;
+        }
+        const char *const data = reinterpret_cast<const char *>(content.data() + data_table_start + data_offset);
 
         // Interpret and convert the raw data based on its format
-        switch (sfile.entries[i].entry.data_fmt) {
-        case SfoDataFormat::UINT32_T:
-            // Convert the first 4 bytes to a uint32_t and store as string
-            sfile.entries[i].data.second = std::to_string(*reinterpret_cast<const uint32_t *>(data.data()));
+        switch (entry.entry.data_fmt) {
+        case SfoDataFormat::UINT32_T: {
+            if (data_len < sizeof(uint32_t)) {
+                LOG_ERROR("param.sfo rejected: {} holds {} bytes for a 32-bit integer", entry.data.first, data_len);
+                return false;
+            }
+            uint32_t value;
+            memcpy(&value, data, sizeof(value));
+            entry.data.second = std::to_string(value);
             break;
+        }
         case SfoDataFormat::ASCII:
         case SfoDataFormat::UTF8:
             // Interpret the data as a raw string (may not be null-terminated)
-            sfile.entries[i].data.second = std::string(data.begin(), data.end());
+            entry.data.second.assign(data, data_len);
             break;
-        case SfoDataFormat::UTF8_NULL:
-            // Interpret the data as a null-terminated UTF-8 string (exclude the null byte)
-            sfile.entries[i].data.second = std::string(data.begin(), data.end() - 1);
+        case SfoDataFormat::UTF8_NULL: {
+            // up to the terminator, which a well-formed entry counts in its length
+            const auto *const terminator = static_cast<const char *>(memchr(data, '\0', data_len));
+            entry.data.second.assign(data, terminator ? static_cast<size_t>(terminator - data) : data_len);
             break;
+        }
         default:
-            // Unknown or unsupported data format
-            return false;
+            // Unknown or unsupported data format: its value stays empty, the other entries are still read
+            all_parsed = false;
+            break;
         }
     }
 
-    return true;
+    return all_parsed;
 }
 
 } // namespace sfo

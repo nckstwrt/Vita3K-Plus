@@ -100,7 +100,10 @@ public:
     }
 
     void abort() {
-        aborted = true;
+        {
+            const std::lock_guard<std::mutex> mlock(mutex_);
+            aborted = true;
+        }
         condempty_.notify_all();
         cond_.notify_all();
     }

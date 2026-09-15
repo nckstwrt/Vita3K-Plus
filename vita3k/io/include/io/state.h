@@ -116,7 +116,7 @@ struct IOState {
 
     bool redirect_stdio;
 
-    SceUID next_fd = 0;
+    std::atomic<SceUID> next_fd{ 0 };
     TtyFiles tty_files;
     StdFiles std_files;
     DirEntries dir_entries;

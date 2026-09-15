@@ -209,7 +209,16 @@ struct SyncSignalRequest {
 struct ColorSurfaceCacheInfo;
 
 struct PostSurfaceSyncRequest {
+    // snapshots the surface when the write-back is queued since the surface can be destroyed before it runs
+    explicit PostSurfaceSyncRequest(ColorSurfaceCacheInfo &surface);
+
     ColorSurfaceCacheInfo *cache_info;
+    uint32_t generation;
+    // the part of the surface the copy wrote
+    int32_t x0;
+    int32_t y0;
+    uint32_t width;
+    uint32_t height;
 };
 
 using CallbackRequestFunction = std::function<void()>;

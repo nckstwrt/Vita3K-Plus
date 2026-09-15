@@ -95,8 +95,9 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
 
     progress_callback(0);
 
-    if (byte_swap(pkg_header.magic) != 0x7F504b47 && byte_swap(ext_header.magic) != 0x7F657874) {
+    if (byte_swap(pkg_header.magic) != 0x7F504b47 || byte_swap(ext_header.magic) != 0x7F657874) {
         LOG_ERROR("Not a valid pkg file!");
+        fclose(infile);
         return false;
     }
 
@@ -197,15 +198,38 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
     EVP_EncryptUpdate(cipher_ctx, main_key, &dec_len, pkg_header.pkg_data_iv, 0x10);
     EVP_EncryptFinal_ex(cipher_ctx, main_key + dec_len, &dec_len);
 
+    const auto abandon = [&]() {
+        evp_cleanup();
+        fclose(infile);
+        return false;
+    };
+    if (sfo_size == 0 || sfo_size > pkg_size || sfo_offset > pkg_size - sfo_size) {
+        LOG_ERROR("The pkg's param.sfo ({} bytes at {}) lies outside the {} byte file", sfo_size, sfo_offset, pkg_size);
+        return abandon();
+    }
     std::vector<uint8_t> sfo_buffer(sfo_size);
-    SfoFile sfo_file;
     fseek(infile, sfo_offset, SEEK_SET);
     fread(sfo_buffer.data(), sfo_buffer.size(), 1, infile);
-    sfo::load(sfo_file, sfo_buffer);
-    sfo::get_param_info(emuenv.app_info, sfo_buffer, emuenv.cfg.sys_lang);
+    if (!sfo::get_param_info(emuenv.app_info, sfo_buffer, emuenv.cfg.sys_lang)) {
+        LOG_ERROR("The pkg's param.sfo could not be parsed");
+        return abandon();
+    }
+    if (type != PkgType::PKG_TYPE_VITA_THEME && !sfo::is_safe_folder_name(emuenv.app_info.app_title_id)) {
+        LOG_ERROR("The pkg has an unusable title id '{}'", emuenv.app_info.app_title_id);
+        return abandon();
+    }
 
-    if (type == PkgType::PKG_TYPE_VITA_DLC)
+    if (type == PkgType::PKG_TYPE_VITA_DLC) {
+        if (emuenv.app_info.app_content_id.size() <= 20) {
+            LOG_ERROR("The pkg has an unusable DLC content id '{}'", emuenv.app_info.app_content_id);
+            return abandon();
+        }
         emuenv.app_info.app_content_id = emuenv.app_info.app_content_id.substr(20);
+    }
+    if ((type == PkgType::PKG_TYPE_VITA_DLC || type == PkgType::PKG_TYPE_VITA_THEME) && !sfo::is_safe_folder_name(emuenv.app_info.app_content_id)) {
+        LOG_ERROR("The pkg has an unusable content id '{}'", emuenv.app_info.app_content_id);
+        return abandon();
+    }
 
     if (type == PkgType::PKG_TYPE_VITA_APP && strcmp(emuenv.app_info.app_category.c_str(), "gp") == 0) {
         type = PkgType::PKG_TYPE_VITA_PATCH;

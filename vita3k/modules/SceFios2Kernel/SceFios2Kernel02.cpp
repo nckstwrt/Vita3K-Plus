@@ -17,6 +17,8 @@
 
 #include <module/module.h>
 
+#include <cstdio>
+
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceFios2Kernel);
 
@@ -31,6 +33,10 @@ struct sceFiosKernelOverlayResolveWithRangeSync02_opt {
     int reserved4;
     int reserved5;
     int reserved6;
+};
+
+enum SceFiosKernel02Result {
+    SCE_FIOS_KERNEL02_ERROR_BAD_PTR = 0x80B4000B,
 };
 
 EXPORT(int, sceFiosKernelOverlayAddForProcess02) {
@@ -63,8 +69,10 @@ EXPORT(int, sceFiosKernelOverlayResolveSync02) {
 
 EXPORT(int, sceFiosKernelOverlayResolveWithRangeSync02, SceUID pid, int resolveFlag, const char *pInPath, sceFiosKernelOverlayResolveWithRangeSync02_opt *opt) {
     TRACY_FUNC(sceFiosKernelOverlayResolveWithRangeSync02, pid, resolveFlag, pInPath, opt);
-    STUBBED("Using strncpy");
-    strncpy(opt->pOutPath.get(emuenv.mem), pInPath, opt->maxPath);
+    STUBBED("Returns the input path unresolved");
+    if (!pInPath || !opt || !opt->pOutPath)
+        return RET_ERROR(SCE_FIOS_KERNEL02_ERROR_BAD_PTR);
+    std::snprintf(opt->pOutPath.get(emuenv.mem), opt->maxPath, "%s", pInPath);
 
     return 0;
 }
