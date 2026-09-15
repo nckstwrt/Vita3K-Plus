@@ -117,6 +117,7 @@ void destroy_render_target_during_shutdown(State &state, std::unique_ptr<RenderT
 Command *generic_command_allocate();
 void generic_command_free(Command *cmd);
 void destroy_command_payload(Command &cmd);
+void append_command_list(Context &destination, const CommandList &source);
 
 template <typename... Args>
 bool add_command(Context *ctx, const CommandOpcode opcode, int *status, Args... arguments) {

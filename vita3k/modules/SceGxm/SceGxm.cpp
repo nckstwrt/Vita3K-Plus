@@ -2536,10 +2536,10 @@ static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, c
     const void *indices_ptr = indexData.get(emuenv.mem);
 
     std::span<UniformBuffer> vert_buffers = (pre_vert && pre_vert->uniform_buffers)
-        ? std::span(pre_vert->uniform_buffers.get(emuenv.mem), pre_vert->buffer_count)
+        ? std::span(pre_vert->uniform_buffers.get(emuenv.mem), std::min<size_t>(pre_vert->buffer_count, gxm_vertex_program.renderer_data->uniform_buffer_sizes.size()))
         : std::span(context->state.vertex_uniform_buffers);
     std::span<UniformBuffer> frag_buffers = (pre_frag && pre_frag->uniform_buffers)
-        ? std::span(pre_frag->uniform_buffers.get(emuenv.mem), pre_frag->buffer_count)
+        ? std::span(pre_frag->uniform_buffers.get(emuenv.mem), std::min<size_t>(pre_frag->buffer_count, gxm_fragment_program.renderer_data->uniform_buffer_sizes.size()))
         : std::span(context->state.fragment_uniform_buffers);
 
     gxmSetUniformBuffers(*emuenv.renderer, emuenv.gxm, context, vertex_program_gxp, vert_buffers, gxm_vertex_program.renderer_data->uniform_buffer_sizes,
@@ -2568,14 +2568,17 @@ static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, c
     const SceGxmTexture *vert_textures = (pre_vert && pre_vert->textures)
         ? pre_vert->textures.get(emuenv.mem)
         : (textures.data() + SCE_GXM_MAX_TEXTURE_UNITS);
+    // a precomputed state only holds the textures of the program it was made for
+    const int frag_texture_count = (pre_frag && pre_frag->textures) ? pre_frag->texture_count : SCE_GXM_MAX_TEXTURE_UNITS;
+    const int vert_texture_count = (pre_vert && pre_vert->textures) ? pre_vert->texture_count : SCE_GXM_MAX_TEXTURE_UNITS;
     for (uint16_t texture_index = 0; texture_index < SCE_GXM_MAX_TEXTURE_UNITS; texture_index++) {
         if (vert_textures_sync[texture_index]) {
             const uint16_t index_position = SCE_GXM_MAX_TEXTURE_UNITS + texture_index;
-            renderer::set_texture(*emuenv.renderer, context->renderer.get(), index_position, vert_textures[texture_index]);
+            renderer::set_texture(*emuenv.renderer, context->renderer.get(), index_position, texture_index < vert_texture_count ? vert_textures[texture_index] : textures[index_position]);
         }
 
         if (frag_textures_sync[texture_index])
-            renderer::set_texture(*emuenv.renderer, context->renderer.get(), texture_index, frag_textures[texture_index]);
+            renderer::set_texture(*emuenv.renderer, context->renderer.get(), texture_index, texture_index < frag_texture_count ? frag_textures[texture_index] : textures[texture_index]);
     }
 
     // Update vertex data. We should stores a copy of the data to pass it to GPU later, since another scene
@@ -2634,6 +2637,8 @@ static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, c
         context->was_frag_default_uniform_reserved = false;
     }
 
+    // the renderer keeps the precomputed programs so the next draw must bind the context's again
+    context->last_precomputed = pre_vert || pre_frag;
     return 0;
 }
 
@@ -2674,8 +2679,8 @@ EXPORT(int, sceGxmDrawPrecomputed, SceGxmContext *context, SceGxmPrecomputedDraw
 
     // not sure if precomputed uses current program... maybe it does?
     // anyway states have to be made on a program to program basis so this should be safe
-    const Ptr<const SceGxmFragmentProgram> fragment_program_gptr = fragment_state ? fragment_state->program : context->state.fragment_program;
-    const Ptr<const SceGxmVertexProgram> vertex_program_gptr = vertex_state ? vertex_state->program : context->state.vertex_program;
+    const Ptr<const SceGxmFragmentProgram> fragment_program_gptr = fragment_state && fragment_state->program ? fragment_state->program : context->state.fragment_program;
+    const Ptr<const SceGxmVertexProgram> vertex_program_gptr = vertex_state && vertex_state->program ? vertex_state->program : context->state.vertex_program;
 
     const SceGxmFragmentProgram *fragment_program = fragment_program_gptr.get(emuenv.mem);
     const SceGxmVertexProgram *vertex_program = vertex_program_gptr.get(emuenv.mem);
@@ -2693,8 +2698,8 @@ EXPORT(int, sceGxmDrawPrecomputed, SceGxmContext *context, SceGxmPrecomputedDraw
     const SceGxmProgram &vertex_program_gxp = *vertex_program->program.get(emuenv.mem);
     const SceGxmProgram &fragment_program_gxp = *fragment_program->program.get(emuenv.mem);
 
-    std::span<UniformBuffer> vertex_buffers = vertex_state ? std::span(vertex_state->uniform_buffers.get(emuenv.mem), vertex_state->buffer_count) : context->state.vertex_uniform_buffers;
-    std::span<UniformBuffer> fragment_buffers = fragment_state ? std::span(fragment_state->uniform_buffers.get(emuenv.mem), fragment_state->buffer_count) : context->state.fragment_uniform_buffers;
+    std::span<UniformBuffer> vertex_buffers = vertex_state && vertex_state->uniform_buffers ? std::span(vertex_state->uniform_buffers.get(emuenv.mem), std::min<size_t>(vertex_state->buffer_count, vertex_program->renderer_data->uniform_buffer_sizes.size())) : context->state.vertex_uniform_buffers;
+    std::span<UniformBuffer> fragment_buffers = fragment_state && fragment_state->uniform_buffers ? std::span(fragment_state->uniform_buffers.get(emuenv.mem), std::min<size_t>(fragment_state->buffer_count, fragment_program->renderer_data->uniform_buffer_sizes.size())) : context->state.fragment_uniform_buffers;
 
     gxmSetUniformBuffers(*emuenv.renderer, emuenv.gxm, context, vertex_program_gxp, vertex_buffers, vertex_program->renderer_data->uniform_buffer_sizes,
         emuenv.mem);
@@ -2721,16 +2726,18 @@ EXPORT(int, sceGxmDrawPrecomputed, SceGxmContext *context, SceGxmPrecomputedDraw
     context->is_vert_texture_dirty |= vert_textures_sync;
     const gxp::TextureInfo frag_textures_sync = fragment_program->renderer_data->textures_used;
     context->is_frag_texture_dirty |= frag_textures_sync;
-    const SceGxmTexture *frag_textures = fragment_state ? fragment_state->textures.get(emuenv.mem) : context->state.textures.data();
-    SceGxmTexture *vert_textures = vertex_state ? vertex_state->textures.get(emuenv.mem) : (context->state.textures.data() + SCE_GXM_MAX_TEXTURE_UNITS);
+    const SceGxmTexture *frag_textures = fragment_state && fragment_state->textures ? fragment_state->textures.get(emuenv.mem) : context->state.textures.data();
+    const SceGxmTexture *vert_textures = vertex_state && vertex_state->textures ? vertex_state->textures.get(emuenv.mem) : (context->state.textures.data() + SCE_GXM_MAX_TEXTURE_UNITS);
+    const int frag_texture_count = fragment_state && fragment_state->textures ? fragment_state->texture_count : SCE_GXM_MAX_TEXTURE_UNITS;
+    const int vert_texture_count = vertex_state && vertex_state->textures ? vertex_state->texture_count : SCE_GXM_MAX_TEXTURE_UNITS;
     for (uint16_t texture_index = 0; texture_index < SCE_GXM_MAX_TEXTURE_UNITS; texture_index++) {
         if (vert_textures_sync[texture_index]) {
             const uint16_t index_position = SCE_GXM_MAX_TEXTURE_UNITS + texture_index;
-            renderer::set_texture(*emuenv.renderer, context->renderer.get(), index_position, vert_textures[texture_index]);
+            renderer::set_texture(*emuenv.renderer, context->renderer.get(), index_position, texture_index < vert_texture_count ? vert_textures[texture_index] : context->state.textures[index_position]);
         }
 
         if (frag_textures_sync[texture_index])
-            renderer::set_texture(*emuenv.renderer, context->renderer.get(), texture_index, frag_textures[texture_index]);
+            renderer::set_texture(*emuenv.renderer, context->renderer.get(), texture_index, texture_index < frag_texture_count ? frag_textures[texture_index] : context->state.textures[texture_index]);
     }
 
     size_t max_data_length[SCE_GXM_MAX_VERTEX_STREAMS] = {};
@@ -2869,17 +2876,8 @@ EXPORT(int, sceGxmExecuteCommandList, SceGxmContext *context, SceGxmCommandList 
     if (!commandList || !commandList->list)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
-    // Emit a jump to the first command of given command list
-    // Since only one immediate context exists per process, direct linking like this should be fine! (I hope)
-    renderer::CommandList &imm_cmds = context->renderer->command_list;
-
-    if (imm_cmds.last) {
-        imm_cmds.last->next = commandList->list->first;
-        imm_cmds.last = commandList->list->last;
-    } else {
-        imm_cmds.first = commandList->list->first;
-        imm_cmds.last = commandList->list->last;
-    }
+    // copied because the game may reuse or execute the list again before the render thread reaches it
+    renderer::append_command_list(*context->renderer, *commandList->list);
 
     // Restore back our GXM state
     gxmContextStateRestore(*emuenv.renderer, context, emuenv.mem, true);
@@ -2889,14 +2887,15 @@ EXPORT(int, sceGxmExecuteCommandList, SceGxmContext *context, SceGxmCommandList 
 
 EXPORT(int, sceGxmFinish, SceGxmContext *context) {
     TRACY_FUNC(sceGxmFinish, context);
-    assert(context);
-
     if (!context)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_THREAD);
 
+    // a deferred context has no command allocator outside a command list so its wait uses the generic one
+    renderer::Context *const wait_context = context->state.type == SCE_GXM_CONTEXT_TYPE_IMMEDIATE ? context->renderer.get() : nullptr;
+
     // Wait on this context's rendering finish code.
     guest_sched_release_for_block();
-    renderer::finish(*emuenv.renderer, context->renderer.get());
+    renderer::finish(*emuenv.renderer, wait_context);
 
     return 0;
 }

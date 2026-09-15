@@ -31,6 +31,8 @@
 #include <util/log.h>
 #include <util/tracy.h>
 
+#include <cstring>
+
 #define DEBUG_FRAMEBUFFER 1
 
 #if DEBUG_FRAMEBUFFER
@@ -61,6 +63,48 @@ void destroy_command_payload(Command &cmd) {
 
     default:
         break;
+    }
+}
+
+void append_command_list(Context &destination, const CommandList &source) {
+    for (const Command *command = source.first; command; command = command->next) {
+        Command *copy = destination.alloc_func();
+        copy->opcode = command->opcode;
+        copy->magic = Command::MAGIC_LIVE;
+        std::memcpy(copy->data, command->data, sizeof(copy->data));
+        copy->status = command->status;
+        copy->status_keepalive = command->status_keepalive;
+        copy->next = nullptr;
+
+        // the render thread frees an immediate command's payload after running it so the copy gets its own
+        CommandHelper payload(copy);
+        if (copy->opcode == CommandOpcode::SetContext) {
+            payload.pop<RenderTarget *>();
+            const std::uint32_t surfaces_at = payload.point;
+            const SceGxmColorSurface *color_surface = payload.pop<SceGxmColorSurface *>();
+            const SceGxmDepthStencilSurface *depth_stencil_surface = payload.pop<SceGxmDepthStencilSurface *>();
+            SceGxmColorSurface *color_surface_copy = color_surface ? new SceGxmColorSurface(*color_surface) : nullptr;
+            SceGxmDepthStencilSurface *depth_stencil_surface_copy = depth_stencil_surface ? new SceGxmDepthStencilSurface(*depth_stencil_surface) : nullptr;
+            payload.point = surfaces_at;
+            payload.push(color_surface_copy);
+            payload.push(depth_stencil_surface_copy);
+        } else if (copy->opcode == CommandOpcode::SetState && payload.pop<GXMState>() == GXMState::Program) {
+            payload.pop<Ptr<void>>();
+            const std::uint32_t binding_at = payload.point;
+            const std::shared_ptr<ProgramBinding> *binding = payload.pop<std::shared_ptr<ProgramBinding> *>();
+            std::shared_ptr<ProgramBinding> *binding_copy = binding ? new std::shared_ptr<ProgramBinding>(*binding) : nullptr;
+            payload.point = binding_at;
+            payload.push(binding_copy);
+        }
+
+        if (destination.command_list.last)
+            destination.command_list.last->next = copy;
+        else
+            destination.command_list.first = copy;
+        destination.command_list.last = copy;
+
+        if (command == source.last)
+            break;
     }
 }
 
