@@ -1547,12 +1547,16 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_depth_stencil_for_framebuffer(Sce
 
     // the depth buffer is never downscaled, but scene start has already grown the render target to the sample grid unless the colour surface downscales, so only make up the difference here
     VKContext *scene_context = reinterpret_cast<VKContext *>(state.context);
+    uint32_t samples_per_texel_x = 1;
+    uint32_t samples_per_texel_y = 1;
     if (!scene_context || scene_context->record.color_surface.downscale) {
         if (target->multisample_mode != SCE_GXM_MULTISAMPLE_NONE)
-            memory_height *= 2;
+            samples_per_texel_y = 2;
         if (target->multisample_mode == SCE_GXM_MULTISAMPLE_4X)
-            memory_width *= 2;
+            samples_per_texel_x = 2;
     }
+    memory_width *= static_cast<int32_t>(samples_per_texel_x);
+    memory_height *= static_cast<int32_t>(samples_per_texel_y);
 
     const bool is_stencil_only = depth_stencil->depth_data.address() == 0;
     DepthStencilSurfaceCacheInfo *cached_info = nullptr;
@@ -1661,6 +1665,8 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_depth_stencil_for_framebuffer(Sce
     cached_info->surface = *depth_stencil;
     cached_info->memory_width = memory_width;
     cached_info->memory_height = memory_height;
+    cached_info->samples_per_texel_x = samples_per_texel_x;
+    cached_info->samples_per_texel_y = samples_per_texel_y;
     cached_info->multisample_mode = target->multisample_mode;
     cached_info->stride_samples = depth_stencil->get_stride();
     cached_info->tiling = tiling;
@@ -1818,7 +1824,8 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
     // we sample from it, set the surface as most recently used
     ds_surface_queue.set_as_mru(found_info);
 
-    // the guest addresses an MSAA depth buffer at its sample rate, which is the size we store, so the request needs no MSAA adjustment; a pixel-rate read is handled as a scaled view below
+    width /= cached_info.samples_per_texel_x;
+    height /= cached_info.samples_per_texel_y;
 
     const bool is_stencil = can_be_stencil;
 
@@ -1935,8 +1942,8 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
     VKContext *context = reinterpret_cast<VKContext *>(state.context);
     vk::CommandBuffer cmd_buffer = context->prerender_cmd;
 
-    delta_row_samples *= state.res_multiplier;
-    delta_col_samples *= state.res_multiplier;
+    delta_row_samples = static_cast<uint32_t>(delta_row_samples * state.res_multiplier) / cached_info.samples_per_texel_y;
+    delta_col_samples = static_cast<uint32_t>(delta_col_samples * state.res_multiplier) / cached_info.samples_per_texel_x;
 
     read_only.depth_view.transition_to_discard(cmd_buffer, vkutil::ImageLayout::TransferDst, vkutil::ds_subresource_range);
 

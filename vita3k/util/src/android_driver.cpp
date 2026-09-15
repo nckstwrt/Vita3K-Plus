@@ -608,9 +608,11 @@ namespace android_driver {
 
 std::string device_summary() {
     const DeviceIdentity &id = device_identity();
-    const std::string &soc = !id.soc_model.empty() ? id.soc_model : !id.chipname.empty() ? id.chipname : id.board_platform;
+    const std::string &soc = !id.soc_model.empty() ? id.soc_model : !id.chipname.empty() ? id.chipname
+                                                                                         : id.board_platform;
     const std::string &gpu = !id.sysfs_gpu_model.empty() ? id.sysfs_gpu_model : id.ioctl_gpu_model;
-    const std::string chip = !id.sysfs_chip_id.empty() ? id.sysfs_chip_id : id.ioctl_device_info ? fmt::format("0x{:08X}", id.ioctl_chip_id) : std::string();
+    const std::string chip = !id.sysfs_chip_id.empty() ? id.sysfs_chip_id : id.ioctl_device_info ? fmt::format("0x{:08X}", id.ioctl_chip_id)
+                                                                                                 : std::string();
     return fmt::format("{} {} ({}), Android {} (API {}), SoC {}, GPU {} chip {}", or_dash(id.manufacturer), or_dash(id.model),
         or_dash(id.codename), or_dash(id.android_release), or_dash(id.api_level), or_dash(soc),
         gpu.empty() ? std::string("- (no KGSL: not an Adreno device, or access denied)") : gpu, or_dash(chip));

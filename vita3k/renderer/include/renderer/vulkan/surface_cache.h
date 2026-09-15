@@ -188,6 +188,9 @@ struct DepthStencilSurfaceCacheInfo : public SurfaceCacheInfo {
     // stride in samples
     uint32_t stride_samples;
     SceGxmMultisampleMode multisample_mode;
+    // memory samples per image texel on each axis
+    uint32_t samples_per_texel_x = 1;
+    uint32_t samples_per_texel_y = 1;
 
     bool depth_content_stored = true;
     Address last_scene_color_addr = 0;
