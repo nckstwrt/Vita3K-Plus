@@ -142,11 +142,13 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
 
     TextureViewport texture_viewport{};
 
-    // surface-cache views are always 2D, so a cube texture must skip it or the shader samples a cube sampler through a 2D view
+    // a 2D surface view cannot feed a cube sampler so a cube is looked up as the six face surfaces the game rendered into it
     const bool texture_is_cube = texture.texture_type() == SCE_GXM_TEXTURE_CUBE || texture.texture_type() == SCE_GXM_TEXTURE_CUBE_ARBITRARY;
 
     bool color_convertible = renderer::texture::convert_base_texture_format_to_base_color_format(base_format, format_target_of_texture);
-    if (color_convertible && !texture_is_cube) {
+    if (color_convertible && texture_is_cube) {
+        lookup_result = context.state.surface_cache.retrieve_color_surfaces_as_cube(texture, format_target_of_texture);
+    } else if (color_convertible) {
         // try to retrieve it from the color surface cache
         lookup_result = context.state.surface_cache.retrieve_color_surface_as_texture(texture, format_target_of_texture, &texture_viewport);
     }

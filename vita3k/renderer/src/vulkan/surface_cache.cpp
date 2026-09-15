@@ -463,6 +463,10 @@ void VKSurfaceCache::cleanup() {
         reinterpret_desc_sets.clear();
     }
 
+    for (auto &[cube_address, cube] : cube_textures)
+        cube.texture.destroy();
+    cube_textures.clear();
+
     color_address_lookup.clear();
     depth_address_lookup.clear();
     stencil_address_lookup.clear();
@@ -1431,6 +1435,172 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             vk_format
         };
     }
+}
+
+// every layer of a cube assembled from face surfaces
+static constexpr vk::ImageSubresourceRange cube_subresource_range = {
+    .aspectMask = vk::ImageAspectFlagBits::eColor,
+    .baseMipLevel = 0,
+    .levelCount = 1,
+    .baseArrayLayer = 0,
+    .layerCount = 6
+};
+
+std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surfaces_as_cube(const SceGxmTexture &texture, const SceGxmColorBaseFormat base_format) {
+    const Address address = texture.data_addr << 2;
+    if (color_address_lookup.find(address) == color_address_lookup.end())
+        return std::nullopt;
+
+    const uint32_t original_width = gxm::get_width(texture);
+    const uint32_t original_height = gxm::get_height(texture);
+    const uint32_t bits_per_pixel = gxm::bits_per_pixel(base_format);
+    const uint32_t layout_width = next_power_of_two(original_width);
+    const uint32_t layout_height = next_power_of_two(original_height);
+
+    uint32_t chain_bytes = 0;
+    for (uint32_t w = layout_width, h = layout_height; w > 0 && h > 0; w >>= 1, h >>= 1)
+        chain_bytes += w * h * bits_per_pixel / 8;
+    const bool face_align_2048 = (original_width >= 32 && original_height >= 32 && bits_per_pixel <= 8)
+        || (original_width >= 16 && original_height >= 16 && (bits_per_pixel == 16 || bits_per_pixel == 32))
+        || (original_width >= 8 && original_height >= 8 && bits_per_pixel == 64);
+    const std::array<uint32_t, 2> face_steps = { align(layout_width * layout_height * bits_per_pixel / 8, 4u), align(chain_bytes, face_align_2048 ? 2048u : 4u) };
+
+    std::array<ColorSurfaceCacheInfo *, 6> faces{};
+    uint32_t face_step = 0;
+    for (const uint32_t step : face_steps) {
+        size_t found = 0;
+        for (; found < faces.size(); found++) {
+            const auto it = color_address_lookup.find(address + static_cast<Address>(found * step));
+            if (it == color_address_lookup.end() || it->second->original_width != original_width || it->second->original_height != original_height || it->second->format != base_format)
+                break;
+            faces[found] = it->second;
+        }
+        if (found == faces.size()) {
+            face_step = step;
+            break;
+        }
+    }
+    if (face_step == 0)
+        return std::nullopt;
+
+    VKContext *context = reinterpret_cast<VKContext *>(state.context);
+    for (const ColorSurfaceCacheInfo *face : faces) {
+        // the game wrote this face with the CPU after rendering it
+        if (*face->dirty && face->last_frame_rendered + 2 <= context->frame_timestamp)
+            return std::nullopt;
+        if (face->texture.format != faces[0]->texture.format || face->texture.width != faces[0]->texture.width || face->texture.height != faces[0]->texture.height || face->swizzle != faces[0]->swizzle)
+            return std::nullopt;
+    }
+
+    const vk::Format store_format = faces[0]->texture.format;
+    vk::Format vk_format = color::translate_surface_format(base_format);
+    if (texture.gamma_mode != 0 && vk_format == vk::Format::eR8G8B8A8Unorm)
+        vk_format = vk::Format::eR8G8B8A8Srgb;
+    const auto is_rgba8 = [](vk::Format format) {
+        return format == vk::Format::eR8G8B8A8Unorm || format == vk::Format::eR8G8B8A8Srgb;
+    };
+    if (vk_format != store_format && !(is_rgba8(vk_format) && is_rgba8(store_format)))
+        return std::nullopt;
+    const vk::ComponentMapping mapping = vkutil::color_to_texture_swizzle(faces[0]->swizzle, texture::translate_swizzle(gxm::get_format(texture)));
+
+    CubeSurfaceTexture &cube = cube_textures[address];
+    const uint32_t face_width = faces[0]->texture.width;
+    const uint32_t face_height = faces[0]->texture.height;
+    const bool remake = !cube.texture.image || cube.texture.width != face_width || cube.texture.height != face_height
+        || cube.texture.format != store_format || cube.view_format != vk_format || cube.swizzle != mapping;
+    if (remake) {
+        // a queued copy may still write the old image
+        flush_all_pending_casts();
+        if (cube.texture.image)
+            state.frame().destroy_queue.add_image(cube.texture);
+
+        cube.texture.width = face_width;
+        cube.texture.height = face_height;
+        cube.texture.format = store_format;
+        cube.texture.layout = vkutil::ImageLayout::Undefined;
+        const vk::ImageCreateInfo image_info{
+            .flags = vk::ImageCreateFlagBits::eCubeCompatible | (is_rgba8(store_format) ? vk::ImageCreateFlagBits::eMutableFormat : vk::ImageCreateFlags()),
+            .imageType = vk::ImageType::e2D,
+            .format = store_format,
+            .extent = vk::Extent3D{
+                .width = face_width,
+                .height = face_height,
+                .depth = 1 },
+            .mipLevels = 1,
+            .arrayLayers = 6,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
+            .sharingMode = vk::SharingMode::eExclusive,
+            .initialLayout = vk::ImageLayout::eUndefined
+        };
+        std::tie(cube.texture.image, cube.texture.allocation) = state.allocator.createImage(image_info, vkutil::vma_auto_alloc);
+        const vk::ImageViewCreateInfo view_info{
+            .image = cube.texture.image,
+            .viewType = vk::ImageViewType::eCube,
+            .format = vk_format,
+            .components = mapping,
+            .subresourceRange = cube_subresource_range
+        };
+        cube.texture.view = state.device.createImageView(view_info);
+        cube.view_format = vk_format;
+        cube.swizzle = mapping;
+        cube.copied_scene = 0;
+    }
+
+    const uint64_t scene_timestamp = context->scene_timestamp;
+    if (cube.copied_scene != scene_timestamp) {
+        // copy again only when a face was rendered since the last copy
+        bool stale = remake;
+        for (size_t face = 0; face < faces.size(); face++) {
+            stale |= cube.faces[face] != faces[face] || faces[face]->last_scene_rendered >= cube.copied_scene;
+            cube.faces[face] = faces[face];
+        }
+        if (stale) {
+            cube.copied_scene = scene_timestamp;
+            std::array<vk::Image, 6> face_images;
+            for (size_t face = 0; face < faces.size(); face++)
+                face_images[face] = faces[face]->texture.image;
+            CubeSurfaceTexture *cube_ptr = &cube;
+            auto record_cube = [cube_ptr, face_images](vk::CommandBuffer cmd_buffer) {
+                vkutil::Image &image = cube_ptr->texture;
+                image.transition_to_discard(cmd_buffer, vkutil::ImageLayout::TransferDst, cube_subresource_range);
+                for (uint32_t layer = 0; layer < 6; layer++) {
+                    const vk::ImageMemoryBarrier face_barrier{
+                        .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eShaderWrite,
+                        .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+                        .oldLayout = vk::ImageLayout::eGeneral,
+                        .newLayout = vk::ImageLayout::eGeneral,
+                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .image = face_images[layer],
+                        .subresourceRange = vkutil::color_subresource_range
+                    };
+                    cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eFragmentShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, face_barrier);
+                    const vk::ImageCopy copy{
+                        .srcSubresource = vkutil::color_subresource_layer,
+                        .srcOffset = vk::Offset3D{ 0, 0, 0 },
+                        .dstSubresource = vk::ImageSubresourceLayers{
+                            .aspectMask = vk::ImageAspectFlagBits::eColor,
+                            .mipLevel = 0,
+                            .baseArrayLayer = layer,
+                            .layerCount = 1 },
+                        .dstOffset = vk::Offset3D{ 0, 0, 0 },
+                        .extent = vk::Extent3D{ image.width, image.height, 1 }
+                    };
+                    cmd_buffer.copyImage(face_images[layer], vk::ImageLayout::eGeneral, image.image, vk::ImageLayout::eTransferDstOptimal, copy);
+                }
+                image.transition_to(cmd_buffer, vkutil::ImageLayout::SampledImage, cube_subresource_range);
+            };
+            pending_casts.push_back({ cube.texture.view, nullptr, faces[0], std::move(record_cube) });
+        }
+    }
+
+    return TextureLookupResult{
+        cube.texture.view,
+        vkutil::ImageLayout::SampledImage,
+        vk_format
+    };
 }
 
 bool VKSurfaceCache::begin_ds_scene_depth_check(const SceGxmDepthStencilSurface &depth_stencil, bool this_scene_stores, Address scene_color_addr) {

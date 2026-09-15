@@ -545,6 +545,7 @@ void shutdown_app_runtime(EmuEnvState &state) {
 
     state.kernel.deinit(state.mem);
 
+    unprotect_external_mappings(state.mem);
     state.renderer->cleanup();
     state.renderer.reset();
 

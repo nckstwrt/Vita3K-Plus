@@ -23,6 +23,7 @@
 #include <util/containers.h>
 #include <vkutil/objects.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -166,6 +167,14 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
     ~ColorSurfaceCacheInfo();
 };
 
+struct CubeSurfaceTexture {
+    vkutil::Image texture;
+    std::array<ColorSurfaceCacheInfo *, 6> faces{};
+    vk::Format view_format = vk::Format::eUndefined;
+    vk::ComponentMapping swizzle;
+    uint64_t copied_scene = 0;
+};
+
 // set while the emulator itself writes surface data back to guest memory, so the
 // surface write traps can tell emulator write-backs apart from genuine guest writes
 extern thread_local bool surface_sync_internal_write;
@@ -243,6 +252,9 @@ private:
     static constexpr uint32_t max_surfaces_allowed = 20;
 
     std::map<Address, ColorSurfaceCacheInfo *> color_address_lookup;
+
+    // cube textures sampled from face surfaces keyed by the cube's data address
+    std::map<Address, CubeSurfaceTexture> cube_textures;
 
     std::map<Address, DepthStencilSurfaceCacheInfo *> depth_address_lookup;
     std::map<Address, DepthStencilSurfaceCacheInfo *> stencil_address_lookup;
@@ -330,6 +342,7 @@ public:
 
     SurfaceRetrieveResult retrieve_color_surface_for_framebuffer(MemState &mem, SceGxmColorSurface *color);
     std::optional<TextureLookupResult> retrieve_color_surface_as_texture(const SceGxmTexture &texture, const SceGxmColorBaseFormat base_format, TextureViewport *texture_viewport);
+    std::optional<TextureLookupResult> retrieve_color_surfaces_as_cube(const SceGxmTexture &texture, const SceGxmColorBaseFormat base_format);
 
     SurfaceRetrieveResult retrieve_depth_stencil_for_framebuffer(SceGxmDepthStencilSurface *depth_stencil, const uint32_t width, const uint32_t height);
 

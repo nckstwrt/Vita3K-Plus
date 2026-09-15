@@ -683,6 +683,8 @@ void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *a
 
     const std::unique_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
 
+    apply_host_protect(addr_ptr, size, MemPerm::ReadWrite, mem.host_page_size);
+
     // Copy every page from its live backing
     bool recopied_any = false;
     for (uint32_t off = 0; off < size; off += KiB(4)) {
@@ -937,6 +939,14 @@ const char *mem_name(Address address, MemState &state) {
 
 std::string fault_context() {
     return g_fault_context_provider ? g_fault_context_provider() : std::string();
+}
+
+void unprotect_external_mappings(MemState &mem) {
+    if (!mem.use_page_table)
+        return;
+    const std::lock_guard<std::mutex> ext_lock(mem.external_mapping_mutex);
+    for (const auto &[host, mapping] : mem.external_mapping)
+        apply_host_protect(std::bit_cast<uint8_t *>(host), mapping.size, MemPerm::ReadWrite, mem.host_page_size);
 }
 
 void deinit_mem(MemState &state) {

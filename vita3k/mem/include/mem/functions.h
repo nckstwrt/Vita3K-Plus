@@ -59,6 +59,7 @@ void open_access_parent_protect_segment(MemState &state, Address addr);
 void close_access_parent_protect_segment(MemState &state, Address addr);
 void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *addr_ptr);
 void remove_external_mapping(MemState &mem, uint8_t *addr_ptr, uint32_t size);
+void unprotect_external_mappings(MemState &mem);
 bool is_protecting(MemState &state, Address addr, MemPerm *perm = nullptr);
 bool is_valid_addr(const MemState &state, Address addr);
 bool is_valid_addr_synced(MemState &state, Address addr);
