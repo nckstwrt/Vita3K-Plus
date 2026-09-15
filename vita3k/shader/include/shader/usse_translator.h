@@ -211,6 +211,17 @@ private:
     // a sampled texture leaves real data in its destination therefore a later partial vpck must preserve it
     bool m_store_from_texture_sample{ false };
     bool m_store_is_raw_move{ false };
+    // the data type each register word (bank << 24 | word) was last stored with
+    std::map<uint32_t, DataType> m_word_store_types;
+    DataType m_raw_move_types[4]{};
+    // a raw move into the output's first word leaves the declared type only when every word it copies was stored in that type
+    bool m_raw_move_keeps_declared{ false };
+
+    DataType word_store_type(const Operand &op, int repeat_offset, int component, int component_size) const {
+        const uint32_t word = (op.num + repeat_offset + (component * component_size) / 4) & 0xFFFFFF;
+        const auto it = m_word_store_types.find((static_cast<uint32_t>(op.bank) << 24) | word);
+        return it == m_word_store_types.end() ? DataType::UNK : it->second;
+    }
 
     spv::Id do_alu_op(Instruction &inst, const Imm4 source_mask, const Imm4 possible_dest_mask, int src1_repeat_offset = 0, int src2_repeat_offset = 0);
 

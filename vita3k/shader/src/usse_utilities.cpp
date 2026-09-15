@@ -1321,15 +1321,15 @@ spv::Id unpack(spv::Builder &b, SpirvUtilFunctions &utils, const FeatureState &f
 }
 
 void store(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFunctions &utils, const FeatureState &features, Operand dest,
-    spv::Id source, std::uint8_t dest_mask, int off, bool raw_move) {
+    spv::Id source, std::uint8_t dest_mask, int off, bool raw_move, bool raw_move_keeps_declared) {
     if (source == spv::NoResult) {
         LOG_WARN("Source invalid");
         return;
     }
 
-    // Which layout the colour output holds is decided by the program's last write to it
+    // Which layout the colour output holds is decided by the program's last write to it and a raw move keeps its source words
     if (params.frag_output_holds_declared_type != 0 && dest.bank == RegisterBank::OUTPUT)
-        b.createStore(b.makeBoolConstant(!raw_move && is_float_data_type(dest.type)), params.frag_output_holds_declared_type);
+        b.createStore(b.makeBoolConstant(raw_move ? raw_move_keeps_declared : is_float_data_type(dest.type)), params.frag_output_holds_declared_type);
 
     // Check for INDEX bank. INDEX bank are optimized to store an integer
     if (dest.bank == RegisterBank::INDEX || dest.bank == RegisterBank::PREDICATE) {

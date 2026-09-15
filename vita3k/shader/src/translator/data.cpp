@@ -277,6 +277,29 @@ bool USSETranslatorVisitor::vmov(
         result = source_1;
     }
 
+    // a raw move copies whole words so each destination word keeps the type its source word was stored with
+    const int move_size = static_cast<int>(get_data_type_size(move_data_type));
+    const SceGxmParameterType declared_output = m_program.get_fragment_output_type();
+    const DataType declared_type = (declared_output == SCE_GXM_PARAMETER_TYPE_F16) ? DataType::F16 : ((declared_output == SCE_GXM_PARAMETER_TYPE_F32) ? DataType::F32 : DataType::UNK);
+    bool copies_output_word0 = false;
+    bool output_word0_declared = declared_type != DataType::UNK;
+    for (int i = 0; i < 4; i++) {
+        m_raw_move_types[i] = DataType::UNK;
+        if (!(dest_mask & (1 << i)))
+            continue;
+        const int channel = static_cast<int>(inst.opr.src1.swizzle[i]);
+        if (channel < 4) {
+            const DataType source_type = word_store_type(inst.opr.src1, src1_repeat_offset, channel, move_size);
+            if (!is_conditional || word_store_type(inst.opr.src2, src2_repeat_offset, channel, move_size) == source_type)
+                m_raw_move_types[i] = source_type;
+        }
+        if (inst.opr.dest.bank == RegisterBank::OUTPUT && static_cast<int>(inst.opr.dest.num) + dest_repeat_offset + (i * move_size) / 4 == 0) {
+            copies_output_word0 = true;
+            output_word0_declared = output_word0_declared && m_raw_move_types[i] == declared_type;
+        }
+    }
+    m_raw_move_keeps_declared = copies_output_word0 && output_word0_declared;
+
     m_store_is_raw_move = true;
     store(inst.opr.dest, result, dest_mask, dest_repeat_offset);
     m_store_is_raw_move = false;
