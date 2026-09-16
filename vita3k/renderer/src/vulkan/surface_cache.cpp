@@ -676,6 +676,8 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
             color_surface_queue.set_as_lru(&info);
         } else {
             color_surface_queue.set_as_mru(&info);
+            info.bound_width = static_cast<uint16_t>(std::min<uint32_t>(original_width, info.original_width));
+            info.bound_height = static_cast<uint16_t>(std::min<uint32_t>(original_height, info.original_height));
             if (context->render_target) {
                 const uint32_t rt_w = static_cast<uint32_t>(std::lround(context->render_target->width / state.res_multiplier));
                 const uint32_t rt_h = static_cast<uint32_t>(std::lround(context->render_target->height / state.res_multiplier));
@@ -735,6 +737,8 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
     info_added.last_scene_rendered = context->scene_timestamp;
     info_added.rendered_w = 0;
     info_added.rendered_h = 0;
+    info_added.bound_width = static_cast<uint16_t>(original_width);
+    info_added.bound_height = static_cast<uint16_t>(original_height);
     info_added.written_x0 = INT32_MAX;
     info_added.written_y0 = INT32_MAX;
     info_added.written_x1 = 0;
@@ -2620,6 +2624,20 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
         const int32_t cur_y1 = sync_y0 + static_cast<int32_t>(sync_h);
         const int32_t new_x1 = std::min(cur_x1, lim_x1);
         const int32_t new_y1 = std::min(cur_y1, lim_y1);
+        if (new_x1 < cur_x1 || new_y1 < cur_y1) {
+            sync_w = static_cast<uint32_t>(std::max(0, new_x1 - sync_x0));
+            sync_h = static_cast<uint32_t>(std::max(0, new_y1 - sync_y0));
+            clamp_sync = true;
+            rt_clamped = true;
+        }
+    }
+    // a smaller re-bind at the same address keeps the bigger cache entry (its full size would overrun the bound surface)
+    if (last_written_surface->bound_width > 0 && last_written_surface->bound_height > 0
+        && (last_written_surface->bound_width < last_written_surface->original_width || last_written_surface->bound_height < last_written_surface->original_height)) {
+        const int32_t cur_x1 = sync_x0 + static_cast<int32_t>(sync_w);
+        const int32_t cur_y1 = sync_y0 + static_cast<int32_t>(sync_h);
+        const int32_t new_x1 = std::min(cur_x1, static_cast<int32_t>(last_written_surface->bound_width));
+        const int32_t new_y1 = std::min(cur_y1, static_cast<int32_t>(last_written_surface->bound_height));
         if (new_x1 < cur_x1 || new_y1 < cur_y1) {
             sync_w = static_cast<uint32_t>(std::max(0, new_x1 - sync_x0));
             sync_h = static_cast<uint32_t>(std::max(0, new_y1 - sync_y0));

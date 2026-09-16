@@ -103,6 +103,8 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
     uint64_t last_scene_rendered = 0;
     uint16_t rendered_w = 0;
     uint16_t rendered_h = 0;
+    uint16_t bound_width = 0;
+    uint16_t bound_height = 0;
     int32_t written_x0 = INT32_MAX;
     int32_t written_y0 = INT32_MAX;
     int32_t written_x1 = 0;
