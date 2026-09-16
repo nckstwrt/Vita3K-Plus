@@ -267,26 +267,92 @@ static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_c
     return addr;
 }
 
+static void decommit_free_host_pages(MemState &state, Address region_start, Address region_end) {
+    if (!state.preserve_freed_pages) {
+        Address host_page = align_down(region_start, state.host_page_size);
+        Address batch_start = 0;
+        uint32_t batch_size = 0;
+
+        while (host_page < region_end) {
+            Address host_page_end = host_page + state.host_page_size;
+            uint32_t first_guest = host_page / STANDARD_PAGE_SIZE;
+            uint32_t last_guest = host_page_end / STANDARD_PAGE_SIZE;
+
+            if (state.allocator.free_slot_count(first_guest, last_guest) == (last_guest - first_guest)) {
+                if (batch_size == 0)
+                    batch_start = host_page;
+                batch_size += state.host_page_size;
+            } else if (batch_size > 0) {
+                uint8_t *memory = &state.memory[batch_start];
+#ifdef _WIN32
+                const BOOL ret = VirtualFree(memory, batch_size, MEM_DECOMMIT);
+                LOG_CRITICAL_IF(!ret, "VirtualFree failed: {}", get_error_msg());
+#else
+                int ret = mprotect(memory, batch_size, PROT_NONE);
+                LOG_CRITICAL_IF(ret == -1, "mprotect failed: {}", get_error_msg());
+                ret = madvise(memory, batch_size, MADV_DONTNEED);
+                LOG_CRITICAL_IF(ret == -1, "madvise failed: {}", get_error_msg());
+#endif
+                batch_size = 0;
+            }
+            host_page = host_page_end;
+        }
+
+        if (batch_size > 0) {
+            uint8_t *memory = &state.memory[batch_start];
+#ifdef _WIN32
+            const BOOL ret = VirtualFree(memory, batch_size, MEM_DECOMMIT);
+            LOG_CRITICAL_IF(!ret, "VirtualFree failed: {}", get_error_msg());
+#else
+            int ret = mprotect(memory, batch_size, PROT_NONE);
+            LOG_CRITICAL_IF(ret == -1, "mprotect failed: {}", get_error_msg());
+            ret = madvise(memory, batch_size, MADV_DONTNEED);
+            LOG_CRITICAL_IF(ret == -1, "madvise failed: {}", get_error_msg());
+#endif
+        }
+    }
+}
+
 Address alloc_aligned(MemState &state, uint32_t size, const char *name, unsigned int alignment, Address start_addr) {
     if (alignment == 0)
         return alloc(state, size, name, start_addr);
+
+    const uint64_t requested_pages = (static_cast<uint64_t>(size) + STANDARD_PAGE_SIZE - 1) / STANDARD_PAGE_SIZE;
+    const uint64_t alignment_pages = std::max<uint64_t>(1, (static_cast<uint64_t>(alignment) + STANDARD_PAGE_SIZE - 1) / STANDARD_PAGE_SIZE);
+    if (requested_pages == 0 || requested_pages + alignment_pages - 1 > UINT32_MAX)
+        return 0;
+
     const std::lock_guard<std::mutex> lock(state.generation_mutex);
-    size += alignment;
-    const uint32_t page_count = align(size, STANDARD_PAGE_SIZE) / STANDARD_PAGE_SIZE;
+    // just enough pages that the aligned start still has the requested size after it
+    const uint32_t page_count = static_cast<uint32_t>(requested_pages + alignment_pages - 1);
     const Address addr = alloc_inner(state, start_addr / STANDARD_PAGE_SIZE, page_count, name, false);
+    if (!addr)
+        return 0;
+
     const Address align_addr = align(addr, alignment);
     const uint32_t page_num = addr / STANDARD_PAGE_SIZE;
     const uint32_t align_page_num = align_addr / STANDARD_PAGE_SIZE;
+    const uint32_t remnant_front = align_page_num - page_num;
+    const uint32_t remnant_back = page_count - remnant_front - static_cast<uint32_t>(requested_pages);
 
-    if (page_num != align_page_num) {
-        AllocMemPage &page = state.alloc_table[page_num];
-        AllocMemPage &align_page = state.alloc_table[align_page_num];
-        const uint32_t remnant_front = align_page_num - page_num;
+    if (remnant_front) {
         state.allocator.free(page_num, remnant_front);
-        page.allocated = 0;
-        align_page.allocated = 1;
-        align_page.size = page.size - remnant_front;
+        state.alloc_table[page_num].allocated = 0;
+        if (PAGE_NAME_TRACKING) {
+            state.page_name_map.erase(page_num);
+            state.page_name_map.emplace(align_page_num, name);
+        }
     }
+    if (remnant_back)
+        state.allocator.free(align_page_num + static_cast<uint32_t>(requested_pages), remnant_back);
+
+    AllocMemPage &align_page = state.alloc_table[align_page_num];
+    align_page.allocated = 1;
+    align_page.size = static_cast<uint32_t>(requested_pages);
+
+    // alloc_inner committed the remnants along with the block
+    decommit_free_host_pages(state, addr, align_addr);
+    decommit_free_host_pages(state, align_addr + static_cast<Address>(requested_pages * STANDARD_PAGE_SIZE), addr + page_count * STANDARD_PAGE_SIZE);
 
     return align_addr;
 }
@@ -874,49 +940,7 @@ void free(MemState &state, Address address) {
     const Address region_start = page_num * STANDARD_PAGE_SIZE;
     const Address region_end = region_start + page.size * STANDARD_PAGE_SIZE;
 
-    if (!state.preserve_freed_pages) {
-        Address host_page = align_down(region_start, state.host_page_size);
-        Address batch_start = 0;
-        uint32_t batch_size = 0;
-
-        while (host_page < region_end) {
-            Address host_page_end = host_page + state.host_page_size;
-            uint32_t first_guest = host_page / STANDARD_PAGE_SIZE;
-            uint32_t last_guest = host_page_end / STANDARD_PAGE_SIZE;
-
-            if (state.allocator.free_slot_count(first_guest, last_guest) == (last_guest - first_guest)) {
-                if (batch_size == 0)
-                    batch_start = host_page;
-                batch_size += state.host_page_size;
-            } else if (batch_size > 0) {
-                uint8_t *memory = &state.memory[batch_start];
-#ifdef _WIN32
-                const BOOL ret = VirtualFree(memory, batch_size, MEM_DECOMMIT);
-                LOG_CRITICAL_IF(!ret, "VirtualFree failed: {}", get_error_msg());
-#else
-                int ret = mprotect(memory, batch_size, PROT_NONE);
-                LOG_CRITICAL_IF(ret == -1, "mprotect failed: {}", get_error_msg());
-                ret = madvise(memory, batch_size, MADV_DONTNEED);
-                LOG_CRITICAL_IF(ret == -1, "madvise failed: {}", get_error_msg());
-#endif
-                batch_size = 0;
-            }
-            host_page = host_page_end;
-        }
-
-        if (batch_size > 0) {
-            uint8_t *memory = &state.memory[batch_start];
-#ifdef _WIN32
-            const BOOL ret = VirtualFree(memory, batch_size, MEM_DECOMMIT);
-            LOG_CRITICAL_IF(!ret, "VirtualFree failed: {}", get_error_msg());
-#else
-            int ret = mprotect(memory, batch_size, PROT_NONE);
-            LOG_CRITICAL_IF(ret == -1, "mprotect failed: {}", get_error_msg());
-            ret = madvise(memory, batch_size, MADV_DONTNEED);
-            LOG_CRITICAL_IF(ret == -1, "madvise failed: {}", get_error_msg());
-#endif
-        }
-    }
+    decommit_free_host_pages(state, region_start, region_end);
 }
 
 uint32_t mem_available(MemState &state) {

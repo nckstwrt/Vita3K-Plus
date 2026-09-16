@@ -206,7 +206,7 @@ inline static bool is_sub_opcode(Opcode test_op) {
     return (test_op == Opcode::VSUB) || (test_op == Opcode::VF16SUB) || (test_op == Opcode::ISUB8) || (test_op == Opcode::ISUB16) || (test_op == Opcode::ISUB32) || (test_op == Opcode::ISUBU8) || (test_op == Opcode::ISUBU16) || (test_op == Opcode::ISUBU32) || (test_op == Opcode::FPSUB8);
 }
 
-spv::Id USSETranslatorVisitor::vtst_impl(Instruction inst, ExtPredicate pred, int zero_test, int sign_test, Imm4 load_mask, bool mask) {
+spv::Id USSETranslatorVisitor::vtst_impl(Instruction inst, ExtPredicate pred, int zero_test, int sign_test, Imm4 load_mask, bool mask, spv::Id *alu_result) {
     // Usually we would expect this to have a compare behavior
     // Comparison is done by subtracting the first src by the second src, and compare the result value.
     // We currently optimize for that case first
@@ -321,6 +321,13 @@ spv::Id USSETranslatorVisitor::vtst_impl(Instruction inst, ExtPredicate pred, in
         return spv::NoResult;
     }
 
+    if (alu_result) {
+        // a subtraction is compared operand to operand above (the stored result still needs the difference)
+        *alu_result = is_sub_opcode(inst.opcode)
+            ? m_b.createBinOp(is_float_data_type(load_data_type) ? spv::OpFSub : spv::OpISub, m_b.getTypeId(lhs), lhs, rhs)
+            : lhs;
+    }
+
     return m_b.createOp(used_comp_op, pred_type, { lhs, rhs });
 }
 
@@ -400,7 +407,17 @@ bool USSETranslatorVisitor::vtst(
     pred_op.num = pdst_n;
     inst.opr.dest = pred_op;
 
-    const spv::Id pred_result = vtst_impl(inst, pred, zero_test, sign_test, load_mask, false);
+    spv::Id alu_result = spv::NoResult;
+    const spv::Id pred_result = vtst_impl(inst, pred, zero_test, sign_test, load_mask, false, test_wben ? &alu_result : nullptr);
+
+    if (test_wben && alu_result != spv::NoResult) {
+        Operand dest{};
+        dest = decode_dest(dest, dest_n, dest_bank, dest_ext, use_double_reg, bits_max, m_second_program);
+        dest.type = load_data_type;
+        dest.swizzle = SWIZZLE_CHANNEL_4_DEFAULT;
+        store(dest, alu_result, load_mask);
+        LOG_DISASM("  write {}", disasm::operand_to_str(dest, load_mask));
+    }
 
     store(inst.opr.dest, pred_result);
     return true;

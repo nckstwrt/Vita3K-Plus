@@ -301,17 +301,25 @@ void PipelineCache::set_async_compilation(bool enable) {
         }
     } else {
         LOG_INFO("Asynchronous pipeline compilation is now disabled");
+        stop_compile_workers(true);
+    }
+}
 
+void PipelineCache::stop_compile_workers(bool drain) {
+    if (drain) {
+        drain_compile_workers = true;
+    } else {
         for (size_t i = 0; i < worker_threads.size(); i++)
             // if a thread receives nullptr, it exits
             pipeline_compile_queue.enqueue(nullptr);
-
-        for (auto &thread : worker_threads) {
-            if (thread.joinable())
-                thread.join();
-        }
-        worker_threads.clear();
     }
+
+    for (auto &thread : worker_threads) {
+        if (thread.joinable())
+            thread.join();
+    }
+    worker_threads.clear();
+    drain_compile_workers = false;
 }
 
 // magic number put at the beginning of the pipeline cache file
@@ -413,9 +421,11 @@ void PipelineCache::save_pipeline_cache() {
 }
 
 void PipelineCache::cleanup() {
-    // stop threads
-    if (use_async_compilation)
-        set_async_compilation(false);
+    // stop threads (queued requests are abandoned at shutdown)
+    if (use_async_compilation) {
+        use_async_compilation = false;
+        stop_compile_workers(false);
+    }
 
     for (auto &[hash, pipeline] : pipelines)
         state.device.destroy(pipeline);
@@ -1070,11 +1080,21 @@ void PipelineCache::compiler_thread(MemState &mem) {
     // just a single loop, waiting for a pipeline compile request and compiling it
     CompileRequest *request;
     while (true) {
-        pipeline_compile_queue.wait_dequeue(consumer_token, request);
+        if (!pipeline_compile_queue.wait_dequeue_timed(consumer_token, request, std::chrono::milliseconds(100))) {
+            if (drain_compile_workers)
+                break;
+            continue;
+        }
 
         if (request == nullptr)
             // use this as an instruction to stop the thread
             break;
+
+        if (drain_compile_workers) {
+            *request->pipeline = nullptr;
+            delete request;
+            continue;
+        }
 
         vk::Pipeline pipeline = compile_pipeline(request->type, request->render_pass, *request->vertex_program_binding, *request->fragment_program_binding, *request->get_record(), request->has_color_surface_data, request->hints, request->has_casts, mem);
         // mark a refused pipeline as failed rather than leaving it null, which would make every

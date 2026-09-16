@@ -849,7 +849,7 @@ public:
         Imm7 src2_n);
     // Instructions end
 private:
-    spv::Id vtst_impl(Instruction inst, ExtPredicate pred, int zero_test, int sign_test, Imm4 load_mask, bool mask);
+    spv::Id vtst_impl(Instruction inst, ExtPredicate pred, int zero_test, int sign_test, Imm4 load_mask, bool mask, spv::Id *alu_result = nullptr);
 
     // SPIR-V emitter
     spv::Builder &m_b;

@@ -403,6 +403,11 @@ bool USSETranslatorVisitor::smp(
         texture_index = load(inst.opr.src1, 0b1);
     }
 
+    if (is_texture_buffer_load && m_spirv_params.samplers.empty()) {
+        LOG_ERROR("Texture buffer load without any sampler");
+        return true;
+    }
+
     // if this is a texture buffer load, just attribute the first available sampler to it
     const SamplerInfo &sampler = is_texture_buffer_load ? m_spirv_params.samplers.begin()->second : m_spirv_params.samplers.at(inst.opr.src1.num);
 

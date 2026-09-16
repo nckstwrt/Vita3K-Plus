@@ -127,6 +127,8 @@ private:
     PipelineCompileQueue pipeline_compile_queue;
     moodycamel::ProducerToken pipeline_compile_queue_token;
     std::vector<std::thread> worker_threads;
+    std::atomic<bool> drain_compile_workers{ false };
+    void stop_compile_workers(bool drain);
 
     // each pipeline compiler thread uses this function as its entrypoint
     void compiler_thread(MemState &mem);

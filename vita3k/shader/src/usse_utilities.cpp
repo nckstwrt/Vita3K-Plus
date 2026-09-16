@@ -894,10 +894,11 @@ spv::Id load(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFunc
     if (op.bank == RegisterBank::GLOBAL) {
         // g16 in the GLOBAL bank is the hardware face flag (non-zero = front-facing)
         if (op.num == GLOBAL_REG_FRONT_FACING && params.front_facing_id != 0) {
-            const bool integral = !is_float_data_type(op.type);
-            const spv::Id scalar_type = integral ? b.makeUintType(32) : type_f32;
-            const spv::Id one = integral ? b.makeUintConstant(1) : b.makeFloatConstant(1.0f);
-            const spv::Id zero = integral ? b.makeUintConstant(0) : b.makeFloatConstant(0.0f);
+            const bool integral_signed = is_signed_integer_data_type(op.type);
+            const bool integral_unsigned = is_unsigned_integer_data_type(op.type);
+            const spv::Id scalar_type = integral_signed ? b.makeIntType(32) : (integral_unsigned ? b.makeUintType(32) : type_f32);
+            const spv::Id one = integral_signed ? b.makeIntConstant(1) : (integral_unsigned ? b.makeUintConstant(1) : b.makeFloatConstant(1.0f));
+            const spv::Id zero = integral_signed ? b.makeIntConstant(0) : (integral_unsigned ? b.makeUintConstant(0) : b.makeFloatConstant(0.0f));
 
             const spv::Id is_front = b.createLoad(params.front_facing_id, spv::NoPrecision);
             spv::Id flag = b.createTriOp(spv::OpSelect, scalar_type, is_front, one, zero);

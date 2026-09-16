@@ -85,6 +85,7 @@ struct VKTextureCache : public TextureCache {
     void configure_sampler(size_t index, const SceGxmTexture &texture, bool no_linear) override;
 
     bool format_supports_linear_filter(vk::Format format);
+    bool texture_supports_linear_filter() override;
     std::unordered_map<VkFormat, bool> linear_filter_support_cache;
 
     bool format_supports_sampled_image(vk::Format format);

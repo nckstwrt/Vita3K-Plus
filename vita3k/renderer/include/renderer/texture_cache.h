@@ -160,7 +160,8 @@ public:
     void cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemState &mem);
 
     // is called by cache_and_bind_texture if use_sampler_cache is set to true
-    int cache_and_bind_sampler(const SceGxmTexture &gxm_texture, bool is_depth = false);
+    virtual bool texture_supports_linear_filter() { return true; }
+    int cache_and_bind_sampler(const SceGxmTexture &gxm_texture, bool force_nearest = false);
 
     // look at the texture folder and update the available imported / exported hashes
     void refresh_available_textures();
