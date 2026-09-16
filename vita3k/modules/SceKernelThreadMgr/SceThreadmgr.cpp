@@ -1081,16 +1081,49 @@ static int delay_thread(KernelState &kernel, SceUID thread_id, SceUInt delay_us)
     return SCE_KERNEL_OK;
 }
 
-static int delay_thread_cb(EmuEnvState &emuenv, SceUID thread_id, SceUInt delay_us) {
-    auto start = std::chrono::high_resolution_clock::now(); // Meseaure the time taken to process callbacks
-    process_callbacks(emuenv.kernel, thread_id);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+static bool callback_pending(const std::vector<CallbackPtr> &callbacks) {
+    for (const CallbackPtr &cb : callbacks) {
+        if (cb->is_executable())
+            return true;
+    }
+    return false;
+}
 
-    if (delay_us > elapsed.count()) // If we spent less time than requested processing callbacks, sleep the remaining time
-        return delay_thread(emuenv.kernel, thread_id, delay_us - elapsed.count());
-    else // Else return directly
-        return SCE_KERNEL_OK;
+static int delay_thread_cb(EmuEnvState &emuenv, SceUID thread_id, SceUInt delay_us) {
+    constexpr int64_t CALLBACK_POLL_US = 2000;
+    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(delay_us);
+    std::vector<CallbackPtr> callbacks;
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.kernel.mutex);
+        callbacks = thread->callbacks;
+    }
+
+    for (;;) {
+        process_callbacks(emuenv.kernel, thread_id);
+        if (std::chrono::steady_clock::now() >= deadline)
+            return SCE_KERNEL_OK;
+
+        std::unique_lock<std::mutex> lock(thread->mutex);
+        thread->update_status(ThreadStatus::wait);
+        bool pending = false;
+        for (;;) {
+            const int64_t left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - std::chrono::steady_clock::now()).count();
+            if (left <= 0)
+                break;
+            const int64_t slice = (callbacks.empty() || left < CALLBACK_POLL_US) ? left : CALLBACK_POLL_US;
+            if (thread->wait_for_run_precise(lock, slice))
+                break;
+            if (callback_pending(callbacks)) {
+                pending = true;
+                break;
+            }
+        }
+        if (thread->status != ThreadStatus::run)
+            thread->update_status(ThreadStatus::run);
+        if (!pending)
+            return SCE_KERNEL_OK;
+    }
 }
 
 EXPORT(int, sceKernelDelayThread, SceUInt delay) {

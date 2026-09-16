@@ -32,6 +32,7 @@
 #include <util/lock_and_find.h>
 #include <util/log.h>
 
+#include <SDL3/SDL_error.h>
 #include <SDL3/SDL_mutex.h>
 #include <SDL3/SDL_thread.h>
 
@@ -189,7 +190,21 @@ ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<c
     params.thid = thread->id;
 
     params.host_may_destroy_params = SDL_CreateSemaphore(0);
-    SDL_DetachThread(SDL_CreateThread(&thread_function, thread->name.c_str(), &params));
+    SDL_Thread *const host_thread = params.host_may_destroy_params ? SDL_CreateThread(&thread_function, thread->name.c_str(), &params) : nullptr;
+    if (!host_thread) {
+        // nothing would ever signal the semaphore so waiting on it would hang the creator
+        LOG_ERROR("Failed to create the host thread for {}: {}", thread->name, SDL_GetError());
+        if (params.host_may_destroy_params)
+            SDL_DestroySemaphore(params.host_may_destroy_params);
+        {
+            const std::lock_guard<std::mutex> lock(mutex);
+            threads.erase(thread->id);
+            corenum_allocator.free_corenum(get_processor_id(*thread->cpu));
+            thread_deleted_cond.notify_all();
+        }
+        return nullptr;
+    }
+    SDL_DetachThread(host_thread);
     SDL_WaitSemaphore(params.host_may_destroy_params);
     SDL_DestroySemaphore(params.host_may_destroy_params);
 
