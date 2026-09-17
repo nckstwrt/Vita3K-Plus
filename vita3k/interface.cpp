@@ -56,8 +56,10 @@
 
 #include "patch/patch.h"
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
+#include <numeric>
 #include <regex>
 
 typedef std::shared_ptr<mz_zip_archive> ZipPtr;
@@ -335,6 +337,41 @@ static std::vector<std::string> get_archive_contents_path(const ZipPtr &zip) {
     return content_path;
 }
 
+static bool archive_content_is_patch(const ZipPtr &zip, const std::string &content_path) {
+    vfs::FileBuffer buffer;
+    if (!mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + "sce_sys/param.sfo").c_str(), &write_to_buffer, &buffer, 0))
+        return false;
+    sfo::SfoAppInfo info;
+    return sfo::get_param_info(info, buffer, 0) && info.app_category.contains("gp");
+}
+
+static bool archive_holds_only_patches(const fs::path &archive_path) {
+    FILE *fp = FOPEN(archive_path.c_str(), "rb");
+    if (!fp)
+        return false;
+    bool only_patches = false;
+    {
+        const ZipPtr zip(new mz_zip_archive, delete_zip);
+        std::memset(zip.get(), 0, sizeof(*zip));
+        if (mz_zip_reader_init_cfile(zip.get(), fp, 0, 0)) {
+            const auto contents = get_archive_contents_path(zip);
+            only_patches = !contents.empty() && std::all_of(contents.begin(), contents.end(), [&](const std::string &content) { return archive_content_is_patch(zip, content); });
+        }
+    }
+    fclose(fp);
+    return only_patches;
+}
+
+std::vector<size_t> archive_install_order(const std::vector<fs::path> &archives) {
+    std::vector<bool> only_patches(archives.size());
+    for (size_t i = 0; i < archives.size(); i++)
+        only_patches[i] = archive_holds_only_patches(archives[i]);
+    std::vector<size_t> order(archives.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::stable_partition(order.begin(), order.end(), [&](size_t index) { return !only_patches[index]; });
+    return order;
+}
+
 std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback, const ReinstallCallback &reinstall_callback) {
     FILE *vpk_fp = FOPEN(archive_path.c_str(), "rb");
     if (!vpk_fp) {
@@ -352,7 +389,7 @@ std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, const fs::path &ar
     }
 
     const mz_uint archive_num_files = mz_zip_reader_get_num_files(zip.get());
-    const auto content_path = get_archive_contents_path(zip);
+    auto content_path = get_archive_contents_path(zip);
     LOG_INFO("Archive {}: {} file(s), {} content(s) found", fs_utils::path_to_utf8(archive_path.filename()), archive_num_files, content_path.size());
     if (content_path.empty()) {
         for (mz_uint i = 0; i < std::min<mz_uint>(archive_num_files, 8); i++) {
@@ -363,6 +400,8 @@ std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, const fs::path &ar
         fclose(vpk_fp);
         return {};
     }
+
+    std::stable_partition(content_path.begin(), content_path.end(), [&](const std::string &path) { return !archive_content_is_patch(zip, path); });
 
     const auto count = static_cast<float>(content_path.size());
     float current = 0.f;

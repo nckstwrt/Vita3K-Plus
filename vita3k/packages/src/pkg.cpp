@@ -76,6 +76,20 @@ bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, co
     return true;
 }
 
+static bool is_safe_entry_name(std::string_view name) {
+    if (name.starts_with('/') || name.starts_with('\\') || name.find(':') != std::string_view::npos)
+        return false;
+    while (!name.empty()) {
+        const size_t separator = name.find_first_of("/\\");
+        if (name.substr(0, separator) == "..")
+            return false;
+        if (separator == std::string_view::npos)
+            break;
+        name.remove_prefix(separator + 1);
+    }
+    return true;
+}
+
 bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_zRIF, const std::function<void(float)> &progress_callback) {
     FILE *infile = FOPEN(pkg_path.c_str(), "rb");
     if (!infile) {
@@ -235,6 +249,11 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         type = PkgType::PKG_TYPE_VITA_PATCH;
     }
 
+    if (type == PkgType::PKG_TYPE_VITA_PATCH && !fs::exists(emuenv.vita_fs_path / "ux0/app" / emuenv.app_info.app_title_id / "sce_sys/param.sfo")) {
+        LOG_ERROR("Install app before patch: {} is not installed", emuenv.app_info.app_title_id);
+        return abandon();
+    }
+
     auto path{ emuenv.vita_fs_path / "ux0" };
 
     switch (type) {
@@ -292,6 +311,10 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
 
         auto string_name = std::string(name.begin(), name.end());
         LOG_INFO(string_name);
+        if (!is_safe_entry_name(string_name)) {
+            LOG_ERROR("The pkg entry '{}' would extract outside its folder", string_name);
+            return abandon();
+        }
 
         if ((byte_swap(entry.type) & 0xFF) == 4 || (byte_swap(entry.type) & 0xFF) == 18) { // Directory
             fs::create_directories(path / string_name);

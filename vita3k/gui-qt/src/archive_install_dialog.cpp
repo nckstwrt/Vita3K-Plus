@@ -118,7 +118,8 @@ void ArchiveWorker::run() {
     const int total = static_cast<int>(m_archives.size());
     int done = 0;
 
-    for (const auto &archive_path : m_archives) {
+    for (const size_t index : archive_install_order(m_archives)) {
+        const fs::path &archive_path = m_archives[index];
         const QString archive_name = gui::utils::to_qt_path(archive_path.filename());
         Q_EMIT current_title_changed(archive_name);
         Q_EMIT global_progress(done + 1, total);

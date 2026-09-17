@@ -664,12 +664,13 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
                     const Address rect_start = surface_info->data.address() + ny0 * row_stride_bytes + nx0 * bpp;
                     const uint32_t rect_row_bytes = static_cast<uint32_t>(nx1 - nx0) * bpp;
                     const uint32_t rect_row_count = static_cast<uint32_t>(ny1 - ny0);
-                    state.request_queue.push(BufferSyncRequest{
-                        rect_start,
-                        static_cast<uint32_t>(surface_info->total_bytes),
-                        row_stride_bytes,
-                        rect_row_bytes,
-                        rect_row_count });
+                    if (rect_row_count > 0 && rect_row_bytes > 0)
+                        state.request_queue.push(BufferSyncRequest{
+                            rect_start,
+                            (rect_row_count - 1) * row_stride_bytes + rect_row_bytes,
+                            row_stride_bytes,
+                            rect_row_bytes,
+                            rect_row_count });
                 } else {
                     state.request_queue.push(BufferSyncRequest{ surface_info->data.address(), static_cast<uint32_t>(surface_info->total_bytes) });
                 }

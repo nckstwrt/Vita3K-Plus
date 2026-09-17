@@ -140,10 +140,13 @@ bool ensure_stereo_rate_resampler(StereoRateResamplerRuntimeState &runtime, Ster
         return false;
     }
 
-    const bool needs_recreate = logical.needs_reset || !runtime.context || runtime.source_rate != source_rate
-        || runtime.dest_rate != dest_rate;
+    const bool same_rates = runtime.context && runtime.source_rate == source_rate && runtime.dest_rate == dest_rate;
+    if (same_rates && !logical.needs_reset) {
+        return true;
+    }
 
-    if (!needs_recreate) {
+    if (same_rates && swr_init(runtime.context) >= 0 && replay_history(runtime, logical)) {
+        logical.needs_reset = false;
         return true;
     }
 

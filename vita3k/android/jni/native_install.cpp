@@ -112,6 +112,25 @@ Java_org_vita3k_emulator_NativeLib_installArchive(JNIEnv *env, jclass, jstring p
     return any_installed ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jintArray JNICALL
+Java_org_vita3k_emulator_NativeLib_archiveInstallOrder(JNIEnv *env, jclass, jobjectArray paths_array) {
+    const jsize count = env->GetArrayLength(paths_array);
+    std::vector<fs::path> paths;
+    paths.reserve(count);
+    for (jsize i = 0; i < count; i++) {
+        const auto path_str = static_cast<jstring>(env->GetObjectArrayElement(paths_array, i));
+        paths.emplace_back(jstring_to_string(env, path_str));
+        env->DeleteLocalRef(path_str);
+    }
+
+    const std::vector<size_t> order = archive_install_order(paths);
+    std::vector<jint> indices(order.begin(), order.end());
+    jintArray result = env->NewIntArray(count);
+    if (result && count > 0)
+        env->SetIntArrayRegion(result, 0, count, indices.data());
+    return result;
+}
+
 JNIEXPORT jboolean JNICALL
 Java_org_vita3k_emulator_NativeLib_copyLicense(JNIEnv *env, jclass, jstring path_str) {
     auto *emuenv = get_emuenv();

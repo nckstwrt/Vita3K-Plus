@@ -45,3 +45,4 @@ struct ContentInfo {
 
 std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback = nullptr, const ReinstallCallback &reinstall_callback = nullptr);
 uint32_t install_contents(EmuEnvState &emuenv, const fs::path &path);
+std::vector<size_t> archive_install_order(const std::vector<fs::path> &archives);
