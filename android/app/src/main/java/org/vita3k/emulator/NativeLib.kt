@@ -65,6 +65,8 @@ object NativeLib {
      * @param forceReinstall If true, silently reinstalls if already present (no prompt).
      */
     external fun installArchive(path: String, callback: InstallCallback, forceReinstall: Boolean): Boolean
+    /** Returns the indices of the archives in install order (games before archives that only hold updates). */
+    external fun archiveInstallOrder(paths: Array<String>): IntArray
     /** Copies a .rif or .bin license file. */
     external fun copyLicense(path: String): Boolean
     /** Creates and installs a license from a zRIF key. */
