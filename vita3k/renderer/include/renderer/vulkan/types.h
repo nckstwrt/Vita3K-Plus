@@ -274,6 +274,7 @@ struct VKContext : public renderer::Context {
     uint32_t current_fb_height = 0;
 
     vk::ImageView current_color_raw_view = nullptr;
+    vkutil::Image *current_color_raw_image = nullptr;
 
     vkutil::HostRingBuffer vertex_stream_ring_buffer;
     vkutil::HostRingBuffer index_stream_ring_buffer;
@@ -344,6 +345,8 @@ struct VKContext : public renderer::Context {
     bool is_recording = false;
     bool in_renderpass = false;
     bool refresh_pipeline = false;
+    bool pipeline_stops_lrz_write = false;
+    bool stencil_compare_mask_zeroed = false;
     bool is_first_scene_draw = false;
     // command buffer used to record the current scene
     vk::CommandBuffer render_cmd{};

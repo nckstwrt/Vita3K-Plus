@@ -94,9 +94,18 @@ void sync_stencil_func(VKContext &context, const bool is_back) {
         state = is_back ? &context.record.back_stencil_state_values : &context.record.front_stencil_state_values;
     }
 
-    context.render_cmd.setStencilCompareMask(face, state->compare_mask);
+    context.render_cmd.setStencilCompareMask(face, (context.stencil_compare_mask_zeroed && !is_back) ? 0 : state->compare_mask);
     context.render_cmd.setStencilReference(face, state->ref);
     context.render_cmd.setStencilWriteMask(face, state->write_mask);
+}
+
+// Turnip decides LRZ writes from the blend state alone
+bool fetch_draw_stops_lrz_write(const VKState &state, const GxmRecordState &record, const SceGxmProgram &fragment_program) {
+    return state.is_mesa_turnip && state.features.direct_fragcolor && fragment_program.is_frag_color_used() && !fragment_program.has_no_effect()
+        && record.front_side_fragment_program_mode != SCE_GXM_FRAGMENT_PROGRAM_DISABLED
+        && record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED
+        && record.front_stencil_state_op.func == SCE_GXM_STENCIL_FUNC_ALWAYS
+        && (record.two_sided != SCE_GXM_TWO_SIDED_ENABLED || record.back_stencil_state_op.func == SCE_GXM_STENCIL_FUNC_ALWAYS);
 }
 
 void sync_depth_bias(VKContext &context) {

@@ -947,8 +947,34 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
             spv::Id coord_0 = b.makeIntConstant(0);
             const spv::Id ivec2 = b.makeVectorType(b.makeIntType(32), 2);
             coord_0 = b.makeCompositeConstant(ivec2, { coord_0, coord_0 });
-            source = b.createOp(spv::OpImageRead, v4, { b.createLoad(last_frag_data, spv::NoPrecision), coord_0 });
-            b.setPrecision(source, precision);
+
+            if (translation_state.is_vulkan && translation_state.hints->raw_color_attachment_input) {
+                const spv::Id raw_component_type = b.makeUintType(32);
+                const spv::Id raw_image_type = b.makeImageType(raw_component_type, spv::DimSubpassData, false, false, false, 2, spv::ImageFormatUnknown);
+                const spv::Id last_frag_data_raw = b.createVariable(spv::NoPrecision, spv::StorageClassUniformConstant, raw_image_type, "last_frag_data_rawUI");
+                b.addDecoration(last_frag_data_raw, spv::DecorationInputAttachmentIndex, 1);
+                b.addDecoration(last_frag_data_raw, spv::DecorationBinding, 2);
+                b.addDecoration(last_frag_data_raw, spv::DecorationDescriptorSet, 1);
+
+                const spv::Id use_raw_ptr = utils::create_access_chain(b, spv::StorageClassUniform, translation_state.render_info_id, { b.makeIntConstant(FRAG_UNIFORM_use_raw_image) });
+                const spv::Id read_float_input = b.createBinOp(spv::OpFOrdLessThan, b.makeBoolType(), b.createLoad(use_raw_ptr, spv::NoPrecision), b.makeFloatConstant(0.5f));
+                spv::Builder::If raw_cond_builder(read_float_input, spv::SelectionControlMaskNone, b);
+
+                source = b.createOp(spv::OpImageRead, v4, { b.createLoad(last_frag_data, spv::NoPrecision), coord_0 });
+                b.setPrecision(source, precision);
+                store_source_result();
+
+                raw_cond_builder.makeBeginElse();
+                source = b.createOp(spv::OpImageRead, b.makeVectorType(raw_component_type, 4), { b.createLoad(last_frag_data_raw, spv::NoPrecision), coord_0 });
+                target_to_store.type = DataType::UINT16;
+                store_source_result(true);
+                raw_cond_builder.makeEndIf();
+
+                source = spv::NoResult;
+            } else {
+                source = b.createOp(spv::OpImageRead, v4, { b.createLoad(last_frag_data, spv::NoPrecision), coord_0 });
+                b.setPrecision(source, precision);
+            }
 
             translation_state.last_frag_data_id = last_frag_data;
         } else if (features.support_shader_interlock || features.support_texture_barrier) {
@@ -2610,6 +2636,27 @@ void convert_gxp_to_glsl_from_filepath(const std::string &shader_filepath_utf8) 
             if (a8_file) {
                 a8_file.write(reinterpret_cast<const char *>(a8.spirv.data()), static_cast<std::streamsize>(a8.spirv.size() * sizeof(uint32_t)));
                 LOG_INFO("Wrote the U8_A one-channel-surface variant to {} ({} words)", a8_path.string(), a8.spirv.size());
+            }
+        }
+
+        // The subpass-input framebuffer fetch on an F16 surface with its raw attachment
+        if (gxp.is_frag_color_used()) {
+            FeatureState fetch_features = vk_features;
+            fetch_features.support_shader_interlock = false;
+            fetch_features.direct_fragcolor = true;
+            fetch_features.preserve_f16_nan_as_u16 = true;
+            Hints fetch_hints = hints;
+            fetch_hints.color_format = SCE_GXM_COLOR_FORMAT_F16F16F16F16_RGBA;
+            fetch_hints.raw_color_attachment_input = true;
+            const GeneratedShader fetch = convert_gxp(gxp, shader_filepath_str.filename().string(), fetch_features, shader::Target::SpirVVulkan, fetch_hints, false, false);
+            if (!fetch.spirv.empty()) {
+                fs::path fetch_path = shader_filepath_str;
+                fetch_path.replace_extension(".vk.rawfetch.spv");
+                fs::ofstream fetch_file(fetch_path, std::ios::binary);
+                if (fetch_file) {
+                    fetch_file.write(reinterpret_cast<const char *>(fetch.spirv.data()), static_cast<std::streamsize>(fetch.spirv.size() * sizeof(uint32_t)));
+                    LOG_INFO("Wrote the raw framebuffer-fetch variant to {} ({} words)", fetch_path.string(), fetch.spirv.size());
+                }
             }
         }
     }

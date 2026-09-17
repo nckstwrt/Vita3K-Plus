@@ -667,6 +667,12 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
     }
 #endif
 
+    if (physical_device_properties.apiVersion >= VK_API_VERSION_1_2
+        && VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceProperties2KHR) {
+        const auto driver_chain = physical_device.getProperties2KHR<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceDriverProperties>();
+        is_mesa_turnip = driver_chain.get<vk::PhysicalDeviceDriverProperties>().driverID == vk::DriverId::eMesaTurnip;
+    }
+
     bool support_dedicated_allocations = false;
     // Create Device
     {
@@ -1005,7 +1011,7 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
 
         // dummy raw u16 storage image, bound at the raw-color slot when the current surface has no raw alias
         default_raw_image = vkutil::Image(1, 1, vk::Format::eR16G16B16A16Uint);
-        default_raw_image.init_image(vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferDst);
+        default_raw_image.init_image(vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eInputAttachment | vk::ImageUsageFlagBits::eTransferDst);
         default_raw_image.transition_to(cmd_buffer, vkutil::ImageLayout::StorageImage);
         vkutil::end_single_time_command(device, general_queue, general_command_pool, cmd_buffer);
 
@@ -1221,9 +1227,9 @@ void VKState::log_gpu_configuration(const Config &cfg) {
         (mapping_idx >= 0 && mapping_idx <= 4) ? mapping_names[mapping_idx] : "?",
         screen_renderer.filter ? screen_renderer.filter->get_name() : "<not created yet>",
         res_multiplier, cfg.current_config.high_accuracy, cfg.validation_layer);
-    LOG_INFO("  session config: fullscreen={} stretch_display_area={} hd_res_pixel_perfect={} swapchain={}x{} is_adreno_stock={} is_adreno_turnip={}",
+    LOG_INFO("  session config: fullscreen={} stretch_display_area={} hd_res_pixel_perfect={} swapchain={}x{} is_adreno_stock={} is_adreno_turnip={} is_mesa_turnip={}",
         fullscreen, stretch_the_display_area, fullscreen_hd_res_pixel_perfect,
-        screen_renderer.extent.width, screen_renderer.extent.height, is_adreno_stock, is_adreno_turnip);
+        screen_renderer.extent.width, screen_renderer.extent.height, is_adreno_stock, is_adreno_turnip, is_mesa_turnip);
     // shaders_path is only filled in by set_app(), which runs after this, so it is reported by the
     // pipeline failure dump instead
     LOG_INFO("  shader version: vk{}", shader::CURRENT_VERSION);

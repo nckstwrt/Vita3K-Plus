@@ -44,6 +44,7 @@ void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *
 
 void sync_clipping(VKContext &context);
 void sync_stencil_func(VKContext &context, const bool is_back);
+bool fetch_draw_stops_lrz_write(const VKState &state, const GxmRecordState &record, const SceGxmProgram &fragment_program);
 void sync_depth_bias(VKContext &context);
 void sync_depth_data(VKContext &context);
 void sync_stencil_data(VKContext &context, const MemState &mem);

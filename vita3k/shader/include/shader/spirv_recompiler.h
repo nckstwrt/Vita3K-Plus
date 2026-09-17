@@ -63,6 +63,8 @@ struct Hints {
     SceGxmTextureFormat fragment_textures[SCE_GXM_MAX_TEXTURE_UNITS];
 
     SceGxmOutputRegisterFormat output_register_format = SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED;
+
+    bool raw_color_attachment_input = false;
 };
 
 struct GeneratedShader {

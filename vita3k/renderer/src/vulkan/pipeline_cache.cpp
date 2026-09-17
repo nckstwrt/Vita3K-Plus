@@ -18,6 +18,7 @@
 #include <renderer/vulkan/pipeline_cache.h>
 
 #include <renderer/functions.h>
+#include <renderer/vulkan/functions.h>
 #include <renderer/vulkan/gxm_to_vulkan.h>
 #include <renderer/vulkan/state.h>
 #include <renderer/vulkan/types.h>
@@ -164,7 +165,7 @@ void PipelineCache::init(bool support_rasterized_order_access) {
             // raw u16x4 alias of the color attachment (set 1, binding 2 in the shaders)
             layout_binding[binding_count++] = vk::DescriptorSetLayoutBinding{
                 .binding = 2,
-                .descriptorType = vk::DescriptorType::eStorageImage,
+                .descriptorType = intput_image_descriptor,
                 .descriptorCount = 1,
                 .stageFlags = vk::ShaderStageFlagBits::eFragment
             };
@@ -524,6 +525,10 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
             hash[2 + i] ^= static_cast<uint8_t>(static_cast<uint32_t>(surface_base) >> (8 * i));
         version_suffix += fmt::format("s{:X}", static_cast<uint32_t>(surface_base));
     }
+    if (!is_vertex && hints.raw_color_attachment_input) {
+        hash[6] ^= 0x75;
+        version_suffix += "u";
+    }
 
     const vk::ShaderModule shader_compiling = std::bit_cast<vk::ShaderModule>(~0ULL);
 
@@ -635,7 +640,7 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool depth
 
         subpass.colorAttachmentCount = with_raw_attachment ? 2 : 1;
         subpass.pColorAttachments = color_refs;
-        subpass.inputAttachmentCount = 1;
+        subpass.inputAttachmentCount = (with_raw_attachment && state.features.direct_fragcolor) ? 2 : 1;
         subpass.pInputAttachments = color_refs;
     }
 
@@ -1128,8 +1133,14 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     // the vertex input state must be computed before shader are retrieved in case symbols are stripped
     const vk::PipelineVertexInputStateCreateInfo vertex_input = get_vertex_input_state(vertex_program_binding);
 
+    const bool use_shader_interlock = state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
+    const bool with_raw_attachment = state.features.preserve_f16_nan_as_u16 && !use_shader_interlock && record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16 && has_color_surface_data;
+
+    shader::Hints fragment_hints = hints;
+    fragment_hints.raw_color_attachment_input = with_raw_attachment && state.features.direct_fragcolor && gxm_fragment_shader->is_frag_color_used();
+
     const vk::PipelineShaderStageCreateInfo vertex_shader = retrieve_shader(vertex_program_binding.program(), vertex_program.hash, true, fragment_program_binding.is_maskupdate, mem, hints);
-    const vk::PipelineShaderStageCreateInfo fragment_shader = retrieve_shader(gxm_fragment_shader, fragment_program.hash, false, fragment_program_binding.is_maskupdate, mem, hints, record.is_gamma_corrected, has_casts);
+    const vk::PipelineShaderStageCreateInfo fragment_shader = retrieve_shader(gxm_fragment_shader, fragment_program.hash, false, fragment_program_binding.is_maskupdate, mem, fragment_hints, record.is_gamma_corrected, has_casts);
     const vk::PipelineShaderStageCreateInfo shader_stages[] = { vertex_shader, fragment_shader };
     // disable the fragment shader if gxm asks us to
     const bool is_fragment_disabled = record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED || gxm_fragment_shader->has_no_effect();
@@ -1140,8 +1151,6 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     };
 
     const bool two_sided = (record.two_sided == SCE_GXM_TWO_SIDED_ENABLED);
-
-    const bool use_shader_interlock = state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
 
     const vk::PipelineRasterizationStateCreateInfo rasterizer{
         .depthClampEnable = (enable_depth_clamp && state.physical_device_features.depthClamp) ? VK_TRUE : VK_FALSE,
@@ -1157,7 +1166,7 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     };
     // depth and stencil tests are always enabled on the ps vita as there is almost no cost in doing so
     // on a tiled renderer
-    const vk::PipelineDepthStencilStateCreateInfo ds_info{
+    vk::PipelineDepthStencilStateCreateInfo ds_info{
         .depthTestEnable = VK_TRUE,
         .depthWriteEnable = (record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED),
         .depthCompareOp = translate_depth_func(record.front_depth_func),
@@ -1166,6 +1175,10 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         .front = convert_op_state(record.front_stencil_state_op),
         .back = convert_op_state(two_sided ? record.back_stencil_state_op : record.front_stencil_state_op)
     };
+    if (fetch_draw_stops_lrz_write(state, record, *gxm_fragment_shader)) {
+        ds_info.front.compareOp = vk::CompareOp::eEqual;
+        ds_info.front.failOp = vk::StencilOp::eKeep;
+    }
 
     vk::PipelineColorBlendStateCreateInfo color_blending{};
     if (support_coherent_framebuffer_fetch)
@@ -1187,7 +1200,6 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     } else {
         blend_attachments[0] = fragment_program.blending;
     }
-    const bool with_raw_attachment = state.features.preserve_f16_nan_as_u16 && !use_shader_interlock && record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16 && has_color_surface_data;
     color_blending.attachmentCount = with_raw_attachment ? 2 : 1;
     color_blending.pAttachments = blend_attachments.data();
 
@@ -1276,8 +1288,8 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         LOG_CRITICAL("  vert shader: {}", hex_string(vertex_program.hash));
         LOG_CRITICAL("  frag shader: {} (fragment {})", hex_string(fragment_program.hash),
             is_fragment_disabled ? "disabled" : "enabled");
-        LOG_CRITICAL("  colour base format: 0x{:X} raw_attachment: {} shader_interlock: {} blend: {} attachments: {}",
-            static_cast<uint32_t>(record.color_base_format), with_raw_attachment, use_shader_interlock,
+        LOG_CRITICAL("  colour base format: 0x{:X} raw_attachment: {} raw_input: {} shader_interlock: {} blend: {} attachments: {}",
+            static_cast<uint32_t>(record.color_base_format), with_raw_attachment, fragment_hints.raw_color_attachment_input, use_shader_interlock,
             static_cast<bool>(fragment_program.blending.blendEnable), color_blending.attachmentCount);
 
         // Dump absolutely everything for the first few failures. Anything less means another

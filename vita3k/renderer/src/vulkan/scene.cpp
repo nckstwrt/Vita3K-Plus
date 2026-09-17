@@ -454,8 +454,12 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
             .image = context.current_color_base_image->image,
             .subresourceRange = vkutil::color_subresource_range
         };
+        std::array<vk::ImageMemoryBarrier, 2> barriers = { barrier, barrier };
+        const uint32_t barrier_count = context.current_color_raw_image ? 2 : 1;
+        if (context.current_color_raw_image)
+            barriers[1].image = context.current_color_raw_image->image;
         context.render_cmd.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::PipelineStageFlagBits::eFragmentShader,
-            vk::DependencyFlagBits::eByRegion, {}, {}, barrier);
+            vk::DependencyFlagBits::eByRegion, {}, {}, vk::ArrayProxy<const vk::ImageMemoryBarrier>(barrier_count, barriers.data()));
     } else if (context.state.features.support_shader_interlock
         && fragment_program_gxp.is_frag_color_used() != context.last_draw_was_framebuffer_fetch) {
         // restart the render pass to act as a barrier
@@ -496,6 +500,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         // to be able to see anything
         bool can_be_whole_quad = instance_count == 1 && count <= 6;
         vk::Pipeline new_pipeline = context.state.pipeline_cache.retrieve_pipeline(context, type, !can_be_whole_quad, mem);
+        context.pipeline_stops_lrz_write = fetch_draw_stops_lrz_write(context.state, context.record, fragment_program_gxp);
 
         if (new_pipeline != context.current_pipeline) {
             context.current_pipeline = new_pipeline;
@@ -508,6 +513,11 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     // can happen with asynchronous pipeline compilation
     if (context.current_pipeline == nullptr)
         return;
+
+    if (context.pipeline_stops_lrz_write != context.stencil_compare_mask_zeroed) {
+        context.stencil_compare_mask_zeroed = context.pipeline_stops_lrz_write;
+        sync_stencil_func(context, false);
+    }
 
     if (config.log_active_shaders) {
         const std::string hash_text_f = hex_string(context.record.fragment_program_binding->fragment_program->hash);
