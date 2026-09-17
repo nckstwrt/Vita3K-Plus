@@ -911,6 +911,18 @@ EXPORT(int, sceRemoteOSKDialogTerm) {
     return UNIMPLEMENTED();
 }
 
+static constexpr uint64_t SAVEDATA_DIALOG_CLOSE_MS = 150;
+
+// the dialog closes before the status reports FINISHED so a Term straight after Finish fails as on the console
+static void complete_savedata_close(EmuEnvState &emuenv) {
+    std::lock_guard<std::recursive_mutex> lock(emuenv.common_dialog.mutex);
+    auto &savedata = emuenv.common_dialog.savedata;
+    if (savedata.finishing && SDL_GetTicks() >= savedata.finish_tick) {
+        savedata.finishing = false;
+        emuenv.common_dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;
+    }
+}
+
 EXPORT(int, sceSaveDataDialogAbort) {
     TRACY_FUNC(sceSaveDataDialogAbort);
     if (emuenv.common_dialog.type != SAVEDATA_DIALOG) {
@@ -918,6 +930,7 @@ EXPORT(int, sceSaveDataDialogAbort) {
     }
 
     std::lock_guard<std::recursive_mutex> lock(emuenv.common_dialog.mutex);
+    emuenv.common_dialog.savedata.finishing = false;
     emuenv.common_dialog.savedata.bar_percent = 0;
     emuenv.common_dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;
     emuenv.common_dialog.savedata.button_id = SCE_SAVEDATA_DIALOG_BUTTON_ID_INVALID;
@@ -1248,12 +1261,14 @@ EXPORT(int, sceSaveDataDialogFinish, const SceSaveDataDialogFinishParam *finishP
     std::lock_guard<std::recursive_mutex> lock(emuenv.common_dialog.mutex);
     emuenv.common_dialog.savedata.bar_percent = 0;
     emuenv.common_dialog.substatus = SCE_COMMON_DIALOG_STATUS_RUNNING;
-    emuenv.common_dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;
+    emuenv.common_dialog.savedata.finishing = true;
+    emuenv.common_dialog.savedata.finish_tick = SDL_GetTicks() + SAVEDATA_DIALOG_CLOSE_MS;
     return 0;
 }
 
 EXPORT(SceInt32, sceSaveDataDialogGetResult, SceSaveDataDialogResult *result) {
     TRACY_FUNC(sceSaveDataDialogGetResult, result);
+    complete_savedata_close(emuenv);
     if (emuenv.common_dialog.type != SAVEDATA_DIALOG)
         return RET_ERROR(SCE_COMMON_DIALOG_ERROR_NOT_FINISHED);
 
@@ -1289,6 +1304,7 @@ EXPORT(SceInt32, sceSaveDataDialogGetResult, SceSaveDataDialogResult *result) {
 
 EXPORT(int, sceSaveDataDialogGetStatus) {
     TRACY_FUNC(sceSaveDataDialogGetStatus);
+    complete_savedata_close(emuenv);
     if ((emuenv.common_dialog.type != SAVEDATA_DIALOG) || ((emuenv.common_dialog.status != SCE_COMMON_DIALOG_STATUS_RUNNING) && (emuenv.common_dialog.substatus != SCE_COMMON_DIALOG_STATUS_RUNNING)))
         return SCE_COMMON_DIALOG_STATUS_NONE;
 
@@ -1297,6 +1313,7 @@ EXPORT(int, sceSaveDataDialogGetStatus) {
 
 EXPORT(int, sceSaveDataDialogGetSubStatus) {
     TRACY_FUNC(sceSaveDataDialogGetSubStatus);
+    complete_savedata_close(emuenv);
     if (emuenv.common_dialog.type != SAVEDATA_DIALOG || emuenv.common_dialog.status != SCE_COMMON_DIALOG_STATUS_RUNNING) {
         return SCE_COMMON_DIALOG_STATUS_NONE;
     }
@@ -1497,6 +1514,7 @@ EXPORT(int, sceSaveDataDialogSubClose) {
 
 EXPORT(int, sceSaveDataDialogTerm) {
     TRACY_FUNC(sceSaveDataDialogTerm);
+    complete_savedata_close(emuenv);
     if (emuenv.common_dialog.type != SAVEDATA_DIALOG) {
         return RET_ERROR(SCE_COMMON_DIALOG_ERROR_NOT_IN_USE);
     }

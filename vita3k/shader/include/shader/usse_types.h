@@ -48,8 +48,8 @@ enum class ExtPredicate : uint8_t {
     P3,
     NEGP0,
     NEGP1,
-    NEGP2,
-    PN
+    PN,
+    NEGP2
 };
 
 enum class ExtVecPredicate : uint8_t {

@@ -952,13 +952,10 @@ static void display_entry_thread(EmuEnvState &emuenv) {
         }
         emuenv.gxm.display_worker_state.store(3, std::memory_order_relaxed);
 
-        // now we can remove the thread from the display queue
-        display_queue.pop();
-        emuenv.gxm.display_entries_done.fetch_add(1, std::memory_order_relaxed);
-
         // check if we're shutting down before calling run_guest_function to avoid deadlock
         if (emuenv.display.abort.load()) {
-            LOG_DEBUG("Abort detected after pop, freeing callback data and exiting");
+            LOG_DEBUG("Abort detected, freeing callback data and exiting");
+            display_queue.pop();
             free(emuenv.mem, display_callback->data);
             break;
         }
@@ -977,6 +974,10 @@ static void display_entry_thread(EmuEnvState &emuenv) {
             renderer::subject_done(new_sync, display_callback->new_sync_timestamp + 1);
 
         free(emuenv.mem, display_callback->data);
+
+        // the entry stays pending until its callback has returned
+        display_queue.pop();
+        emuenv.gxm.display_entries_done.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -1223,6 +1224,8 @@ struct SceGxmContext {
             }
         } else {
             new_command = linearly_allocate<renderer::Command>(kern, mem, current_thread_id);
+            if (!new_command)
+                return nullptr;
 
             new (new_command) renderer::Command;
             new_command->flags |= renderer::Command::FLAG_NO_FREE;
@@ -2433,6 +2436,14 @@ EXPORT(int, sceGxmDisplayQueueAddEntry, Ptr<SceGxmSyncObject> oldBuffer, Ptr<Sce
         newBufferSync->last_display = ++newBufferSync->timestamp_ahead;
     emuenv.gxm.last_display_global = emuenv.gxm.global_timestamp.fetch_add(1, std::memory_order_relaxed);
 
+    bool queue_full;
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue.get_mutex());
+        queue_full = emuenv.gxm.display_queue.size() >= emuenv.gxm.display_queue.maxPendingCount_;
+    }
+    if (queue_full)
+        guest_sched_release_for_block();
+
     // function may be blocking here (expected behavior)
     emuenv.gxm.display_queue.push(display_callback);
 
@@ -2442,12 +2453,6 @@ EXPORT(int, sceGxmDisplayQueueAddEntry, Ptr<SceGxmSyncObject> oldBuffer, Ptr<Sce
         active_renderer_context = Ptr<SceGxmContext>(emuenv.gxm.immediate_context).get(emuenv.mem)->renderer.get();
 
     renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::NewFrame, false, frame, &emuenv.display, active_renderer_context);
-
-    if (emuenv.gxm.params.displayQueueMaxPendingCount == 1) {
-        // double buffering, not handled by the queue configuration
-        guest_sched_release_for_block();
-        emuenv.gxm.display_queue.wait_empty();
-    }
 
     return 0;
 }
@@ -3063,9 +3068,7 @@ EXPORT(int, sceGxmInitialize, const SceGxmInitializeParams *params) {
 
     emuenv.gxm.params = *params;
     // hack, limit the number of frame rendering at the same time to at most 3
-    // also, the last frame won't be in the queue so decrease the count by 1
-    // the case where displayQueueMaxPendingCount is 1 handled in sceGxmDisplayQueueAddEntry
-    const uint32_t max_queue_size = std::max(std::min(params->displayQueueMaxPendingCount, 3U) - 1, 1U);
+    const uint32_t max_queue_size = std::max(std::min(params->displayQueueMaxPendingCount, 3U), 1U);
     emuenv.gxm.display_queue.maxPendingCount_ = max_queue_size;
 
     const ThreadStatePtr main_thread = emuenv.kernel.get_thread(thread_id);

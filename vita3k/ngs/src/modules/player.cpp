@@ -19,6 +19,7 @@
 #include <util/log.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 
@@ -249,6 +250,14 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
             voice_lock.lock();
             params = data.get_parameters<SceNgsPlayerParams>(mem);
             continue;
+        }
+
+        if (params->channels < 0 || params->channels > SCE_NGS_PLAYER_MAX_PCM_CHANNELS || state->current_byte_position_in_buffer < 0) {
+            static std::atomic<uint32_t> bad_voices{ 0 };
+            if (bad_voices.fetch_add(1, std::memory_order_relaxed) < 16)
+                LOG_ERROR("NGS player: stopping a voice with {} channels at byte position {}", static_cast<int>(params->channels), state->current_byte_position_in_buffer);
+            finished = true;
+            break;
         }
 
         logical->starved_ticks = 0;

@@ -565,7 +565,9 @@ void analyze(USSEBlockNode &root, USSEOffset end_offset, const AnalyzeReadFuncti
 
                 std::uint8_t predicate_writed_to = 0;
                 if (does_write_to_predicate(inst, predicate_writed_to)) {
-                    is_predicate_invalidated = ((predicate_writed_to + 1) == current_code->condition) || ((predicate_writed_to + 5) == current_code->condition);
+                    static constexpr ExtPredicate negated[] = { ExtPredicate::NEGP0, ExtPredicate::NEGP1, ExtPredicate::NEGP2, ExtPredicate::PN };
+                    is_predicate_invalidated = ((predicate_writed_to + 1) == current_code->condition)
+                        || (predicate_writed_to < 4 && static_cast<std::uint8_t>(negated[predicate_writed_to]) == current_code->condition);
                 }
 
                 std::uint32_t offset_end = 0;

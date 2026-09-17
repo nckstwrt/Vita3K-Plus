@@ -23,6 +23,7 @@
 #include <cpu/impl/dynarmic_cpu.h>
 #include <cpu/impl/interface.h>
 #include <cpu/state.h>
+#include <mem/functions.h>
 #include <mem/ptr.h>
 #include <string>
 #include <util/types.h>
@@ -184,10 +185,18 @@ void invalidate_jit_cache(CPUState &state, Address start, size_t length) {
 }
 
 std::string disassemble(CPUState &state, uint64_t at, bool thumb, uint16_t *insn_size) {
-    MemState &mem = *state.mem;
-    const uint8_t *const code = Ptr<const uint8_t>(static_cast<Address>(at)).get(mem);
-    const size_t buffer_size = GiB(4) - at;
-    return disassemble(state.disasm, code, buffer_size, at, thumb, insn_size);
+    uint8_t code[4];
+    size_t code_size = 0;
+    if (at <= GiB(4) - 4 && debug_safe_copy_guest(*state.mem, static_cast<Address>(at), code, 4))
+        code_size = 4;
+    else if (thumb && at <= GiB(4) - 2 && debug_safe_copy_guest(*state.mem, static_cast<Address>(at), code, 2))
+        code_size = 2;
+    if (code_size == 0) {
+        if (insn_size)
+            *insn_size = 0;
+        return "unmapped";
+    }
+    return disassemble(state.disasm, code, code_size, at, thumb, insn_size);
 }
 
 std::string disassemble(CPUState &state, uint64_t at, uint16_t *insn_size) {

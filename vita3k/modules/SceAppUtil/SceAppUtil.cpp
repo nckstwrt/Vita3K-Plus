@@ -248,15 +248,23 @@ std::string construct_slotparam_path(const unsigned int data) {
 
 EXPORT(int, sceAppUtilSaveDataDataRemove, SceAppUtilSaveDataFileSlot *slot, SceAppUtilSaveDataRemoveItem *files, unsigned int fileNum, SceAppUtilMountPoint *mountPoint) {
     TRACY_FUNC(sceAppUtilSaveDataDataRemove, slot, files, fileNum, mountPoint);
+    if (!files && fileNum)
+        return RET_ERROR(SCE_APPUTIL_ERROR_PARAMETER);
+
     for (unsigned int i = 0; i < fileNum; i++) {
-        const auto file = fs::path(construct_savedata0_path(files[i].dataPath.get(emuenv.mem)));
+        const char *const data_path = files[i].dataPath.get(emuenv.mem);
+        if (!data_path) {
+            LOG_WARN("{}: file entry {} of {} has no path, skipping it", export_name, i, fileNum);
+            continue;
+        }
+        const auto file = fs::path(construct_savedata0_path(data_path));
         if (fs::is_regular_file(file)) {
             remove_file(emuenv.io, file.string().c_str(), emuenv.vita_fs_path, export_name);
         } else
             remove_dir(emuenv.io, file.string().c_str(), emuenv.vita_fs_path, export_name);
     }
 
-    if (slot && files[0].mode == SCE_APPUTIL_SAVEDATA_DATA_REMOVE_MODE_DEFAULT) {
+    if (slot && files && files[0].mode == SCE_APPUTIL_SAVEDATA_DATA_REMOVE_MODE_DEFAULT) {
         remove_file(emuenv.io, construct_slotparam_path(slot->id).c_str(), emuenv.vita_fs_path, export_name);
     }
 

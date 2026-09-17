@@ -366,8 +366,10 @@ void request_in_process_launch(EmuEnvState &emuenv, AppLaunchRequest request) {
         request.app_path = emuenv.io.app_path;
 
     emuenv.post_app_launch_request(std::move(request));
-    if (emuenv.renderer)
+    if (emuenv.renderer) {
         emuenv.renderer->should_display = true;
+        emuenv.renderer->command_buffer_queue.wake();
+    }
 }
 
 } // namespace app

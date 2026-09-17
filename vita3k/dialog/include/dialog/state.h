@@ -94,6 +94,8 @@ struct SavedataState {
     std::string list_title;
     uint32_t selected_save = 0;
     bool draw_info_window = false;
+    bool finishing = false;
+    uint64_t finish_tick = 0;
 };
 
 struct NetcheckState {

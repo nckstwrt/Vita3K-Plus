@@ -513,7 +513,16 @@ EXPORT(SceInt32, _sceKernelGetThreadInfo, SceUID threadId, Ptr<SceKernelThreadIn
 
     // TODO: SCE_KERNEL_ERROR_ILLEGAL_CONTEXT check
 
+    ThreadStatus status;
+    uint32_t returned_value;
+    {
+        const std::lock_guard<std::mutex> lock(thread->mutex);
+        status = thread->status;
+        returned_value = thread->returned_value;
+    }
+
     strncpy(info->name, thread->name.c_str(), KERNELOBJECT_MAX_NAME_LENGTH);
+    info->name[KERNELOBJECT_MAX_NAME_LENGTH] = '\0';
     info->stack = Ptr<void>(thread->stack.get());
     info->stackSize = thread->stack_size;
     info->initPriority = thread->priority; // Todo Give only current priority
@@ -521,8 +530,20 @@ EXPORT(SceInt32, _sceKernelGetThreadInfo, SceUID threadId, Ptr<SceKernelThreadIn
     info->initCpuAffinityMask = thread->affinity_mask; // Todo Give init affinity
     info->currentCpuAffinityMask = thread->affinity_mask;
     info->entry = SceKernelThreadEntry(thread->entry_point);
-    if (thread->status == ThreadStatus::dormant) {
-        info->exitStatus = thread->returned_value;
+    switch (status) {
+    case ThreadStatus::run:
+        info->status = SCE_KERNEL_THREAD_STATUS_RUNNING;
+        break;
+    case ThreadStatus::wait:
+        info->status = SCE_KERNEL_THREAD_STATUS_WAITING;
+        break;
+    case ThreadStatus::suspend:
+        info->status = SCE_KERNEL_THREAD_STATUS_SUSPENDED;
+        break;
+    case ThreadStatus::dormant:
+        info->status = SCE_KERNEL_THREAD_STATUS_DORMANT;
+        info->exitStatus = returned_value;
+        break;
     }
     return SCE_KERNEL_OK;
 }

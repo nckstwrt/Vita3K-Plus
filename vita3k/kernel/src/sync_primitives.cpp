@@ -819,8 +819,14 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
         while (true) {
             res = handle_timeout(kernel, thread, thread_lock, mutex_lock, mutex->waiting_threads, data_it, export_name, timeout);
 
-            if (res != SCE_KERNEL_OK || mutex->owner_id == thread_id || thread->is_delete_requested())
+            if (res != SCE_KERNEL_OK || mutex->owner_id == thread_id)
                 break;
+            if (thread->is_delete_requested()) {
+                auto it = mutex->waiting_threads->find(thread);
+                if (it != mutex->waiting_threads->end())
+                    mutex->waiting_threads->erase(it);
+                break;
+            }
 
             thread_lock.lock();
             thread->update_status(ThreadStatus::wait, ThreadStatus::run);

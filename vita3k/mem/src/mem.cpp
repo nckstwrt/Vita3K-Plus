@@ -164,8 +164,10 @@ bool is_valid_addr_synced(MemState &state, Address addr) {
 }
 
 bool is_valid_addr_range(const MemState &state, Address start, Address end) {
+    if (end < start)
+        return false;
     const uint32_t start_page = start / STANDARD_PAGE_SIZE;
-    const uint32_t end_page = (end + STANDARD_PAGE_SIZE - 1) / STANDARD_PAGE_SIZE;
+    const uint32_t end_page = static_cast<uint32_t>((static_cast<uint64_t>(end) + STANDARD_PAGE_SIZE - 1) / STANDARD_PAGE_SIZE);
     return state.allocator.free_slot_count(start_page, end_page) == 0;
 }
 
@@ -810,7 +812,7 @@ void remove_external_mapping(MemState &mem, uint8_t *addr_ptr, uint32_t size) {
     {
         const std::unique_lock<std::mutex> lock(mem.protect_mutex);
         auto prot_it = mem.protect_tree.lower_bound(mapping.address);
-        if (prot_it->first + prot_it->second.size <= mapping.address) {
+        if (prot_it == mem.protect_tree.end() || prot_it->first + prot_it->second.size <= mapping.address) {
             if (prot_it == mem.protect_tree.begin())
                 prot_it = mem.protect_tree.end();
             else
