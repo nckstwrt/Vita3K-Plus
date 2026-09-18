@@ -260,7 +260,8 @@ spv::Id USSETranslatorVisitor::vtst_impl(Instruction inst, ExtPredicate pred, in
     if (is_signed_integer_data_type(load_data_type)) {
         index_tb_comp = 1;
     } else if (is_unsigned_integer_data_type(load_data_type)) {
-        index_tb_comp = 2;
+        // the sign test of a 32-bit result reads bit 31
+        index_tb_comp = (load_data_type == DataType::UINT32 && !is_sub_opcode(inst.opcode)) ? 1 : 2;
     }
 
     const spv::Op used_comp_op = tb_comp_ops[index_tb_comp][compare_include_equal][sign_test];
@@ -498,9 +499,21 @@ bool USSETranslatorVisitor::vtstmsk(
     spv::Id output_type;
     spv::Id zeros;
     spv::Id ones;
+    bool f32_mask_bits = false;
     switch (load_data_type) {
     case DataType::F16:
     case DataType::F32:
+        if (tst_mask_type == 0) {
+            const bool half = load_data_type == DataType::F16;
+            output_type = m_b.makeUintType(32);
+            zeros = m_b.makeUintConstant(0);
+            ones = m_b.makeUintConstant(half ? 0xFFFFu : 0xFFFFFFFFu);
+            if (half)
+                inst.opr.dest.type = DataType::UINT16;
+            else
+                f32_mask_bits = true;
+            break;
+        }
         output_type = type_f32;
         if (output_4)
             output_type = m_b.makeVectorType(output_type, 4);
@@ -544,6 +557,9 @@ bool USSETranslatorVisitor::vtstmsk(
     }
 
     pred_result = m_b.createOp(spv::OpSelect, output_type, { pred_result, ones, zeros });
+    // the f32 mask is stored as the float it replaces so the register bookkeeping is unchanged
+    if (f32_mask_bits)
+        pred_result = m_b.createUnaryOp(spv::OpBitcast, type_f32, pred_result);
 
     store(inst.opr.dest, pred_result);
 
