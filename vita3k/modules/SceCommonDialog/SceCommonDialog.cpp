@@ -1305,7 +1305,7 @@ EXPORT(SceInt32, sceSaveDataDialogGetResult, SceSaveDataDialogResult *result) {
 EXPORT(int, sceSaveDataDialogGetStatus) {
     TRACY_FUNC(sceSaveDataDialogGetStatus);
     complete_savedata_close(emuenv);
-    if ((emuenv.common_dialog.type != SAVEDATA_DIALOG) || ((emuenv.common_dialog.status != SCE_COMMON_DIALOG_STATUS_RUNNING) && (emuenv.common_dialog.substatus != SCE_COMMON_DIALOG_STATUS_RUNNING)))
+    if (emuenv.common_dialog.type != SAVEDATA_DIALOG)
         return SCE_COMMON_DIALOG_STATUS_NONE;
 
     return emuenv.common_dialog.status;
@@ -1506,6 +1506,8 @@ EXPORT(int, sceSaveDataDialogSubClose) {
     }
 
     std::lock_guard<std::recursive_mutex> lock(emuenv.common_dialog.mutex);
+    if (emuenv.common_dialog.savedata.finishing)
+        return 0;
     emuenv.common_dialog.substatus = SCE_COMMON_DIALOG_STATUS_FINISHED;
     emuenv.common_dialog.result = SCE_COMMON_DIALOG_RESULT_OK;
     emuenv.common_dialog.savedata.button_id = SCE_SAVEDATA_DIALOG_BUTTON_ID_INVALID;

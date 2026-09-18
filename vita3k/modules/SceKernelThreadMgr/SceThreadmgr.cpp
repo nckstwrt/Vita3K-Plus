@@ -26,6 +26,7 @@
 
 #include <util/lock_and_find.h>
 
+#include <algorithm>
 #include <chrono>
 #include <thread>
 
@@ -873,10 +874,9 @@ EXPORT(int, _sceKernelWaitSignalCB, uint32_t unknown, uint32_t delay, uint32_t t
     return CALL_EXPORT(_sceKernelWaitSignal, unknown, delay, timeout);
 }
 
-static int wait_thread_end(KernelState &kernel, ThreadStatePtr &waiter, ThreadStatePtr &target, int *stat) {
-    std::unique_lock<std::mutex> waiter_lock(waiter->mutex);
+static int wait_thread_end(ThreadStatePtr &waiter, ThreadStatePtr &target, int *stat, SceUInt *timeout, const char *export_name) {
     {
-        const std::unique_lock<std::mutex> thread_lock(target->mutex);
+        const std::lock_guard<std::mutex> target_lock(target->mutex);
         if (target->status == ThreadStatus::dormant) {
             if (stat != nullptr) {
                 *stat = target->returned_value;
@@ -884,12 +884,40 @@ static int wait_thread_end(KernelState &kernel, ThreadStatePtr &waiter, ThreadSt
             return 0;
         }
 
+        const std::lock_guard<std::mutex> waiter_lock(waiter->mutex);
         waiter->update_status(ThreadStatus::wait);
         target->waiting_threads.push_back(waiter);
     }
-    waiter->status_cond.wait(waiter_lock, [&]() {
-        return waiter->status == ThreadStatus::run;
-    });
+
+    const auto start = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> waiter_lock(waiter->mutex);
+    if (!timeout) {
+        waiter->status_cond.wait(waiter_lock, [&]() {
+            return waiter->status == ThreadStatus::run;
+        });
+    } else if (!waiter->wait_for_run_precise(waiter_lock, *timeout)) {
+        waiter_lock.unlock();
+        const std::lock_guard<std::mutex> target_lock(target->mutex);
+        const auto queued = std::find(target->waiting_threads.begin(), target->waiting_threads.end(), waiter);
+        if (queued != target->waiting_threads.end()) {
+            target->waiting_threads.erase(queued);
+            const std::lock_guard<std::mutex> relock(waiter->mutex);
+            waiter->update_status(ThreadStatus::run);
+            *timeout = 0;
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+        }
+    }
+    if (waiter_lock.owns_lock())
+        waiter_lock.unlock();
+
+    if (timeout) {
+        const auto used = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+        *timeout = used >= *timeout ? 0 : *timeout - static_cast<SceUInt>(used);
+    }
+    if (stat != nullptr) {
+        const std::lock_guard<std::mutex> target_lock(target->mutex);
+        *stat = target->returned_value;
+    }
     return 0;
 }
 
@@ -900,7 +928,7 @@ EXPORT(int, _sceKernelWaitThreadEnd, SceUID thid, int *stat, SceUInt *timeout) {
     if (!target) {
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
     }
-    return wait_thread_end(emuenv.kernel, waiter, target, stat);
+    return wait_thread_end(waiter, target, stat, timeout, export_name);
 }
 
 EXPORT(int, _sceKernelWaitThreadEndCB, SceUID thid, int *stat, SceUInt *timeout) {
@@ -911,7 +939,7 @@ EXPORT(int, _sceKernelWaitThreadEndCB, SceUID thid, int *stat, SceUInt *timeout)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
     }
     process_callbacks(emuenv.kernel, thread_id);
-    return wait_thread_end(emuenv.kernel, waiter, target, stat);
+    return wait_thread_end(waiter, target, stat, timeout, export_name);
 }
 
 EXPORT(SceInt32, sceKernelCancelCallback, SceUID callbackId) {

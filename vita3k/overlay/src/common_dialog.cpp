@@ -1513,6 +1513,8 @@ void common_dialog_overlay::on_button_pressed(pad_button button_press, bool is_a
         handle_message_input(button_press, *m_dialog);
         break;
     case SAVEDATA_DIALOG:
+        if (m_dialog->savedata.finishing)
+            break;
         if (m_savedata_info_mode)
             handle_savedata_info_input(button_press, *m_dialog);
         else if (m_savedata_list_mode)
