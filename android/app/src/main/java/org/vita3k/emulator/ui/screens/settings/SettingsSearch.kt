@@ -64,6 +64,7 @@ internal fun rememberSettingsSearchEntries(
         }
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_async_pipeline, R.string.settings_gpu_async_pipeline_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_accurate_scheduling, R.string.settings_gpu_accurate_scheduling_desc))
+        add(entry(SettingsCategory.Gpu, R.string.settings_gpu_guest_cores, R.string.settings_gpu_guest_cores_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_screen_filter, R.string.settings_gpu_screen_filter_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_resolution, R.string.settings_gpu_resolution_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_anisotropic, R.string.settings_gpu_anisotropic_desc))

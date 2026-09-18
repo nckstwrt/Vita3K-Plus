@@ -152,6 +152,7 @@ std::vector<RestartRequiredSetting> get_restart_required_settings(
     append_if_changed(before.audio_backend != after.audio_backend, RestartRequiredSetting::AudioBackend);
     append_if_changed(before.validation_layer != after.validation_layer, RestartRequiredSetting::ValidationLayer);
     append_if_changed(before.accurate_thread_scheduling != after.accurate_thread_scheduling, RestartRequiredSetting::AccurateThreadScheduling);
+    append_if_changed(before.guest_cores != after.guest_cores, RestartRequiredSetting::GuestCores);
 
     return changed;
 }
@@ -206,7 +207,7 @@ bool load_custom_config(Config::CurrentConfig &out, const fs::path &config_path,
         out.accurate_thread_scheduling = gpu.attribute("accurate-thread-scheduling").as_bool(true);
         out.preempt_on_wake = gpu.attribute("preempt-on-wake").as_bool();
         out.preempt_on_wake_us = gpu.attribute("preempt-on-wake-us").as_int(1000);
-        out.guest_cores = gpu.attribute("guest-cores").as_int(1);
+        out.guest_cores = gpu.attribute("guest-cores").as_int(out.guest_cores);
         out.import_textures = gpu.attribute("import-textures").as_bool();
         out.export_textures = gpu.attribute("export-textures").as_bool();
         out.export_as_png = gpu.attribute("export-as-png").as_bool();

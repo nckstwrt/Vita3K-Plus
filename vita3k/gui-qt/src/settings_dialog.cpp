@@ -331,6 +331,12 @@ void SettingsDialog::load_config() {
     m_ui->disable_surface_sync->setChecked(m_config.disable_surface_sync);
     m_ui->async_pipeline_compilation->setChecked(m_config.async_pipeline_compilation);
     m_ui->accurate_thread_scheduling->setChecked(m_config.accurate_thread_scheduling);
+    m_ui->guest_cores_box->clear();
+    for (int cores = 1; cores <= 3; cores++)
+        m_ui->guest_cores_box->addItem(QString::number(cores), cores);
+    m_ui->guest_cores_box->setCurrentIndex(qBound(1, m_config.guest_cores, 3) - 1);
+    m_ui->label_guest_cores->setEnabled(m_config.accurate_thread_scheduling);
+    m_ui->guest_cores_box->setEnabled(m_config.accurate_thread_scheduling);
 
     {
         m_ui->memory_mapping_box->clear();
@@ -624,6 +630,7 @@ void SettingsDialog::build_desired_config(Config &desired) const {
     current.accurate_thread_scheduling = m_ui->accurate_thread_scheduling->isChecked();
     current.preempt_on_wake = current.accurate_thread_scheduling;
     current.preempt_on_wake_us = 1000;
+    current.guest_cores = m_ui->guest_cores_box->currentData().toInt();
     current.memory_mapping = m_ui->memory_mapping_box->currentData().toString().toStdString();
     current.screen_filter = m_ui->screen_filter_box->currentText().toStdString();
     current.resolution_multiplier = static_cast<float>(m_ui->resolution_upscale->value()) / 4.0f;
@@ -1044,6 +1051,11 @@ void SettingsDialog::setup_connections() {
         m_ui->theme_music_volume_label->setText(tr("Theme music volume: %1%").arg(val));
     });
 
+    connect(m_ui->accurate_thread_scheduling, &QCheckBox::toggled, this, [this](bool on) {
+        m_ui->label_guest_cores->setEnabled(on);
+        m_ui->guest_cores_box->setEnabled(on);
+    });
+
     connect(m_ui->perf_overlay_enabled, &QCheckBox::toggled, this, [this](bool on) {
         m_ui->label_perf_detail->setEnabled(on);
         m_ui->perf_overlay_detail_box->setEnabled(on);
@@ -1215,6 +1227,7 @@ void SettingsDialog::setup_connections() {
         { m_ui->disable_surface_sync, tr("Disable Surface Sync"), m_tooltips->disable_surface_sync },
         { m_ui->async_pipeline_compilation, tr("Asynchronous Pipeline Compilation"), m_tooltips->async_pipeline },
         { m_ui->accurate_thread_scheduling, tr("Accurate Thread Scheduling"), m_tooltips->accurate_thread_scheduling },
+        { m_ui->guest_cores_box, tr("Guest CPU Cores"), m_tooltips->guest_cores },
         { m_ui->memory_mapping_box, tr("Memory Mapping"), m_tooltips->memory_mapping },
         { m_ui->screen_filter_box, tr("Screen Filter"), m_tooltips->screen_filter },
         { m_ui->gb_gpu_device, tr("Graphics Device"), m_tooltips->gpu_device },

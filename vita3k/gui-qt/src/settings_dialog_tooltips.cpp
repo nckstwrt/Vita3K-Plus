@@ -42,6 +42,10 @@ QString restart_required_setting_label(config::RestartRequiredSetting setting) {
         return QCoreApplication::translate("SettingsDialogTooltips", "Audio Backend");
     case config::RestartRequiredSetting::ValidationLayer:
         return QCoreApplication::translate("SettingsDialogTooltips", "Vulkan Validation Layer");
+    case config::RestartRequiredSetting::AccurateThreadScheduling:
+        return QCoreApplication::translate("SettingsDialogTooltips", "Accurate Thread Scheduling");
+    case config::RestartRequiredSetting::GuestCores:
+        return QCoreApplication::translate("SettingsDialogTooltips", "Guest CPU Cores");
     }
 
     return {};
@@ -112,6 +116,7 @@ SettingsDialogTooltips::SettingsDialogTooltips(QObject *parent)
     , disable_surface_sync(tr("Speed hack, disabling turns off surface syncing between CPU and GPU. Surface syncing is needed by a few games.\nGives a big performance boost if disabled (in particular when upscaling is on)."))
     , async_pipeline(tr("Allow pipelines to be compiled concurrently on multiple concurrent threads.\nThis decreases pipeline compilation stutter at the cost of temporary graphical glitches."))
     , accurate_thread_scheduling(tr("Run the game's threads the way a PS Vita schedules them: threads left at the default CPU affinity take turns by priority instead of all running at once."))
+    , guest_cores(tr("Number of guest threads at the default CPU affinity that may run at the same time when Accurate Thread Scheduling is on. A PS Vita gives games three cores, so 3 is the default. Some games crash while loading when their threads run in parallel (e.g., Sonic & All-Stars Racing Transformed). Set to 1 in a Custom Config to fix them at a performance cost."))
     , screen_filter(tr("Select the final image filter to apply."))
     , gpu_device(tr("Select which GPU Vita3k should use."))
     , resolution_upscaling(tr("Scale the games resolution by a multiplier.\nExperimental: apps are not guaranteed to render properly at more than 1x."))

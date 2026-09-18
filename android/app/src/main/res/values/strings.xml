@@ -390,6 +390,8 @@
     <string name="settings_gpu_async_pipeline_desc">Allow pipelines to be compiled concurrently on multiple concurrent threads.\nThis decreases pipeline compilation stutter at the cost of temporary graphical glitches.</string>
     <string name="settings_gpu_accurate_scheduling">Accurate Thread Scheduling</string>
     <string name="settings_gpu_accurate_scheduling_desc">Run guest threads one at a time in priority order, closer to real hardware.\nFixes hangs/deadlocks in some games (e.g. cutscene freezes) at a possible performance cost.</string>
+    <string name="settings_gpu_guest_cores">Guest CPU Cores</string>
+    <string name="settings_gpu_guest_cores_desc">Number of guest threads at the default CPU affinity that may run at the same time when Accurate Thread Scheduling is on. A PS Vita gives games three cores, so 3 is the default.\nSome games crash while loading when their threads run in parallel (e.g., Sonic &amp; All-Stars Racing Transformed): set 1 in their Custom Config to fix them, at a performance cost.</string>
     <string name="settings_gpu_screen_filter">Screen Filter</string>
     <string name="settings_gpu_screen_filter_desc">Select the final image filter to apply.</string>
     <string name="settings_gpu_resolution">Internal Resolution Upscaling</string>

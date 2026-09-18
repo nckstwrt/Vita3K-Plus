@@ -48,6 +48,7 @@ public:
     QString disable_surface_sync;
     QString async_pipeline;
     QString accurate_thread_scheduling;
+    QString guest_cores;
     QString screen_filter;
     QString gpu_device;
     QString resolution_upscaling;

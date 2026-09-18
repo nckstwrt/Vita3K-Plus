@@ -707,6 +707,23 @@ QGroupBox[flat=&quot;true&quot;]::title {
                     </widget>
                    </item>
                    <item>
+                    <layout class="QHBoxLayout" name="guest_cores_layout">
+                     <property name="spacing">
+                      <number>8</number>
+                     </property>
+                     <item>
+                      <widget class="QLabel" name="label_guest_cores">
+                       <property name="text">
+                        <string>Guest CPU Cores</string>
+                       </property>
+                      </widget>
+                     </item>
+                     <item>
+                      <widget class="QComboBox" name="guest_cores_box"/>
+                     </item>
+                    </layout>
+                   </item>
+                   <item>
                     <layout class="QHBoxLayout" name="memory_mapping_layout">
                      <property name="spacing">
                       <number>8</number>
