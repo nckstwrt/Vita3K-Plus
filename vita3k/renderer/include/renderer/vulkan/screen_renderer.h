@@ -54,6 +54,8 @@ public:
     std::vector<vk::Semaphore> image_acquired_semaphores;
     std::vector<vk::Semaphore> image_ready_semaphores;
     bool swapchain_has_storage = false;
+    // FSR can write this swapchain directly or through its blit
+    bool swapchain_supports_fsr = false;
 
     // renderpass used when no effect is done previously (clear the swapchain content)
     vk::RenderPass default_render_pass;

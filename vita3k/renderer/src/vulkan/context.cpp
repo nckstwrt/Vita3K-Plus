@@ -45,11 +45,23 @@ void VKContext::wait_thread_function(const MemState &mem) {
 
     uint64_t pending_max_serial = 0;
 
+    bool device_lost = false;
     auto wait_for_fences = [&]() {
         const auto t0 = std::chrono::steady_clock::now();
         while (!fences.empty()) {
+            if (device_lost) {
+                fences.clear();
+                break;
+            }
             // timeout so we can check for shutdown
-            auto result = state.device.waitForFences(fences, VK_TRUE, 100'000'000ULL);
+            vk::Result result;
+            try {
+                result = state.device.waitForFences(fences, VK_TRUE, 100'000'000ULL);
+            } catch (const vk::SystemError &error) {
+                LOG_CRITICAL("Vulkan device lost while waiting for GPU work: {}", error.what());
+                device_lost = true;
+                continue;
+            }
             if (result == vk::Result::eSuccess) {
                 // don't reset them
                 fences.clear();
@@ -624,12 +636,6 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
 
     if (!submit)
         return;
-
-    if (render_target->multisample_mode && !record.color_surface.downscale) {
-        // revert changes made in set_context
-        render_target->width /= 2;
-        render_target->height /= 2;
-    }
 
     vk::Fence fence = next_fence;
     next_fence = nullptr;

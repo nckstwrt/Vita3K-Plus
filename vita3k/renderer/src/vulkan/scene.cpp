@@ -118,8 +118,10 @@ void mid_scene_flush(VKContext &context, const SceGxmNotification notification) 
     if (restart_render_pass) {
         SceGxmNotification empty_notification = { Ptr<uint32_t>(0), 0 };
         const bool submit = notification.address.address() != 0;
+        ColorSurfaceCacheInfo *const written_surface = context.state.surface_cache.get_last_written_surface();
         context.stop_recording(notification, empty_notification, submit);
         context.start_recording();
+        context.state.surface_cache.restore_last_written_surface(written_surface);
         context.scene_timestamp++;
         context.scene_has_drawn = false;
     }
@@ -346,7 +348,23 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
         }
     }
 
-    context.render_cmd.bindVertexBuffers(0, max_stream_idx, context.vertex_stream_buffers, context.vertex_stream_offsets);
+    if (!context.state.pipeline_cache.needs_attribute_bindings(vertex_program)) {
+        context.render_cmd.bindVertexBuffers(0, max_stream_idx, context.vertex_stream_buffers, context.vertex_stream_offsets);
+        return;
+    }
+
+    // one binding per attribute, in get_vertex_input_state's order, carrying the attribute offset
+    static thread_local std::vector<vk::Buffer> buffers;
+    static thread_local std::vector<vk::DeviceSize> offsets;
+    buffers.clear();
+    offsets.clear();
+    for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
+        if (!vkvert->attribute_infos.contains(attribute.regIndex))
+            continue;
+        buffers.push_back(context.vertex_stream_buffers[attribute.streamIndex]);
+        offsets.push_back(context.vertex_stream_offsets[attribute.streamIndex] + attribute.offset);
+    }
+    context.render_cmd.bindVertexBuffers(0, buffers, offsets);
 }
 
 void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format,

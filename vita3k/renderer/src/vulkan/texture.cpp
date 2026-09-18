@@ -704,7 +704,9 @@ void VKTextureCache::configure_sampler(size_t index, const SceGxmTexture &textur
     };
 
     // when using nearest filter, disable anisotropy as the pixels can contain data other than color
-    sampler_info.anisotropyEnable = (anisotropic_filtering > 1) && (sampler_info.magFilter != vk::Filter::eNearest || sampler_info.minFilter != vk::Filter::eNearest);
+    // a single-level texture is often data too and anisotropy only helps mipmapped textures
+    sampler_info.anisotropyEnable = (anisotropic_filtering > 1) && texture.true_mip_count() > 1
+        && (sampler_info.magFilter != vk::Filter::eNearest || sampler_info.minFilter != vk::Filter::eNearest);
 
     sampler = state.device.createSampler(sampler_info);
 }

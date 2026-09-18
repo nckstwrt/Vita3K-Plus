@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <vector>
 
 static thread_local bool g_refused_guest_access = false;
@@ -318,6 +319,10 @@ static void decommit_free_host_pages(MemState &state, Address region_start, Addr
 Address alloc_aligned(MemState &state, uint32_t size, const char *name, unsigned int alignment, Address start_addr) {
     if (alignment == 0)
         return alloc(state, size, name, start_addr);
+
+    if (alignment > (1u << 31))
+        return 0;
+    alignment = std::bit_ceil(alignment);
 
     const uint64_t requested_pages = (static_cast<uint64_t>(size) + STANDARD_PAGE_SIZE - 1) / STANDARD_PAGE_SIZE;
     const uint64_t alignment_pages = std::max<uint64_t>(1, (static_cast<uint64_t>(alignment) + STANDARD_PAGE_SIZE - 1) / STANDARD_PAGE_SIZE);

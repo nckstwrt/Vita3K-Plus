@@ -285,39 +285,48 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
             state.swap_window();
         }
     }
-    while (!state.render_abort.load(std::memory_order_relaxed)) {
+    try {
+        while (!state.render_abort.load(std::memory_order_relaxed)) {
 #ifdef TRACY_ENABLE
-        ZoneScopedN("Game rendering");
+            ZoneScopedN("Game rendering");
 #endif
-        if (!state.set_current())
-            break;
+            if (!state.set_current())
+                break;
 
-        process_batches(state, state.features, mem, config, 500);
+            process_batches(state, state.features, mem, config, 500);
 
-        if (state.render_abort.load(std::memory_order_relaxed))
-            break;
+            if (state.render_abort.load(std::memory_order_relaxed))
+                break;
 
-        if (state.overlay_manager) {
-            auto precompile = state.overlay_manager->get<overlay::shader_precompile_progress>();
-            if (precompile) {
-                DisplayFrameInfo peek;
-                {
-                    std::lock_guard<std::mutex> guard(display.display_info_mutex);
-                    peek = display.next_rendered_frame;
-                }
-                if (peek.base) {
-                    state.overlay_manager->remove<overlay::shader_precompile_progress>();
+            state.run_render_thread_tasks();
+
+            if (state.overlay_manager) {
+                auto precompile = state.overlay_manager->get<overlay::shader_precompile_progress>();
+                if (precompile) {
+                    DisplayFrameInfo peek;
+                    {
+                        std::lock_guard<std::mutex> guard(display.display_info_mutex);
+                        peek = display.next_rendered_frame;
+                    }
+                    if (peek.base) {
+                        state.overlay_manager->remove<overlay::shader_precompile_progress>();
+                    }
                 }
             }
-        }
 
-        state.render_frame(display, gxm, mem);
-        state.swap_window();
-        state.async_flip_requested.store(false, std::memory_order_relaxed);
+            state.render_frame(display, gxm, mem);
+            state.swap_window();
+            state.async_flip_requested.store(false, std::memory_order_relaxed);
 
 #ifdef TRACY_ENABLE
-        FrameMark;
+            FrameMark;
 #endif
+        }
+    } catch (const std::exception &e) {
+        // a lost device fails every later submit so stop drawing rather than let it reach std::terminate
+        LOG_CRITICAL("Render thread stopped: {}", e.what());
+        state.render_abort = true;
+        state.command_finish_one.notify_all();
     }
 
     state.done_current();

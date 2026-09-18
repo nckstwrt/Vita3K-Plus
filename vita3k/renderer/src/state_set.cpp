@@ -29,6 +29,7 @@
 #include <renderer/vulkan/state.h>
 #include <renderer/vulkan/types.h>
 
+#include <array>
 #include <atomic>
 
 #include <util/align.h>
@@ -564,32 +565,38 @@ COMMAND(handle_set_state) {
     renderer::GXMState gxm_state_to_set = helper.pop<renderer::GXMState>();
     using StateChangeHandlerFunc = decltype(cmd_set_state_region_clip);
 
-    static const std::map<renderer::GXMState, StateChangeHandlerFunc *> handlers = {
-        { GXMState::RegionClip, cmd_set_state_region_clip },
-        { GXMState::Program, cmd_set_state_program },
-        { GXMState::Viewport, cmd_set_state_viewport },
-        { GXMState::DepthBias, cmd_set_state_depth_bias },
-        { GXMState::DepthFunc, cmd_set_state_depth_func },
-        { GXMState::DepthWriteEnable, cmd_set_state_depth_write_enable },
-        { GXMState::PolygonMode, cmd_set_state_polygon_mode },
-        { GXMState::PointLineWidth, cmd_set_state_point_line_width },
-        { GXMState::StencilFunc, cmd_set_state_stencil_func },
-        { GXMState::Texture, cmd_set_state_texture },
-        { GXMState::StencilRef, cmd_set_state_stencil_ref },
-        { GXMState::TwoSided, cmd_set_state_two_sided },
-        { GXMState::CullMode, cmd_set_state_cull_mode },
-        { GXMState::VertexStream, cmd_set_state_vertex_stream },
-        { GXMState::UniformBuffer, cmd_set_state_uniform_buffer },
-        { GXMState::FragmentProgramEnable, cmd_set_state_fragment_program_enable },
-        { GXMState::VisibilityBuffer, cmd_set_state_visibility_buffer },
-        { GXMState::VisibilityIndex, cmd_set_state_visibility_index }
-    };
+    using StateChangeHandler = StateChangeHandlerFunc *;
+    static const auto handlers = [] {
+        std::array<StateChangeHandler, static_cast<size_t>(GXMState::TotalState)> result{};
+        const auto set = [&result](GXMState state, StateChangeHandler handler) {
+            result[static_cast<size_t>(state)] = handler;
+        };
+        set(GXMState::RegionClip, cmd_set_state_region_clip);
+        set(GXMState::Program, cmd_set_state_program);
+        set(GXMState::Viewport, cmd_set_state_viewport);
+        set(GXMState::DepthBias, cmd_set_state_depth_bias);
+        set(GXMState::DepthFunc, cmd_set_state_depth_func);
+        set(GXMState::DepthWriteEnable, cmd_set_state_depth_write_enable);
+        set(GXMState::PolygonMode, cmd_set_state_polygon_mode);
+        set(GXMState::PointLineWidth, cmd_set_state_point_line_width);
+        set(GXMState::StencilFunc, cmd_set_state_stencil_func);
+        set(GXMState::Texture, cmd_set_state_texture);
+        set(GXMState::StencilRef, cmd_set_state_stencil_ref);
+        set(GXMState::TwoSided, cmd_set_state_two_sided);
+        set(GXMState::CullMode, cmd_set_state_cull_mode);
+        set(GXMState::VertexStream, cmd_set_state_vertex_stream);
+        set(GXMState::UniformBuffer, cmd_set_state_uniform_buffer);
+        set(GXMState::FragmentProgramEnable, cmd_set_state_fragment_program_enable);
+        set(GXMState::VisibilityBuffer, cmd_set_state_visibility_buffer);
+        set(GXMState::VisibilityIndex, cmd_set_state_visibility_index);
+        return result;
+    }();
 
-    auto result = handlers.find(gxm_state_to_set);
-
-    if (result != handlers.end()) {
+    const size_t state_index = static_cast<size_t>(gxm_state_to_set);
+    const StateChangeHandler handler = state_index < handlers.size() ? handlers[state_index] : nullptr;
+    if (handler) {
         // LOG_TRACE("State set: {}", (int)gxm_state_to_set);
-        result->second(renderer, mem, config, helper, render_context);
+        handler(renderer, mem, config, helper, render_context);
     } else {
         LOG_ERROR("Unknown state set command {}", static_cast<uint16_t>(gxm_state_to_set));
     }

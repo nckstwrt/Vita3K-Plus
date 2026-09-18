@@ -137,6 +137,11 @@ struct State {
     std::unique_ptr<std::thread> render_thread;
     std::atomic<bool> render_abort{ false };
 
+    std::mutex render_thread_tasks_mutex;
+    std::vector<std::function<void()>> render_thread_tasks;
+    void run_render_thread_tasks();
+    std::vector<uint32_t> dump_frame_on_render_thread(DisplayState &display, uint32_t &width, uint32_t &height);
+
     std::vector<ShadersHash> precompile_queue;
     bool precompile_requested = false;
     std::atomic<bool> precompile_complete{ false };

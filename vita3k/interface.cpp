@@ -666,7 +666,7 @@ void toggle_texture_replacement(EmuEnvState &emuenv) {
 
 static std::vector<uint32_t> get_current_app_frame(EmuEnvState &emuenv, uint32_t &width, uint32_t &height) {
     // Dump the current frame from the emulator display
-    std::vector<uint32_t> frame = emuenv.renderer->dump_frame(emuenv.display, width, height);
+    std::vector<uint32_t> frame = emuenv.renderer->dump_frame_on_render_thread(emuenv.display, width, height);
     if (frame.empty() || (frame.size() != (width * height))) {
         return {};
     }

@@ -167,6 +167,9 @@ public:
 
     vk::ShaderModule precompile_shader(const Sha256Hash &hash, bool search_first = true);
 
+    // true when an attribute offset is past maxVertexInputAttributeOffset
+    bool needs_attribute_bindings(const ProgramBinding &vertex_program) const;
+
     void set_async_compilation(bool enable);
 };
 } // namespace vulkan

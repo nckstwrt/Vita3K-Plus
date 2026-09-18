@@ -1339,6 +1339,9 @@ void store(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFuncti
         if (dest.bank == RegisterBank::INDEX) {
             dest.num -= 1;
 
+            if (b.isVector(source))
+                source = b.createCompositeExtract(source, b.getContainedTypeId(b.getTypeId(source)), 0);
+
             if (!b.isIntType(source)) {
                 std::vector<spv::Id> ops{ source };
                 source = b.createOp(spv::OpBitcast, b.makeIntType(32), ops);

@@ -647,6 +647,8 @@ EXPORT(int, sceIoOpenAsync) {
 
 EXPORT(SceSSize, sceIoPread, SceUID fd, Ptr<void> buf, SceSize nbyte, SceOff offset) {
     TRACY_FUNC(sceIoPread, fd, buf, nbyte, offset);
+    if (offset < 0)
+        return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
 
     if (emuenv.cfg.current_config.file_loading_delay > 0) {
         const uint32_t delay_us = emuenv.cfg.current_config.file_loading_delay * 1000 + nbyte / 20;

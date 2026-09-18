@@ -25,6 +25,8 @@
 #include <kernel/state.h>
 #include <util/log.h>
 
+#include <cmath>
+
 static int reserve_port(CtrlState &state) {
     for (int i = 0; i < SCE_CTRL_MAX_WIRELESS_NUM; i++) {
         if (state.free_ports[i]) {
@@ -190,9 +192,8 @@ static float axis_to_axis(int16_t axis, const auto &mult) {
 
 static uint8_t float_to_byte(float f) {
     const auto clamped_f = std::clamp(f, -1.0f, 1.0f);
-    const auto mapped = (clamped_f * 0.5f) + 0.5f;
 
-    return static_cast<uint8_t>(mapped * 255);
+    return static_cast<uint8_t>(std::lround((clamped_f + 1.0f) * 127.5f));
 }
 
 static void apply_controller(EmuEnvState &emuenv, uint32_t *buttons, float axes[4], SDL_Gamepad *controller, bool ext) {

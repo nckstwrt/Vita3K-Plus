@@ -373,6 +373,14 @@ public:
             last_written_surface->content_is_blended = true;
     }
 
+    // a submitting mid-scene flush syncs the surface which forgets it and then hands it back as the scene keeps drawing
+    ColorSurfaceCacheInfo *get_last_written_surface() const {
+        return last_written_surface;
+    }
+    void restore_last_written_surface(ColorSurfaceCacheInfo *surface) {
+        last_written_surface = surface;
+    }
+
     bool current_surface_raw_is_valid() const {
         return last_written_surface && last_written_surface->raw_image && !last_written_surface->content_is_blended;
     }

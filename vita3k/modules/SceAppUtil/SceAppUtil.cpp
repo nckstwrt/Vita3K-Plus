@@ -36,6 +36,7 @@
 #include <unistd.h>
 #endif
 
+#include <algorithm>
 #include <cstring>
 
 TRACY_MODULE_NAME(SceAppUtil);
@@ -162,8 +163,13 @@ EXPORT(int, sceAppUtilBgdlGetStatus) {
 }
 
 static bool is_addcont_exist(EmuEnvState &emuenv, const SceChar8 *path) {
-    const auto drm_content_id_path{ emuenv.vita_fs_path / "ux0" / emuenv.io.device_paths.addcont0 / reinterpret_cast<const char *>(path) };
-    return (fs::exists(drm_content_id_path) && (!fs::is_empty(drm_content_id_path)));
+    const SceChar8 *const end = std::find(path, path + SCE_APPUTIL_NP_DRM_ADDCONT_ID_SIZE, '\0');
+    const std::string dir_name(reinterpret_cast<const char *>(path), reinterpret_cast<const char *>(end));
+    if (dir_name.empty())
+        return false;
+    const auto drm_content_id_path{ emuenv.vita_fs_path / "ux0" / emuenv.io.device_paths.addcont0 / dir_name };
+    boost::system::error_code ec;
+    return fs::exists(drm_content_id_path, ec) && !fs::is_empty(drm_content_id_path, ec) && !ec;
 }
 
 EXPORT(SceInt32, sceAppUtilDrmClose, const SceAppUtilDrmAddcontId *dirName, const SceAppUtilMountPoint *mountPoint) {

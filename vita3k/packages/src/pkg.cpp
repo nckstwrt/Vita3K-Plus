@@ -64,8 +64,16 @@ bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, co
     F00DEncryptorTypes f00d_enc_type = F00DEncryptorTypes::native;
     std::string f00d_arg = std::string();
 
-    if ((execute(zRIF, title_id_src, title_id_dst, f00d_enc_type, f00d_arg) < 0) && (title_path.string().find("theme") == std::string::npos))
+    const bool is_theme = title_path.parent_path().filename() == "theme";
+    boost::system::error_code ec;
+    if (execute(zRIF, title_id_src, title_id_dst, f00d_enc_type, f00d_arg) < 0 && !is_theme) {
+        fs::remove_all(title_id_dst, ec);
         return false;
+    }
+    if (!fs::is_directory(title_id_dst, ec)) {
+        LOG_ERROR("NoNpDrm decryption of {} produced no output", title_path);
+        return false;
+    }
 
     if (!emuenv.app_info.app_category.contains("gp"))
         copy_license(emuenv, drmlicpath);

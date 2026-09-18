@@ -1053,7 +1053,7 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         LOG_WARN("Failed to initialize Vulkan overlay renderer, overlays will be disabled");
     }
 
-    support_fsr &= static_cast<bool>(screen_renderer.surface_capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eStorage);
+    support_fsr &= screen_renderer.swapchain_supports_fsr;
 
     return true;
 }

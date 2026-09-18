@@ -1086,8 +1086,9 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
 }
 
 // For uniform buffer resigned in registers
-static void copy_uniform_block_to_register(spv::Builder &builder, spv::Id sa_bank, spv::Id block, spv::Id ite, const int start, const int vec4_count) {
+static void copy_uniform_block_to_register(spv::Builder &builder, spv::Id sa_bank, spv::Id block, spv::Id ite, const int start, const int count) {
     int start_in_vec4_granularity = start / 4;
+    const int vec4_count = count / 4;
 
     utils::make_for_loop(builder, ite, builder.makeIntConstant(0), builder.makeIntConstant(vec4_count), [&]() {
         spv::Id to_copy = utils::create_access_chain(builder, spv::StorageClassStorageBuffer, block, { builder.createLoad(ite, spv::NoPrecision) });
@@ -1122,6 +1123,13 @@ static void copy_uniform_block_to_register(spv::Builder &builder, spv::Id sa_ban
             builder.createStore(to_copy_2, dest_friend);
         }
     });
+
+    for (int i = 0; i < count % 4; i++) {
+        const spv::Id source = utils::create_access_chain(builder, spv::StorageClassStorageBuffer, block, { builder.makeIntConstant(vec4_count), builder.makeIntConstant(i) });
+        const int reg = start + vec4_count * 4 + i;
+        const spv::Id dest = utils::create_access_chain(builder, spv::StorageClassPrivate, sa_bank, { builder.makeIntConstant(reg / 4), builder.makeIntConstant(reg % 4) });
+        builder.createStore(builder.createLoad(source, spv::NoPrecision), dest);
+    }
 }
 
 static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProgram &program, utils::SpirvUtilFunctions &utils,
@@ -1385,21 +1393,24 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
     spv_params.render_info_id = translation_state.render_info_id;
 
     for (const auto &buffer : program_input.uniform_buffers) {
+        // a block starting past the SA bank has no registers to fill
+        if (buffer.index >= SCE_GXM_REAL_MAX_UNIFORM_BUFFER || buffer.reg_start_offset >= REG_SA_COUNT)
+            continue;
+
         int host_idx = convert_buffer_idx_to_host(buffer.index);
         if (buffer.reg_block_size > 0) {
+            const uint32_t copy_size = std::min(buffer.reg_block_size, REG_SA_COUNT - buffer.reg_start_offset);
             if (features.enable_memory_mapping) {
                 Operand dest{
                     .num = static_cast<uint16_t>(buffer.reg_start_offset),
                     .bank = RegisterBank::SECATTR,
                     .type = DataType::F32,
                 };
-                const uint32_t copy_size = std::min(buffer.reg_block_size, REG_SA_COUNT - buffer.reg_start_offset);
                 usse::utils::buffer_address_access(b, spv_params, utils, features, dest, 0, b.makeIntConstant(0), sizeof(uint32_t), copy_size, host_idx);
             } else {
-                const uint32_t reg_block_size_in_f32v = std::min<uint32_t>(buffer.reg_block_size + 3, REG_SA_COUNT) / 4;
                 const auto spv_buffer = utils::create_access_chain(b, spv::StorageClassStorageBuffer, spv_params.buffer_container,
                     { b.makeIntConstant(spv_params.buffers.at(host_idx).index_in_container) });
-                copy_uniform_block_to_register(b, spv_params.uniforms, spv_buffer, ite_copy, buffer.reg_start_offset, reg_block_size_in_f32v);
+                copy_uniform_block_to_register(b, spv_params.uniforms, spv_buffer, ite_copy, buffer.reg_start_offset, copy_size);
             }
         }
     }
@@ -2605,6 +2616,21 @@ void convert_gxp_to_glsl_from_filepath(const std::string &shader_filepath_utf8) 
     // Emit the UCHAR4 and CHAR4 variants for every fragment program so each decode class
     // can be inspected offline (using spirv-dis, etc) without me having to run the game :)
     const SceGxmProgram &gxp = *reinterpret_cast<SceGxmProgram *>(gxp_program.data());
+
+    // With memory mapping off Vulkan copies named uniform buffers into the SA bank through copy_uniform_block_to_register
+    FeatureState nomap_features = vk_features;
+    nomap_features.enable_memory_mapping = false;
+    const GeneratedShader nomap = convert_gxp(gxp, shader_filepath_str.filename().string(), nomap_features, shader::Target::SpirVVulkan, hints, false, false);
+    if (!nomap.spirv.empty()) {
+        fs::path nomap_path = shader_filepath_str;
+        nomap_path.replace_extension(".vk.nomap.spv");
+        fs::ofstream nomap_file(nomap_path, std::ios::binary);
+        if (nomap_file) {
+            nomap_file.write(reinterpret_cast<const char *>(nomap.spirv.data()), static_cast<std::streamsize>(nomap.spirv.size() * sizeof(uint32_t)));
+            LOG_INFO("Wrote the memory-mapping-off variant to {} ({} words)", nomap_path.string(), nomap.spirv.size());
+        }
+    }
+
     if (gxp.is_fragment()) {
         const std::pair<SceGxmOutputRegisterFormat, const char *> variants[] = {
             { SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4, ".vk.u8.spv" },

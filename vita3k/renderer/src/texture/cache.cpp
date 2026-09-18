@@ -966,6 +966,8 @@ int TextureCache::cache_and_bind_sampler(const SceGxmTexture &gxm_texture, bool 
     }
 
     compact_repr |= (static_cast<uint32_t>(force_nearest) << 23);
+    // configure_sampler only enables anisotropy on textures with a mip chain
+    compact_repr |= (static_cast<uint32_t>(gxm_texture.true_mip_count() > 1) << 24);
 
     auto it = sampler_lookup.find(compact_repr);
     if (it != sampler_lookup.end()) {

@@ -139,6 +139,8 @@ static constexpr const char *watched_read_file_fragment = nullptr;
 
 EXPORT(SceSSize, _sceIoPread, SceUID fd, Ptr<void> buf, SceSize nbyte, SceOff offset) {
     TRACY_FUNC(_sceIoPread, fd, buf, nbyte, offset);
+    if (offset < 0)
+        return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
     if (watched_read_file_fragment && *watched_read_file_fragment) {
         const auto file = emuenv.io.std_files.find(fd);
         if (file != emuenv.io.std_files.end() && std::string_view(file->second.get_vita_loc()).find(watched_read_file_fragment) != std::string_view::npos) {

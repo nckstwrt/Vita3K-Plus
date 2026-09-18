@@ -88,18 +88,37 @@ static uint8_t unorm8_to_unorm4(uint8_t value) {
     return static_cast<uint8_t>((static_cast<uint32_t>(value) * 15 + 127) / 255);
 }
 
-static void pack_rgba8_to_r4g4b4a4(uint8_t *dst, const uint8_t *src, uint32_t pixel_stride, uint32_t height) {
+// R4G4B4A4_UNORM_PACK16 stores R in bits 12..15 and A in bits 0..3.
+static uint32_t r4g4b4a4_shift(vk::ComponentSwizzle component) {
+    switch (component) {
+    case vk::ComponentSwizzle::eR:
+        return 12;
+    case vk::ComponentSwizzle::eG:
+        return 8;
+    case vk::ComponentSwizzle::eB:
+        return 4;
+    default:
+        return 0;
+    }
+}
+
+static void pack_rgba8_to_r4g4b4a4(uint8_t *dst, const uint8_t *src, uint32_t pixel_stride, uint32_t width, uint32_t height, const vk::ComponentMapping &swizzle) {
+    const uint32_t shift_r = r4g4b4a4_shift(swizzle.r);
+    const uint32_t shift_g = r4g4b4a4_shift(swizzle.g);
+    const uint32_t shift_b = r4g4b4a4_shift(swizzle.b);
+    const uint32_t shift_a = r4g4b4a4_shift(swizzle.a);
+
     for (uint32_t y = 0; y < height; y++) {
         uint16_t *dst_row = reinterpret_cast<uint16_t *>(dst + y * pixel_stride * sizeof(uint16_t));
         const uint8_t *src_row = src + y * pixel_stride * 4;
 
-        for (uint32_t x = 0; x < pixel_stride; x++) {
-            const uint8_t r = unorm8_to_unorm4(src_row[x * 4 + 0]);
-            const uint8_t g = unorm8_to_unorm4(src_row[x * 4 + 1]);
-            const uint8_t b = unorm8_to_unorm4(src_row[x * 4 + 2]);
-            const uint8_t a = unorm8_to_unorm4(src_row[x * 4 + 3]);
+        for (uint32_t x = 0; x < width; x++) {
+            const uint32_t r = unorm8_to_unorm4(src_row[x * 4 + 0]);
+            const uint32_t g = unorm8_to_unorm4(src_row[x * 4 + 1]);
+            const uint32_t b = unorm8_to_unorm4(src_row[x * 4 + 2]);
+            const uint32_t a = unorm8_to_unorm4(src_row[x * 4 + 3]);
 
-            dst_row[x] = static_cast<uint16_t>(r | (g << 4) | (b << 8) | (a << 12));
+            dst_row[x] = static_cast<uint16_t>((r << shift_r) | (g << shift_g) | (b << shift_b) | (a << shift_a));
         }
     }
 }
@@ -885,6 +904,11 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         stride_bytes = pixel_stride * gxm::bits_per_pixel(base_format) / 8;
     }
     uint32_t total_surface_size = stride_bytes * original_height;
+    if (tiling == SurfaceTiling::Linear && original_height > 0) {
+        // A linear region ends with its last row, not a whole stride later. Measured in full rows a
+        // region that starts part way along one looks like it runs off the end of its surface.
+        total_surface_size = stride_bytes * (original_height - 1) + original_width * gxm::bits_per_pixel(base_format) / 8;
+    }
 
     // Walk backward through surfaces to find one that overlaps AND matches stride/tiling.
     // Multiple surfaces can overlap the same address; pick the one with the right layout.
@@ -2936,7 +2960,7 @@ void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, const PostSu
     uint8_t *pixels = surface->data.cast<uint8_t>().get(mem);
 
     if (surface_sync_needs_u4u4u4u4_repack(*surface)) {
-        pack_rgba8_to_r4g4b4a4(pixels, static_cast<const uint8_t *>(surface->copy_buffer->mapped_data), pixel_stride, surface->original_height);
+        pack_rgba8_to_r4g4b4a4(pixels, static_cast<const uint8_t *>(surface->copy_buffer->mapped_data), pixel_stride, surface->original_width, surface->original_height, surface->swizzle);
         return;
     }
 

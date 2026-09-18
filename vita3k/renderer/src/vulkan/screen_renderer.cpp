@@ -267,16 +267,24 @@ void ScreenRenderer::create_swapchain() {
             surface_usage |= vk::ImageUsageFlagBits::eTransferDst;
         if (surface_capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eTransferSrc)
             surface_usage |= vk::ImageUsageFlagBits::eTransferSrc;
-        vk::ImageUsageFlags fsr_flags = vk::ImageUsageFlagBits::eTransferDst;
-        if (!state.is_adreno_turnip)
+        // FSR's sharpening pass declares an rgba8 storage image so it can only write an R8G8B8A8 swapchain directly.
+        // Any other swapchain (BGRA on most desktops) gets the sharpened image through a blit.
+        const vk::FormatFeatureFlags swapchain_features = state.physical_device.getFormatProperties(surface_format.format).optimalTilingFeatures;
+        const vk::FormatFeatureFlags rgba_features = state.physical_device.getFormatProperties(vk::Format::eR8G8B8A8Unorm).optimalTilingFeatures;
+        swapchain_has_storage = surface_format.format == vk::Format::eR8G8B8A8Unorm
             // workaround for a Turnip driver bug: adding storage flag here breaks the swapchain
-            // and fsr works fine without this flag on Adreno
-            fsr_flags |= vk::ImageUsageFlagBits::eStorage;
+            && !state.is_adreno_turnip
+            && static_cast<bool>(surface_capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eStorage)
+            && static_cast<bool>(swapchain_features & vk::FormatFeatureFlagBits::eStorageImage);
+        if (swapchain_has_storage)
+            surface_usage |= vk::ImageUsageFlagBits::eStorage;
 
-        if (surface_capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eStorage)
-            // needed for FSR
-            surface_usage |= fsr_flags;
-        swapchain_has_storage = static_cast<bool>(surface_usage & vk::ImageUsageFlagBits::eStorage);
+        constexpr vk::FormatFeatureFlags intermediate_features = vk::FormatFeatureFlagBits::eStorageImage | vk::FormatFeatureFlagBits::eSampledImage;
+        constexpr vk::FormatFeatureFlags blit_source_features = vk::FormatFeatureFlagBits::eTransferSrc | vk::FormatFeatureFlagBits::eBlitSrc;
+        swapchain_supports_fsr = support_swapchain_transfer_dst
+            && static_cast<bool>(swapchain_features & vk::FormatFeatureFlagBits::eTransferDst)
+            && (rgba_features & intermediate_features) == intermediate_features
+            && (swapchain_has_storage || ((rgba_features & blit_source_features) == blit_source_features && static_cast<bool>(swapchain_features & vk::FormatFeatureFlagBits::eBlitDst)));
 
         LOG_INFO("swapchain: format={} colorspace={} extent={}x{} supportedUsage=0x{:X} chosenUsage=0x{:X} images={} currentTransform={} usedTransform=Identity",
             vk::to_string(surface_format.format), vk::to_string(surface_format.colorSpace), extent.width, extent.height,
@@ -337,7 +345,10 @@ void ScreenRenderer::create_swapchain() {
     }
 
     if (filter) {
-        if (command_buffers.size() < swapchain_size) {
+        if (filter->get_name() == "FSR" && !swapchain_supports_fsr) {
+            // the new swapchain cannot take FSR's output
+            set_filter("Bilinear");
+        } else if (command_buffers.size() < swapchain_size) {
             // if the swapchain size increased, we need to reset the filter
             std::string filter_name{ filter->get_name() };
             filter.reset();
@@ -608,7 +619,7 @@ void ScreenRenderer::set_filter(const std::string_view &filter) {
         return;
 
     this->filter.reset();
-    if (filter == "FSR")
+    if (filter == "FSR" && swapchain_supports_fsr)
         this->filter = std::make_unique<FSRScreenFilter>(*this);
     else if (filter == "FXAA")
         this->filter = std::make_unique<FXAAScreenFilter>(*this);
@@ -692,7 +703,9 @@ void ScreenRenderer::create_render_pass() {
 
     default_render_pass = state.device.createRenderPass(pass_info);
 
-    // renderpass after post processing filter
+    // renderpass after post processing filter which wrote the swapchain image from a compute shader or a blit
+    dependency.srcStageMask |= vk::PipelineStageFlagBits::eTransfer;
+    dependency.srcAccessMask = vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite;
     color_attachment
         .setLoadOp(vk::AttachmentLoadOp::eLoad)
         .setInitialLayout(vk::ImageLayout::eGeneral);
@@ -754,20 +767,27 @@ bool ScreenRenderer::rebuild_swapchain_if_visible() {
     // it idles the device, which stalls the vblank thread too
     auto *frame_host = static_cast<renderer::State &>(state).frame;
     const auto rebuild_start = std::chrono::steady_clock::now();
-    state.device.waitIdle();
-    const auto idled = std::chrono::steady_clock::now();
-    destroy_swapchain();
-    const auto destroyed = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point idled, destroyed;
+    // a lost surface (an Android app switch, a closing window) or a lost device throws out of these calls
+    try {
+        state.device.waitIdle();
+        idled = std::chrono::steady_clock::now();
+        destroy_swapchain();
+        destroyed = std::chrono::steady_clock::now();
 
 #ifdef __ANDROID__
-    if (!create())
-        return false;
+        if (!create())
+            return false;
 #else
-    if (need_surface_recreate && !create())
-        return false;
+        if (need_surface_recreate && !create())
+            return false;
 #endif
 
-    create_swapchain();
+        create_swapchain();
+    } catch (const vk::SystemError &error) {
+        LOG_WARN("[SWAPCHAIN] rebuild ({}) failed: {}", rebuild_reason, error.what());
+        return false;
+    }
     const auto created = std::chrono::steady_clock::now();
     const auto ms = [](auto a, auto b) {
         return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count() / 1000.0;

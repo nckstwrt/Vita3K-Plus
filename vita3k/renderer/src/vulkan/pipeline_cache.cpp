@@ -34,8 +34,10 @@
 
 #include <array>
 #include <bit>
+#include <cstring>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -353,23 +355,35 @@ void PipelineCache::read_pipeline_cache() {
     read_integer(nb_hashes);
     // safety check
     size_t hashes_size = sizeof(magic_number) + sizeof(nb_hashes) + nb_hashes * sizeof(uint64_t);
-    if (magic_number != pipeline_cache_magic || pipeline_size < hashes_size) {
+    if (magic_number != pipeline_cache_magic || nb_hashes > pipeline_size / sizeof(uint64_t) || pipeline_size < hashes_size) {
         LOG_WARN("Pipeline cache is corrupted, ignoring it.");
         pipeline_cache_file.close();
         return;
     }
     pipeline_size -= hashes_size;
 
-    // insert hashes with null pipeline
-    for (size_t i = 0; i < nb_hashes; i++) {
-        uint64_t hash;
+    std::vector<uint64_t> hashes(nb_hashes);
+    for (uint64_t &hash : hashes)
         read_integer(hash);
-        pipelines[hash] = nullptr;
-    }
 
     std::vector<char> pipeline_data(pipeline_size);
     pipeline_cache_file.read(pipeline_data.data(), pipeline_size);
     pipeline_cache_file.close();
+
+    VkPipelineCacheHeaderVersionOne header{};
+    if (pipeline_size >= sizeof(header))
+        std::memcpy(&header, pipeline_data.data(), sizeof(header));
+    const vk::PhysicalDeviceProperties &props = state.physical_device_properties;
+    if (pipeline_size < sizeof(header) || header.headerSize < sizeof(header) || header.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE
+        || header.vendorID != props.vendorID || header.deviceID != props.deviceID
+        || std::memcmp(header.pipelineCacheUUID, props.pipelineCacheUUID.data(), VK_UUID_SIZE) != 0) {
+        LOG_WARN("Pipeline cache was written for another GPU or driver, ignoring it");
+        return;
+    }
+
+    // insert hashes with null pipeline
+    for (const uint64_t hash : hashes)
+        pipelines[hash] = nullptr;
 
     vk::PipelineCacheCreateInfo cache_info{
         .initialDataSize = pipeline_size,
@@ -575,14 +589,25 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
     LOG_DEBUG("Generating vulkan spv shader {}", hash_text);
     const std::string shader_version = fmt::format("vk{}{}", shader::CURRENT_VERSION, version_suffix);
 
-    shader::usse::SpirvCode source = load_spirv_shader(*program, state.features, true, hints, maskupdate, state.shaders_path, state.shaders_log_path, shader_version, true);
+    // anything thrown here has to hand the slot back first or every thread waiting on this shader spins forever
+    try {
+        shader::usse::SpirvCode source = load_spirv_shader(*program, state.features, true, hints, maskupdate, state.shaders_path, state.shaders_log_path, shader_version, true);
+        if (source.empty())
+            throw std::runtime_error("shader translation produced no SPIR-V");
 
-    vk::ShaderModuleCreateInfo shader_info{
-        .codeSize = sizeof(uint32_t) * source.size(),
-        .pCode = source.data()
-    };
+        vk::ShaderModuleCreateInfo shader_info{
+            .codeSize = sizeof(uint32_t) * source.size(),
+            .pCode = source.data()
+        };
 
-    *shader_module = state.device.createShaderModule(shader_info);
+        *shader_module = state.device.createShaderModule(shader_info);
+    } catch (...) {
+        {
+            std::lock_guard<std::mutex> guard(shaders_mutex);
+            *shader_module = nullptr;
+        }
+        throw;
+    }
     {
         std::lock_guard<std::mutex> guard(shaders_mutex);
         // Save shader cache hashes
@@ -977,6 +1002,21 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
 
     uint32_t used_streams = 0;
 
+    const bool attribute_bindings = needs_attribute_bindings(vertex_program);
+    const auto add_binding = [&](uint32_t binding, uint32_t stream_index) {
+        const SceGxmVertexStream &stream = vertex_program.streams[stream_index];
+        const bool is_instanced = gxm::is_stream_instancing(static_cast<SceGxmIndexSource>(stream.indexSource));
+#ifdef __APPLE__
+        const uint32_t stride = align(stream.stride, 4);
+#else
+        const uint32_t stride = stream.stride;
+#endif
+        binding_descr.push_back(vk::VertexInputBindingDescription{
+            .binding = binding,
+            .stride = stride,
+            .inputRate = is_instanced ? vk::VertexInputRate::eInstance : vk::VertexInputRate::eVertex });
+    };
+
     for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
         if (!vkvert->attribute_infos.contains(attribute.regIndex))
             continue;
@@ -1045,38 +1085,49 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
             }
         }
 
+        uint32_t binding = attribute.streamIndex;
+        if (attribute_bindings) {
+            binding = static_cast<uint32_t>(binding_descr.size());
+            add_binding(binding, attribute.streamIndex);
+        }
+
         for (uint32_t i = 0; i < array_size; i++) {
             attr_descr.push_back(vk::VertexInputAttributeDescription{
                 .location = info.location + i,
-                .binding = attribute.streamIndex,
+                .binding = binding,
                 .format = format,
-                .offset = attribute.offset + i * array_element_size });
+                .offset = (attribute_bindings ? 0 : attribute.offset) + i * array_element_size });
         }
     }
 
-    for (unsigned int stream_index = 0; stream_index < SCE_GXM_MAX_VERTEX_STREAMS; stream_index++) {
-        if (!(used_streams & (1 << stream_index)))
-            continue;
-
-        const SceGxmVertexStream &stream = vertex_program.streams[stream_index];
-
-        const bool is_instanced = gxm::is_stream_instancing(static_cast<SceGxmIndexSource>(stream.indexSource));
-
-#ifdef __APPLE__
-        const uint32_t stride = align(stream.stride, 4);
-#else
-        const uint32_t stride = stream.stride;
-#endif
-        binding_descr.push_back(vk::VertexInputBindingDescription{
-            .binding = stream_index,
-            .stride = stride,
-            .inputRate = is_instanced ? vk::VertexInputRate::eInstance : vk::VertexInputRate::eVertex });
+    if (!attribute_bindings) {
+        for (unsigned int stream_index = 0; stream_index < SCE_GXM_MAX_VERTEX_STREAMS; stream_index++) {
+            if (used_streams & (1 << stream_index))
+                add_binding(stream_index, stream_index);
+        }
     }
 
     vk::PipelineVertexInputStateCreateInfo vertex_input{};
     vertex_input.setVertexBindingDescriptions(binding_descr);
     vertex_input.setVertexAttributeDescriptions(attr_descr);
     return vertex_input;
+}
+
+bool PipelineCache::needs_attribute_bindings(const ProgramBinding &vertex_program) const {
+    const VertexProgram *vkvert = vertex_program.vertex_program.get();
+    const uint32_t max_offset = state.physical_device_properties.limits.maxVertexInputAttributeOffset;
+    for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
+        const auto it = vkvert->attribute_infos.find(attribute.regIndex);
+        if (it == vkvert->attribute_infos.end())
+            continue;
+
+        const shader::usse::AttributeInformation &info = it->second;
+        // a matrix attribute is an array of vec4, the last one furthest along
+        const uint32_t array_offset = info.regformat && info.component_count > 4 ? ((info.component_count - 1) / 4) * 16 : 0;
+        if (attribute.offset + array_offset > max_offset)
+            return true;
+    }
+    return false;
 }
 
 void PipelineCache::compiler_thread(MemState &mem) {
@@ -1124,7 +1175,7 @@ static vk::StencilOpState convert_op_state(const GxmStencilStateOp &state) {
     };
 }
 
-vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::RenderPass render_pass, const ProgramBinding &vertex_program_binding, const ProgramBinding &fragment_program_binding, const GxmRecordState &record, bool has_color_surface_data, const shader::Hints &hints, bool has_casts, MemState &mem) {
+vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::RenderPass render_pass, const ProgramBinding &vertex_program_binding, const ProgramBinding &fragment_program_binding, const GxmRecordState &record, bool has_color_surface_data, const shader::Hints &hints, bool has_casts, MemState &mem) try {
     const VertexProgram &vertex_program = *vertex_program_binding.vertex_program;
     const SceGxmProgram *gxm_fragment_shader = fragment_program_binding.program();
     const VKFragmentProgram &fragment_program = *reinterpret_cast<VKFragmentProgram *>(
@@ -1360,6 +1411,9 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         }
         return nullptr;
     }
+} catch (const std::exception &error) {
+    LOG_ERROR("Failed to compile pipeline: {}", error.what());
+    return nullptr;
 }
 
 // Recreate the same pipeline several times, each time with one aspect neutralised, and report
@@ -1618,7 +1672,7 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     }
 }
 
-vk::ShaderModule PipelineCache::precompile_shader(const Sha256Hash &hash, bool search_first) {
+vk::ShaderModule PipelineCache::precompile_shader(const Sha256Hash &hash, bool search_first) try {
     if (search_first) {
         // happens while loading the thread, no parallel access so no need for a mutex
         auto it = shaders.find(hash);
@@ -1649,5 +1703,8 @@ vk::ShaderModule PipelineCache::precompile_shader(const Sha256Hash &hash, bool s
     }
 
     return shader;
+} catch (const std::exception &error) {
+    LOG_ERROR("Could not load cached shader {}: {}", hex_string(hash), error.what());
+    return nullptr;
 }
 } // namespace renderer::vulkan

@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <mutex>
 
 #include <dialog/state.h>
@@ -38,6 +39,51 @@
 #include <util/log.h>
 
 namespace renderer {
+
+void State::run_render_thread_tasks() {
+    std::vector<std::function<void()>> tasks;
+    {
+        const std::lock_guard<std::mutex> lock(render_thread_tasks_mutex);
+        tasks.swap(render_thread_tasks);
+    }
+    for (auto &task : tasks)
+        task();
+}
+
+std::vector<uint32_t> State::dump_frame_on_render_thread(DisplayState &display, uint32_t &width, uint32_t &height) {
+    if (!render_thread || render_thread->get_id() == std::this_thread::get_id())
+        return dump_frame(display, width, height);
+
+    struct Frame {
+        std::vector<uint32_t> pixels;
+        uint32_t width = 0;
+        uint32_t height = 0;
+    };
+    auto task = std::make_shared<std::packaged_task<Frame()>>([this, &display]() {
+        Frame frame;
+        frame.pixels = dump_frame(display, frame.width, frame.height);
+        return frame;
+    });
+    std::future<Frame> result = task->get_future();
+    {
+        const std::lock_guard<std::mutex> lock(render_thread_tasks_mutex);
+        render_thread_tasks.emplace_back([task]() { (*task)(); });
+    }
+
+    if (result.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
+        LOG_ERROR("The render thread did not capture the frame in time");
+        return {};
+    }
+    try {
+        Frame frame = result.get();
+        width = frame.width;
+        height = frame.height;
+        return std::move(frame.pixels);
+    } catch (const std::exception &e) {
+        LOG_ERROR("Frame capture failed: {}", e.what());
+        return {};
+    }
+}
 
 void State::update_overlays() {
     if (!overlay_manager)
