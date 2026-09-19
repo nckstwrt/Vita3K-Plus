@@ -44,7 +44,14 @@
 #include <timeapi.h>
 // clang-format on
 #pragma comment(lib, "winmm.lib")
+#else
+#include <fcntl.h>
+#include <pthread.h>
+#include <sys/syscall.h>
+#include <time.h>
+#include <unistd.h>
 #endif
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -510,6 +517,192 @@ void guest_sched_forget_cpu(CPUState *cpu) {
         g_sched_cv.notify_all();
 }
 
+namespace {
+constexpr int64_t WAKE_GATE_CPU_US = 20;
+constexpr int64_t WAKE_GATE_LONG_HLE_NS = 300'000;
+constexpr int64_t WAKE_GATE_STATE_POLL_NS = 100'000;
+constexpr int64_t WAKE_GATE_NO_CLOCK_NS = 200'000;
+constexpr int64_t WAKE_GATE_CAP_NS = 50'000'000;
+constexpr int64_t WAKE_GATE_CPU_POLL_NS = 10'000;
+#ifdef _WIN32
+constexpr int64_t WAKE_GATE_CPU_TICKS_PER_US = 3000;
+constexpr int64_t WAKE_GATE_SPIN_NS = 100'000;
+constexpr auto WAKE_GATE_BLOCK_POLL = std::chrono::milliseconds(1);
+#else
+constexpr int64_t WAKE_GATE_CPU_TICKS_PER_US = 1000;
+constexpr int64_t WAKE_GATE_SPIN_NS = 20'000;
+constexpr auto WAKE_GATE_BLOCK_POLL = std::chrono::microseconds(100);
+#endif
+
+std::mutex g_gate_mutex;
+std::condition_variable g_gate_cv;
+std::atomic<int64_t> g_gate_last_cap_log_ns{ 0 };
+std::atomic<bool> g_gate_clock_warned{ false };
+
+int64_t gate_now_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void wake_gate_notify() {
+    {
+        const std::lock_guard<std::mutex> lock(g_gate_mutex);
+    }
+    g_gate_cv.notify_all();
+}
+
+#if !defined(_WIN32) && !defined(__APPLE__)
+char host_thread_state(int tid) {
+    if (tid <= 0)
+        return '?';
+    char path[64];
+    std::snprintf(path, sizeof(path), "/proc/self/task/%d/stat", tid);
+    const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return '?';
+    char buf[512];
+    const ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
+    ::close(fd);
+    if (n <= 0)
+        return '?';
+    buf[n] = 0;
+    const char *const paren = std::strrchr(buf, ')');
+    if (!paren || paren[1] != ' ' || !paren[2])
+        return '?';
+    return paren[2];
+}
+#endif
+} // namespace
+
+void ThreadState::capture_host_cpu_clock() {
+    if (host_cpu_ready.load(std::memory_order_relaxed))
+        return;
+#ifdef _WIN32
+    HANDLE handle = nullptr;
+    if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &handle, THREAD_QUERY_LIMITED_INFORMATION, FALSE, 0)) {
+        host_cpu_handle = handle;
+        host_cpu_ready.store(true, std::memory_order_release);
+    }
+#elif !defined(__APPLE__)
+    host_tid = static_cast<int>(syscall(SYS_gettid));
+    clockid_t clock_id;
+    if (pthread_getcpuclockid(pthread_self(), &clock_id) == 0) {
+        host_cpu_clock = static_cast<int64_t>(clock_id);
+        host_cpu_ready.store(true, std::memory_order_release);
+    }
+#endif
+    if (!host_cpu_ready.load(std::memory_order_relaxed) && !g_gate_clock_warned.exchange(true))
+        LOG_WARN("[WAKEGATE] no host thread CPU clock: a thread woken by a higher-priority thread waits at most {} us for its waker to move on", WAKE_GATE_NO_CLOCK_NS / 1000);
+}
+
+int64_t ThreadState::host_cpu_now() const {
+    if (!host_cpu_ready.load(std::memory_order_acquire))
+        return -1;
+#ifdef _WIN32
+    ULONG64 cycles = 0;
+    if (!QueryThreadCycleTime(static_cast<HANDLE>(host_cpu_handle), &cycles))
+        return -1;
+    return static_cast<int64_t>(cycles);
+#elif !defined(__APPLE__)
+    timespec ts{};
+    if (clock_gettime(static_cast<clockid_t>(host_cpu_clock), &ts) != 0)
+        return -1;
+    return static_cast<int64_t>(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
+#else
+    return -1;
+#endif
+}
+
+char ThreadState::host_state() const {
+#if !defined(_WIN32) && !defined(__APPLE__)
+    return host_thread_state(host_tid);
+#else
+    return '?';
+#endif
+}
+
+void ThreadState::arm_wake_gate() {
+    const ThreadState *const waker = g_tls_guest_thread;
+    if (!waker || waker == this || waker->priority >= priority)
+        return;
+    gate_h0 = waker->hle_returns.load(std::memory_order_acquire);
+    gate_kind = wait_prim_kind;
+    gate_uid = wait_prim_uid;
+    gate_waker.store(waker->id, std::memory_order_release);
+}
+
+void ThreadState::wait_wake_gate() {
+    const SceUID waker_id = gate_waker.exchange(0, std::memory_order_acquire);
+    if (!waker_id)
+        return;
+    const uint64_t h0 = gate_h0;
+    const ThreadStatePtr waker = kernel.get_thread(waker_id);
+    guest_sched_release_for_block();
+    if (!waker)
+        return;
+    const int64_t start = gate_now_ns();
+    const int64_t cpu0 = waker->host_cpu_now();
+    const int64_t cpu_needed = WAKE_GATE_CPU_US * WAKE_GATE_CPU_TICKS_PER_US;
+    uint64_t hle_seen = 0;
+    int64_t hle_seen_ns = 0;
+    int64_t hle_next_state_ns = 0;
+    int64_t last_cpu_poll = 0;
+    bool capped = false;
+    waker->gated_wakees.fetch_add(1);
+    for (uint32_t iter = 0;; iter++) {
+        const int64_t now = gate_now_ns();
+        const int64_t waited = now - start;
+        if (delete_requested || exit_requested || suspend_requested || world_stop_requested)
+            break;
+        const uint64_t returns = waker->hle_returns.load();
+        if (returns >= h0 + 2 || waker->status != ThreadStatus::run || waker->is_delete_requested())
+            break;
+        if (cpu0 >= 0 && (iter == 0 || now - last_cpu_poll >= WAKE_GATE_CPU_POLL_NS)) {
+            last_cpu_poll = now;
+            const int64_t cpu = waker->host_cpu_now();
+            if (cpu < 0 || cpu - cpu0 >= cpu_needed)
+                break;
+        }
+        const uint64_t enters = waker->hle_enters.load();
+        if (enters > returns) {
+            if (enters != hle_seen) {
+                hle_seen = enters;
+                hle_seen_ns = now;
+                hle_next_state_ns = now + WAKE_GATE_STATE_POLL_NS;
+            } else if (now >= hle_next_state_ns) {
+                hle_next_state_ns = now + WAKE_GATE_STATE_POLL_NS;
+                const char state = waker->host_state();
+                if (state != 'R' && (state != '?' || now - hle_seen_ns >= WAKE_GATE_LONG_HLE_NS))
+                    break;
+            }
+        } else {
+            hle_seen = 0;
+            if (cpu0 < 0 && waited >= WAKE_GATE_NO_CLOCK_NS)
+                break;
+        }
+        if (waited >= WAKE_GATE_CAP_NS) {
+            capped = true;
+            break;
+        }
+        if (waited < WAKE_GATE_SPIN_NS) {
+            std::this_thread::yield();
+            continue;
+        }
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        if (waker->hle_returns.load() < h0 + 2 && waker->status == ThreadStatus::run)
+            g_gate_cv.wait_for(lock, WAKE_GATE_BLOCK_POLL);
+    }
+    waker->gated_wakees.fetch_sub(1);
+
+    if (capped) {
+        const int64_t now = gate_now_ns();
+        int64_t last = g_gate_last_cap_log_ns.load(std::memory_order_relaxed);
+        if (now - last >= 1'000'000'000 && g_gate_last_cap_log_ns.compare_exchange_strong(last, now))
+            LOG_WARN("[WAKEGATE] '{}' ({}) stopped waiting after {} ms for '{}' ({}), which woke it through {}#{} and has not moved on since (HLE calls entered {} returned {}, {} at the wake, last import 0x{:08X})",
+                name, id, WAKE_GATE_CAP_NS / 1'000'000, waker->name, waker_id, gate_kind ? gate_kind : "?", gate_uid,
+                waker->hle_enters.load(), waker->hle_returns.load(), h0, waker->last_import_nid);
+    }
+}
+
 thread_local ThreadState *g_tls_guest_thread = nullptr;
 
 void ThreadState::run_loop() {
@@ -531,6 +724,8 @@ void ThreadState::run_loop() {
     std::unique_lock<std::mutex> lock(mutex);
     ++call_level;
     const bool top_level = call_level == 1;
+    if (top_level)
+        capture_host_cpu_clock();
 
     auto run_thread_end_callback = [&]() {
         if (!run_end_callback)
@@ -612,6 +807,9 @@ void ThreadState::run_loop() {
 
             lock.unlock();
 
+            if (gate_waker.load(std::memory_order_relaxed) != 0)
+                wait_wake_gate();
+
             // Take the guest execution gate before running any guest code
             const bool gated = kernel.accurate_thread_scheduling;
             sched_acquire(priority, affinity_mask, gated, cpu.get(), name, id);
@@ -626,7 +824,11 @@ void ThreadState::run_loop() {
                 last_import_nid = nid;
                 last_import_lr = read_lr(*cpu);
                 push_import_ring(nid);
+                hle_enters.fetch_add(1);
                 kernel.call_import(*cpu, nid, id);
+                hle_returns.fetch_add(1);
+                if (gated_wakees.load() > 0)
+                    wake_gate_notify();
                 clear_exclusive(*cpu);
             }
 
@@ -671,7 +873,11 @@ void ThreadState::run_loop() {
                     last_import_nid = nid;
                     last_import_lr = read_lr(*cpu);
                     push_import_ring(nid);
+                    hle_enters.fetch_add(1);
                     kernel.call_import(*cpu, nid, id);
+                    hle_returns.fetch_add(1);
+                    if (gated_wakees.load() > 0)
+                        wake_gate_notify();
                     clear_exclusive(*cpu);
                 }
                 probe_handled = true;
@@ -806,6 +1012,10 @@ ThreadState::ThreadState(SceUID id, KernelState &kernel, MemState &mem)
 
 ThreadState::~ThreadState() {
     guest_sched_forget_cpu(cpu.get());
+#ifdef _WIN32
+    if (host_cpu_handle)
+        CloseHandle(static_cast<HANDLE>(host_cpu_handle));
+#endif
 }
 
 void ThreadState::update_status(ThreadStatus status, std::optional<ThreadStatus> expected) {
@@ -822,8 +1032,14 @@ void ThreadState::update_status(ThreadStatus status, std::optional<ThreadStatus>
     if (status == ThreadStatus::run)
         kernel.thread_wake_counter.fetch_add(1, std::memory_order_relaxed);
 
+    if (status == ThreadStatus::run && expected && *expected == ThreadStatus::wait)
+        arm_wake_gate();
+
     this->status = status;
     status_cond.notify_all();
+
+    if (status != ThreadStatus::run && gated_wakees.load() > 0)
+        wake_gate_notify();
 
     if (status == ThreadStatus::dormant) {
         raise_waiting_threads();
