@@ -1445,6 +1445,27 @@ int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, Sc
     if (!thread) // the thread is being torn down so fail its last import instead of crashing the process
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
 
+    if (const MutexPtr &assoc = condvar->associated_mutex) {
+        std::unique_lock<std::mutex> assoc_lock(assoc->mutex);
+        if (assoc->owner_id != thread_id) {
+            const std::string owner = assoc->owner ? fmt::format("'{}' ({})", assoc->owner->name, assoc->owner_id) : std::string("nobody");
+            const int lock_count = assoc->lock_count;
+            assoc_lock.unlock();
+            const int error = static_cast<int>(weight == SyncWeight::Light ? SCE_KERNEL_ERROR_LW_MUTEX_NOT_OWNED : SCE_KERNEL_ERROR_MUTEX_NOT_OWNED);
+            static std::atomic<uint32_t> rejected{ 0 };
+            static std::atomic<int64_t> last_log_us{ 0 };
+            const uint32_t n = rejected.fetch_add(1, std::memory_order_relaxed) + 1;
+            const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (n <= 16 || now_us - last_log_us.load(std::memory_order_relaxed) >= 1'000'000) {
+                last_log_us.store(now_us, std::memory_order_relaxed);
+                LOG_WARN("[LWCOND] {}: '{}' ({}) waited on cond#{} '{}' without owning its mutex#{} '{}' (owner {}, lock_count {}, timeout {}) - returned 0x{:X} at once, no wait (#{})",
+                    export_name, thread->name, thread_id, condvar->uid, condvar->name, assoc->uid, assoc->name, owner, lock_count,
+                    timeout ? std::to_string(*timeout) : std::string("none"), static_cast<uint32_t>(error), n);
+            }
+            return error;
+        }
+    }
+
     thread->set_wait_reason("cond", condvar->uid, condvar->associated_mutex ? condvar->associated_mutex->uid : 0);
     std::unique_lock<std::mutex> condition_variable_lock(condvar->mutex);
 
