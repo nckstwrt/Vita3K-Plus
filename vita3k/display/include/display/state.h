@@ -74,6 +74,7 @@ struct DisplayState {
     std::atomic<std::uint64_t> vblank_count{ 0 };
     std::atomic<uint64_t> setframe_call_count{ 0 };
     std::atomic<uint64_t> setframe_accept_count{ 0 };
+    std::atomic<uint64_t> guest_input_reads{ 0 };
     std::vector<DisplayStateVBlankWaitInfo> vblank_wait_infos;
     std::atomic<uint64_t> last_setframe_vblank_count = 0;
     std::map<SceUID, CallbackPtr> vblank_callbacks{};

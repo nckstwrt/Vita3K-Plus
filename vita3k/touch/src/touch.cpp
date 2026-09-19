@@ -314,6 +314,7 @@ int toggle_touchscreen(TouchState &state) {
 }
 
 int touch_get(const SceUID thread_id, EmuEnvState &emuenv, const SceUInt32 &port, SceTouchData *pData, SceUInt32 count, bool is_peek) {
+    emuenv.display.guest_input_reads.fetch_add(1, std::memory_order_relaxed);
     memset(pData, 0, sizeof(SceTouchData) * count);
 
     const bool input_blocked = emuenv.drop_inputs || emuenv.ctrl.overlay_input_intercepted.load(std::memory_order_relaxed);

@@ -354,6 +354,7 @@ fs::path expand_path(IOState &io, const char *path, const fs::path &vita_fs_path
 }
 
 SceUID open_file(IOState &io, const char *path, const int flags, const fs::path &vita_fs_path, const char *export_name) {
+    io.guest_io_ops.fetch_add(1, std::memory_order_relaxed);
     auto device = device::get_device(path);
     auto device_for_icase = device;
     if (device == VitaIoDevice::_INVALID) {
@@ -470,6 +471,7 @@ void iodiag_log_read_dst(const char *kind, SceUID fd, SceOff offset, SceSize nby
 }
 
 int read_file_at(void *data, IOState &io, const SceUID fd, const SceSize size, const SceOff offset, const char *export_name) {
+    io.guest_io_ops.fetch_add(1, std::memory_order_relaxed);
     assert(data != nullptr);
     if (fd < 0)
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
@@ -567,6 +569,7 @@ int read_file_into_guest(MemState &mem, Address dst, IOState &io, SceUID fd, Sce
 }
 
 int write_file_at(const SceUID fd, const void *data, const SceSize size, const SceOff offset, IOState &io, const char *export_name) {
+    io.guest_io_ops.fetch_add(1, std::memory_order_relaxed);
     assert(data != nullptr);
     if (fd < 0)
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
@@ -591,6 +594,7 @@ int write_file_at(const SceUID fd, const void *data, const SceSize size, const S
 }
 
 int read_file(void *data, IOState &io, const SceUID fd, const SceSize size, const char *export_name) {
+    io.guest_io_ops.fetch_add(1, std::memory_order_relaxed);
     assert(data != nullptr);
     assert(size >= 0);
 
@@ -617,6 +621,7 @@ int read_file(void *data, IOState &io, const SceUID fd, const SceSize size, cons
 }
 
 int write_file(SceUID fd, const void *data, const SceSize size, const IOState &io, const char *export_name) {
+    io.guest_io_ops.fetch_add(1, std::memory_order_relaxed);
     assert(data != nullptr);
     assert(size >= 0);
 
@@ -930,6 +935,7 @@ int rename(IOState &io, const char *old_name, const char *new_name, const fs::pa
 }
 
 SceUID open_dir(IOState &io, const char *path, const fs::path &vita_fs_path, const char *export_name) {
+    io.guest_io_ops.fetch_add(1, std::memory_order_relaxed);
     auto device = device::get_device(path);
     auto device_for_icase = device;
     const auto translated_path = translate_path(path, device, io.device_paths);

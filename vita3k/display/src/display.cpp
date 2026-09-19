@@ -38,6 +38,7 @@
 #include <display/state.h>
 #include <emuenv/state.h>
 #include <gxm/state.h>
+#include <io/state.h>
 #include <kernel/state.h>
 #include <kernel/sync_primitives.h>
 #include <kernel/thread/thread_state.h>
@@ -199,6 +200,11 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             static uint64_t last_pipes_change_vblank = 0;
             static uint64_t last_stuck_scene_dump_vblank = 0;
             static int stuck_scene_dumps = 0;
+            static uint64_t last_input_value = 0;
+            static uint64_t last_input_change_vblank = 0;
+            static uint64_t last_io_value = 0;
+            static uint64_t last_io_change_vblank = 0;
+            static bool stuck_scene_alive_noted = false;
             static uint64_t last_seen_vblanks = 0;
             static uint64_t last_idle_render_dump_vblank = 0;
             static int idle_render_dumps = 0;
@@ -232,6 +238,11 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
                 last_pipes_change_vblank = 0;
                 last_stuck_scene_dump_vblank = 0;
                 stuck_scene_dumps = 0;
+                last_input_value = 0;
+                last_input_change_vblank = 0;
+                last_io_value = 0;
+                last_io_change_vblank = 0;
+                stuck_scene_alive_noted = false;
                 last_idle_render_dump_vblank = 0;
                 idle_render_dumps = 0;
             }
@@ -285,23 +296,46 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             constexpr uint64_t STUCK_SCENE_FROZEN_VBLANKS = 720;
             constexpr uint64_t STUCK_SCENE_REDUMP_VBLANKS = 600;
             constexpr int STUCK_SCENE_MAX_DUMPS = 3;
+            constexpr uint64_t STUCK_SCENE_PRESENTING_VBLANKS = 120;
             const uint32_t pipes_now = emuenv.renderer ? emuenv.renderer->diag_pipelines_created() : ~0u;
             const bool pipes_tracked = (pipes_now != ~0u);
             if (pipes_now != last_pipes_value) {
                 last_pipes_value = pipes_now;
                 last_pipes_change_vblank = vblanks;
                 stuck_scene_dumps = 0;
+                stuck_scene_alive_noted = false;
             }
             const uint64_t pipes_frozen_vblanks = vblanks - last_pipes_change_vblank;
-            if (pipes_tracked && !never_flipped && unpaused
+            const uint64_t input_now = emuenv.display.guest_input_reads.load(std::memory_order_relaxed);
+            if (input_now != last_input_value) {
+                last_input_value = input_now;
+                last_input_change_vblank = vblanks;
+            }
+            const uint64_t io_now = emuenv.io.guest_io_ops.load(std::memory_order_relaxed);
+            if (io_now != last_io_value) {
+                last_io_value = io_now;
+                last_io_change_vblank = vblanks;
+            }
+            const uint64_t input_idle_vblanks = vblanks - last_input_change_vblank;
+            const uint64_t io_idle_vblanks = vblanks - last_io_change_vblank;
+            const bool dialog_running = emuenv.common_dialog.type != NO_DIALOG && emuenv.common_dialog.status == SCE_COMMON_DIALOG_STATUS_RUNNING;
+            const bool guest_alive = input_idle_vblanks < STUCK_SCENE_FROZEN_VBLANKS || io_idle_vblanks < STUCK_SCENE_FROZEN_VBLANKS || dialog_running;
+            const bool scene_frozen = pipes_tracked && !never_flipped && unpaused
+                && stall_vblanks <= STUCK_SCENE_PRESENTING_VBLANKS
                 && pipes_now <= STUCK_SCENE_MAX_PIPELINES
-                && pipes_frozen_vblanks >= STUCK_SCENE_FROZEN_VBLANKS
+                && pipes_frozen_vblanks >= STUCK_SCENE_FROZEN_VBLANKS;
+            if (scene_frozen && guest_alive && !stuck_scene_alive_noted) {
+                stuck_scene_alive_noted = true;
+                LOG_INFO("STUCK-SCENE check: only {} pipeline(s), none new for {} vblanks, but the game is alive (last input read {} vblanks ago, last file I/O {} vblanks ago, common dialog {}) - no dump",
+                    pipes_now, pipes_frozen_vblanks, input_idle_vblanks, io_idle_vblanks, dialog_running ? "running" : "closed");
+            }
+            if (scene_frozen && !guest_alive
                 && stuck_scene_dumps < STUCK_SCENE_MAX_DUMPS
                 && (stuck_scene_dumps == 0 || vblanks - last_stuck_scene_dump_vblank >= STUCK_SCENE_REDUMP_VBLANKS)) {
                 last_stuck_scene_dump_vblank = vblanks;
                 ++stuck_scene_dumps;
-                LOG_ERROR("STUCK-SCENE WATCHDOG (dump {}/{}): presenting ({} SetFrameBuf accepted, renderer still executing commands) but only {} pipeline(s) ever compiled, frozen for {} vblanks (~{}s) — wedged BEFORE scene render; dumping guest threads",
-                    stuck_scene_dumps, STUCK_SCENE_MAX_DUMPS, emuenv.display.setframe_accept_count.load(), pipes_now, pipes_frozen_vblanks, pipes_frozen_vblanks / 60);
+                LOG_ERROR("STUCK-SCENE WATCHDOG (dump {}/{}): presenting ({} SetFrameBuf accepted, last flip {} vblanks ago) but only {} pipeline(s) ever compiled, frozen for {} vblanks (~{}s), and nothing has read input for {} vblanks or touched a file for {} vblanks — game logic stalled; dumping guest threads",
+                    stuck_scene_dumps, STUCK_SCENE_MAX_DUMPS, emuenv.display.setframe_accept_count.load(), stall_vblanks, pipes_now, pipes_frozen_vblanks, pipes_frozen_vblanks / 60, input_idle_vblanks, io_idle_vblanks);
                 emuenv.kernel.log_thread_hang_dump();
                 renderer_heartbeat();
                 if (stuck_scene_dumps == 1) {

@@ -128,6 +128,7 @@ struct IOState {
     std::mutex overlay_mutex;
     mutable std::mutex file_mutex;
     std::atomic<uint64_t> concurrent_positional_io{ 0 };
+    mutable std::atomic<uint64_t> guest_io_ops{ 0 };
     SceUID next_overlay_id = 1;
     // overlay in the order they should be applied
     std::vector<FiosOverlay> overlays;
