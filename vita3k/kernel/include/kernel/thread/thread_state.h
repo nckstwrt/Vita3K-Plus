@@ -23,6 +23,7 @@
 #include <mem/block.h>
 #include <mem/ptr.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -153,6 +154,23 @@ struct ThreadState {
 private:
     void push_arguments(const std::vector<uint32_t> &args);
     void dispatch_abort(CPUState &cpu);
+    void arm_wake_gate();
+    void wait_wake_gate();
+    void capture_host_cpu_clock();
+    int64_t host_cpu_now() const;
+    char host_state() const;
+
+    std::atomic<uint64_t> hle_enters{ 0 };
+    std::atomic<uint64_t> hle_returns{ 0 };
+    std::atomic<int> gated_wakees{ 0 };
+    std::atomic<SceUID> gate_waker{ 0 };
+    uint64_t gate_h0 = 0;
+    const char *gate_kind = nullptr;
+    SceUID gate_uid = 0;
+    void *host_cpu_handle = nullptr;
+    int64_t host_cpu_clock = 0;
+    int host_tid = 0;
+    std::atomic<bool> host_cpu_ready{ false };
 
     KernelState &kernel;
 

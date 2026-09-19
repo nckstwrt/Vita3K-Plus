@@ -141,6 +141,8 @@ private:
     [[maybe_unused]] int src2_repeat_offset = get_repeat_offset(inst.opr.src2, current_repeat, repeat_mode, inst.opr.src2.bank);
 
     const int get_repeat_offset(Operand &op, const std::uint8_t repeat_index, RepeatMode repeat_mode, RegisterBank bank) {
+        if (repeat_mode == RepeatMode::INTERNAL && !(op.flags & RegisterFlags::GPI) && op.index != 3)
+            return 0;
         if (repeat_mode == RepeatMode::INTERNAL || repeat_mode == RepeatMode::BOTH) {
             if (bank == RegisterBank::FPINTERNAL) {
                 return repeat_index;
