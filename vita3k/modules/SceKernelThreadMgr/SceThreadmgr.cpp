@@ -534,7 +534,9 @@ EXPORT(SceInt32, _sceKernelGetThreadInfo, SceUID threadId, Ptr<SceKernelThreadIn
     info->initCpuAffinityMask = thread->affinity_mask; // Todo Give init affinity
     info->currentCpuAffinityMask = thread->affinity_mask;
     const uint32_t user_cpus = (static_cast<uint32_t>(thread->affinity_mask) >> 16) & 0x7;
-    info->currentCpuId = (user_cpus & 1) ? 0 : (user_cpus & 2) ? 1 : (user_cpus & 4) ? 2 : 0;
+    info->currentCpuId = (user_cpus & 1) ? 0 : (user_cpus & 2) ? 1
+        : (user_cpus & 4)                                      ? 2
+                                                               : 0;
     info->lastExecutedCpuId = info->currentCpuId;
     info->entry = SceKernelThreadEntry(thread->entry_point);
     switch (status) {

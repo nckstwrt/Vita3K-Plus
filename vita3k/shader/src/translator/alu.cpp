@@ -260,7 +260,8 @@ bool USSETranslatorVisitor::vmad2(
     inst.opr.src2.flags = decode_modifier(src2_mod);
 
     // Log the instruction
-    LOG_DISASM("{:016x}: {}{}2 {} {} {} {}", m_instr, disasm::e_predicate_str(static_cast<ExtPredicate>(pred)), disasm::opcode_str(op), disasm::operand_to_str(inst.opr.dest, dest_mask),
+    static constexpr ExtPredicate short_vec_pred[] = { ExtPredicate::NONE, ExtPredicate::P0, ExtPredicate::NEGP0, ExtPredicate::PN };
+    LOG_DISASM("{:016x}: {}{}2 {} {} {} {}", m_instr, disasm::e_predicate_str(short_vec_pred[pred]), disasm::opcode_str(op), disasm::operand_to_str(inst.opr.dest, dest_mask),
         disasm::operand_to_str(inst.opr.src0, dest_mask), disasm::operand_to_str(inst.opr.src1, dest_mask), disasm::operand_to_str(inst.opr.src2, dest_mask));
 
     m_b.setDebugSourceLocation(m_recompiler.cur_pc, nullptr);
@@ -1235,6 +1236,10 @@ bool shader::usse::USSETranslatorVisitor::sop2m(Imm2 pred,
     }
 
     result = utils::convert_to_int(m_b, m_util_funcs, result, DataType::UINT8, true);
+
+    const bool lanes_packed_from_x = (wmask & (wmask + 1)) == 0;
+    if (!lanes_packed_from_x)
+        result = utils::finalize(m_b, result, result, SWIZZLE_CHANNEL_4_DEFAULT, m_b.makeIntConstant(0), wmask);
 
     // Final result. Do binary operation and then store
     store(inst.opr.dest, result, wmask, 0);

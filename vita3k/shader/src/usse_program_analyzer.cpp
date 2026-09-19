@@ -68,10 +68,6 @@ bool does_write_to_predicate(const std::uint64_t inst, std::uint8_t &pred) {
 
 std::uint8_t get_predicate(const std::uint64_t inst) {
     switch (inst >> 59) {
-    // VMAD2
-    case 0b00000:
-        return ((inst >> 32) & ~0xFCFFFFFF) >> 24;
-
     // V32NMAD, V16NMAD, VMAD
     case 0b00001:
     case 0b00010:
@@ -81,6 +77,7 @@ std::uint8_t get_predicate(const std::uint64_t inst) {
     }
 
     // VMAD normal version, predicates only occupied two bits
+    case 0b00000:
     case 0b00100:
     case 0b00101: {
         uint8_t predicate = ((inst >> 32) & ~0xFCFFFFFF) >> 24;
