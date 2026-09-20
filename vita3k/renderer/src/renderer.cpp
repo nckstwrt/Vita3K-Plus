@@ -264,8 +264,71 @@ void set_context(State &state, Context *ctx, RenderTarget *target, SceGxmColorSu
     renderer::add_command(ctx, renderer::CommandOpcode::SetContext, nullptr, target, color_surface, depth_stencil_surface);
 }
 
-void set_vertex_stream(State &state, Context *ctx, const std::size_t index, const std::size_t data_len, const Ptr<const void> stream) {
-    renderer::add_state_set_command(ctx, renderer::GXMState::VertexStream, stream, index, data_len);
+namespace {
+constexpr bool GUEST_STREAM_SNAPSHOT = true;
+constexpr size_t SNAP_RING_SIZE = 64u * 1024u * 1024u;
+
+std::mutex g_snap_mutex;
+std::vector<uint8_t> g_snap_ring;
+uint64_t g_snap_cursor = 0;
+std::atomic<uint64_t> g_snap_taken{ 0 };
+std::atomic<uint64_t> g_snap_used{ 0 };
+std::atomic<uint64_t> g_snap_stale{ 0 };
+std::atomic<int64_t> g_snap_next_report{ 0 };
+
+uint32_t snap_align(const uint32_t size) {
+    return (size + 63u) & ~63u;
+}
+} // namespace
+
+uint64_t stream_snapshot_take(const MemState &mem, const uint32_t addr, const uint32_t size) {
+    if (!GUEST_STREAM_SNAPSHOT || !addr || !size || size > SNAP_RING_SIZE / 4)
+        return ~0ull;
+    const uint8_t *src = Ptr<const uint8_t>(addr).get(mem);
+    if (!src)
+        return ~0ull;
+
+    const uint32_t aligned = snap_align(size);
+    const std::lock_guard<std::mutex> lock(g_snap_mutex);
+    if (g_snap_ring.empty())
+        g_snap_ring.resize(SNAP_RING_SIZE);
+
+    uint64_t handle = g_snap_cursor;
+    size_t offset = static_cast<size_t>(handle % SNAP_RING_SIZE);
+    if (offset + aligned > SNAP_RING_SIZE) {
+        // never let a copy straddle the end of the ring
+        handle += SNAP_RING_SIZE - offset;
+        offset = 0;
+    }
+    g_snap_cursor = handle + aligned;
+    memcpy(g_snap_ring.data() + offset, src, size);
+    g_snap_taken.fetch_add(1, std::memory_order_relaxed);
+    return handle;
+}
+
+const uint8_t *stream_snapshot_get(const uint64_t handle, const uint32_t size) {
+    if (!GUEST_STREAM_SNAPSHOT || handle == ~0ull || !size)
+        return nullptr;
+
+    const uint32_t aligned = snap_align(size);
+    const std::lock_guard<std::mutex> lock(g_snap_mutex);
+    if (g_snap_ring.empty() || g_snap_cursor < handle || (g_snap_cursor - handle) > (SNAP_RING_SIZE - aligned)) {
+        g_snap_stale.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+    g_snap_used.fetch_add(1, std::memory_order_relaxed);
+
+    const int64_t now = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    int64_t next = g_snap_next_report.load(std::memory_order_relaxed);
+    if (now >= next && g_snap_next_report.compare_exchange_strong(next, now + 10000000))
+        LOG_INFO("[SNAPSHOT] taken {} used {} stale {} ring {} MiB", g_snap_taken.load(std::memory_order_relaxed),
+            g_snap_used.load(std::memory_order_relaxed), g_snap_stale.load(std::memory_order_relaxed), SNAP_RING_SIZE >> 20);
+
+    return g_snap_ring.data() + static_cast<size_t>(handle % SNAP_RING_SIZE);
+}
+
+void set_vertex_stream(State &state, Context *ctx, const std::size_t index, const std::size_t data_len, const Ptr<const void> stream, const uint64_t snapshot) {
+    renderer::add_state_set_command(ctx, renderer::GXMState::VertexStream, stream, index, data_len, snapshot);
 }
 
 void draw(State &state, Context *ctx, SceGxmPrimitiveType prim_type, SceGxmIndexFormat index_type, Ptr<const void> index_data, const std::uint32_t index_count, const std::uint32_t instance_count) {

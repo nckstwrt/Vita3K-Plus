@@ -81,6 +81,7 @@ struct RenderTarget;
 struct GXMStreamInfo {
     Ptr<const uint8_t> data = Ptr<const uint8_t>(0);
     size_t size = 0;
+    uint64_t snapshot = ~0ull;
 };
 
 // We separate the following two parts of the stencil state because the first is part of the pipeline creation

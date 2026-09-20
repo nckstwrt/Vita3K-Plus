@@ -100,7 +100,9 @@ void set_visibility_buffer(State &state, Context *ctx, Ptr<uint32_t> visibility_
 void set_visibility_index(State &state, Context *ctx, bool enable, uint32_t index, bool is_increment);
 
 void set_context(State &state, Context *ctx, RenderTarget *target, SceGxmColorSurface *color_surface, SceGxmDepthStencilSurface *depth_stencil_surface);
-void set_vertex_stream(State &state, Context *ctx, const std::size_t index, const std::size_t data_len, const Ptr<const void> stream);
+void set_vertex_stream(State &state, Context *ctx, const std::size_t index, const std::size_t data_len, const Ptr<const void> stream, uint64_t snapshot);
+uint64_t stream_snapshot_take(const MemState &mem, uint32_t addr, uint32_t size);
+const uint8_t *stream_snapshot_get(uint64_t handle, uint32_t size);
 void draw(State &state, Context *ctx, SceGxmPrimitiveType prim_type, SceGxmIndexFormat index_type, Ptr<const void> index_data, const std::uint32_t index_count, const std::uint32_t instance_count);
 void transfer_copy(State &state, uint32_t colorKeyValue, uint32_t colorKeyMask, SceGxmTransferColorKeyMode colorKeyMode, const SceGxmTransferImage *images, SceGxmTransferType srcType, SceGxmTransferType destType);
 void transfer_downscale(State &state, const SceGxmTransferImage *src, const SceGxmTransferImage *dest);
