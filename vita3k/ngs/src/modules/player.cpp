@@ -193,6 +193,29 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
         if ((state->current_buffer == -1)
             || !params->buffer_params[state->current_buffer].buffer
             || (params->buffer_params[state->current_buffer].bytes_count == 0)) {
+            // A buffer of zero bytes has no samples so follow the chain to those that do have audio instead of waiting
+            if (state->current_buffer != -1) {
+                const int32_t entered_from = state->current_buffer;
+                int hops = 0;
+                while (hops < SCE_NGS_PLAYER_MAX_BUFFERS
+                    && state->current_buffer != -1
+                    && (!params->buffer_params[state->current_buffer].buffer
+                        || params->buffer_params[state->current_buffer].bytes_count == 0)) {
+                    const int32_t next = valid_buffer_index(params->buffer_params[state->current_buffer].next_buffer_index);
+                    if (next == -1 || next == state->current_buffer)
+                        break;
+                    state->current_buffer = next;
+                    state->current_byte_position_in_buffer = 0;
+                    logical->current_loop_count = 0;
+                    hops++;
+                }
+                if (hops > 0
+                    && state->current_buffer != -1
+                    && params->buffer_params[state->current_buffer].buffer
+                    && params->buffer_params[state->current_buffer].bytes_count > 0)
+                    continue;
+                state->current_buffer = entered_from;
+            }
             if (state->bytes_consumed_since_key_on == 0) {
                 if (request_initial_buffer()
                     && state->current_buffer != -1
