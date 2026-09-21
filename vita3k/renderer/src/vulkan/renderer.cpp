@@ -673,6 +673,11 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         is_mesa_turnip = driver_chain.get<vk::PhysicalDeviceDriverProperties>().driverID == vk::DriverId::eMesaTurnip;
     }
 
+    // Adreno 650 (SD865) draws that switch pipeline overlap the previous pipeline's draws and draw corrupt checkered black blocks
+    wait_on_pipeline_switch = is_mesa_turnip && (physical_device_properties.deviceID >> 24) == 6;
+    if (wait_on_pipeline_switch)
+        LOG_INFO("Turnip on Adreno 6xx (device 0x{:X}): draws that switch pipeline wait for the draws before them", physical_device_properties.deviceID);
+
     bool support_dedicated_allocations = false;
     // Create Device
     {

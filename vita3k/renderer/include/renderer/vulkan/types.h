@@ -348,6 +348,8 @@ struct VKContext : public renderer::Context {
     bool pipeline_stops_lrz_write = false;
     bool stencil_compare_mask_zeroed = false;
     bool is_first_scene_draw = false;
+    // pipeline of the previous draw kept across render passes
+    vk::Pipeline last_draw_pipeline = nullptr;
     // command buffer used to record the current scene
     vk::CommandBuffer render_cmd{};
     // command buffer used for commands that need to be executed before render_cmd (mostly because they can't be done during a render pass)

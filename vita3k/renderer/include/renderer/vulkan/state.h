@@ -147,6 +147,8 @@ struct VKState : public renderer::State {
     bool support_standard_layout = false;
     bool support_rasterized_order_access = false;
     bool is_mesa_turnip = false;
+    // Turnip Adreno 6xx fix: a draw that switches pipeline waits for the draws before it
+    bool wait_on_pipeline_switch = false;
     // bound guest write-backs to the render-target extent the surface was rendered with
     bool surface_sync_clamp_rt = true;
     LinuxSurfaceType linux_surface_type = LinuxSurfaceType::Unknown;

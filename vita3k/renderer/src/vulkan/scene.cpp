@@ -670,6 +670,13 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     // bind the vertex streams
     bind_vertex_streams(context, mem, instance_count, max_index);
 
+    // Turnip on Adreno 6xx: a draw with another pipeline than the previous draw waits for the draws before it
+    if (context.state.wait_on_pipeline_switch && context.current_pipeline != context.last_draw_pipeline && context.record.color_surface.data) {
+        context.render_cmd.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::PipelineStageFlagBits::eFragmentShader,
+            vk::DependencyFlagBits::eByRegion, {}, {}, {});
+    }
+    context.last_draw_pipeline = context.current_pipeline;
+
     context.render_cmd.drawIndexed(count, instance_count, 0, 0, 0);
 
     context.vertex_uniform_storage_allocated = false;
