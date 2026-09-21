@@ -36,6 +36,7 @@
 #include <spirv_glsl.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <functional>
 #include <list>
@@ -2238,6 +2239,42 @@ static void generate_update_mask_body(spv::Builder &b, TranslationState &transla
     b.createStore(mask_v, out);
 }
 
+// pN (iteration n of a repeated instruction uses predicate n) is decoded but not translated.
+// Not found a game using it so a shader that does is just named in the log for now
+static void log_pn_predicates(const SceGxmProgram &program, const std::string &hash) {
+    const uint64_t *primary = program.primary_program_start();
+    const uint64_t primary_count = program.primary_program_instr_count;
+    const uint64_t *secondary = program.secondary_program_start();
+    const uint64_t secondary_count = program.secondary_program_end() > secondary ? program.secondary_program_end() - secondary : 0;
+
+    uint32_t vector_ops = 0;
+    uint32_t other_ops = 0;
+    std::string listed;
+    const auto scan = [&](const uint64_t *code, const uint64_t count, const char *phase) {
+        for (uint64_t i = 0; i < count; i++) {
+            if (!usse::uses_pn_predicate(code[i]))
+                continue;
+            const uint32_t opcode = static_cast<uint32_t>(code[i] >> 59);
+            if (opcode >= 1 && opcode <= 3)
+                vector_ops++;
+            else
+                other_ops++;
+            if (vector_ops + other_ops <= 16)
+                listed += fmt::format(" {}[{}]=0x{:016X}", phase, i, code[i]);
+        }
+    };
+    scan(primary, primary_count, "primary");
+    scan(secondary, secondary_count, "secondary");
+    if (vector_ops + other_ops == 0)
+        return;
+
+    static std::atomic<uint32_t> shaders_with_pn{ 0 };
+    LOG_WARN("[USSE-PN] {} shader {} ({} primary + {} secondary instructions): {} use the pN predicate, which is not translated: "
+             "{} vector op(s) run unconditionally, {} read a predicate that does not exist. Shaders with pN so far: {}. First ones:{}",
+        program.is_fragment() ? "fragment" : "vertex", hash, primary_count, secondary_count, vector_ops + other_ops, vector_ops, other_ops,
+        ++shaders_with_pn, listed);
+}
+
 static SpirvCode convert_gxp_to_spirv_impl(const SceGxmProgram &program, const std::string &shader_hash, const FeatureState &features, TranslationState &translation_state, bool force_shader_debug, const std::function<bool(const std::string &ext, const std::string &dump)> &dumper) {
     SpirvCode spirv;
 
@@ -2382,6 +2419,7 @@ static SpirvCode convert_gxp_to_spirv_impl(const SceGxmProgram &program, const s
             });
         }
 
+        log_pn_predicates(program, translation_state.hash);
         generate_shader_body(b, parameters, program, features, utils, begin_hook_func, end_hook_func, texture_queries, translation_state.render_info_id, spv_func_main, translation_state.interfaces);
     } else {
         generate_update_mask_body(b, translation_state);

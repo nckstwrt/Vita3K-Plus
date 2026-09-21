@@ -61,6 +61,8 @@ struct GxmState {
     Queue<DisplayCallback> display_queue;
     std::atomic<int> display_worker_state{ 0 };
     std::atomic<uint32_t> display_entries_done{ 0 };
+    std::atomic<uint32_t> display_entries_pushed{ 0 };
+    bool display_queue_early_release = false;
     SceUID display_queue_thread;
     std::thread display_host_thread;
 

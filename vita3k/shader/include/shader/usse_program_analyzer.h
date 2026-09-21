@@ -49,6 +49,8 @@ bool is_branch(const std::uint64_t inst, std::uint8_t &pred, std::int32_t &br_of
 bool is_buffer_fetch_or_store(const std::uint64_t inst, int &base, int &cursor, int &offset, int &size);
 bool does_write_to_predicate(const std::uint64_t inst, std::uint8_t &pred);
 std::uint8_t get_predicate(const std::uint64_t inst);
+// True when the instruction is predicated on pN which the translator does not currently implement
+bool uses_pn_predicate(const std::uint64_t inst);
 
 enum USSENodeType {
     USSE_ABSTRACT_NODE,

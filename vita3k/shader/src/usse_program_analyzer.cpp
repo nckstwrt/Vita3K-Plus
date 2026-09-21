@@ -158,6 +158,18 @@ std::uint8_t get_predicate(const std::uint64_t inst) {
     return ((inst >> 32) & ~0xF8FFFFFFU) >> 24;
 }
 
+bool uses_pn_predicate(const std::uint64_t inst) {
+    switch (inst >> 59) {
+    // V32NMAD, V16NMAD, VMAD: get_predicate turns their pN into no predicate
+    case 0b00001:
+    case 0b00010:
+    case 0b00011:
+        return static_cast<ExtVecPredicate>(((inst >> 32) & ~0xF8FFFFFFU) >> 24) == ExtVecPredicate::PN;
+    default:
+        return get_predicate(inst) == static_cast<std::uint8_t>(ExtPredicate::PN);
+    }
+}
+
 bool is_buffer_fetch_or_store(const std::uint64_t inst, int &base, int &cursor, int &offset, int &size) {
     // TODO: Is there any exception? Like any instruction use pre or post increment addressing mode.
     cursor = 0;
