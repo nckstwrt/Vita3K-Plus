@@ -2620,9 +2620,7 @@ static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, c
             const size_t data_length = max_data_length[stream_index];
             const Ptr<const void> data = context->state.stream_data[stream_index];
 
-            const uint64_t snapshot = renderer::stream_snapshot_take(emuenv.mem, data.address(), static_cast<uint32_t>(data_length));
-            renderer::set_vertex_stream(*emuenv.renderer, context->renderer.get(), stream_index,
-                data_length, data, snapshot);
+            renderer::set_vertex_stream(*emuenv.renderer, context->renderer.get(), stream_index, data_length, data);
         }
     }
 
@@ -2767,9 +2765,7 @@ EXPORT(int, sceGxmDrawPrecomputed, SceGxmContext *context, SceGxmPrecomputedDraw
             const size_t data_length = max_data_length[stream_index];
             const Ptr<const void> data = stream_data[stream_index];
 
-            const uint64_t snapshot = renderer::stream_snapshot_take(emuenv.mem, data.address(), static_cast<uint32_t>(data_length));
-            renderer::set_vertex_stream(*emuenv.renderer, context->renderer.get(), stream_index,
-                data_length, data, snapshot);
+            renderer::set_vertex_stream(*emuenv.renderer, context->renderer.get(), stream_index, data_length, data);
         }
     }
 
@@ -2855,6 +2851,11 @@ EXPORT(int, sceGxmEndScene, SceGxmContext *context, SceGxmNotification *vertexNo
         renderer::add_command(context->renderer.get(), renderer::CommandOpcode::SignalSyncObject,
             nullptr, context->state.fragment_sync_object, cmd_timestamp);
     }
+
+    // the hardware starts vertex processing here so this is when the vertex streams are copied.
+    // games may reuse them as soon as that is done (which is long before we can render the scene)
+    if (emuenv.renderer->features.enable_memory_mapping)
+        renderer::stream_snapshot_kick(emuenv.mem, context->renderer->command_list);
 
     // Submit our command list
     renderer::submit_command_list(*emuenv.renderer, context->renderer.get(), context->renderer->command_list);
@@ -3176,6 +3177,10 @@ EXPORT(int, sceGxmMidSceneFlush, SceGxmContext *immediateContext, uint32_t flags
 
     if (!immediateContext->state.active)
         return RET_ERROR(SCE_GXM_ERROR_NOT_WITHIN_SCENE);
+
+    // a mid-scene flush starts vertex processing of the draws thus far so we copy their streams now
+    if (emuenv.renderer->features.enable_memory_mapping)
+        renderer::stream_snapshot_kick(emuenv.mem, immediateContext->renderer->command_list);
 
     SceGxmNotification notification = vertexNotification ? *vertexNotification : SceGxmNotification{ Ptr<uint32_t>(0), 0 };
     renderer::add_command(immediateContext->renderer.get(), renderer::CommandOpcode::MidSceneFlush, nullptr, notification);
@@ -5076,6 +5081,10 @@ EXPORT(int, sceGxmShaderPatcherRegisterProgram, SceGxmShaderPatcher *shaderPatch
     SceGxmRegisteredProgram *const rp = programId->get(emuenv.mem);
     rp->program = programHeader;
     rp->self = programId->address();
+
+    const SceGxmProgram *const program = programHeader.get(emuenv.mem);
+    if (program && (program->program_flags & SCE_GXM_PROGRAM_FLAG_BUFFER_STORE))
+        renderer::stream_snapshot_disable_for_program(programHeader.address(), program->program_flags);
 
     return 0;
 }

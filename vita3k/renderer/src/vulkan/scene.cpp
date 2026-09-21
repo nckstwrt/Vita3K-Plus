@@ -276,10 +276,6 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
         descriptors.size(), descriptors.data(), dynamic_offset_count, dynamic_offsets);
 }
 
-// copy vertex streams into a ring buffer even when guest memory is mapped so a game that recycles its vertex
-// memory before our GPU work reads it cannot corrupt the draw
-constexpr bool VERTEX_STREAM_COPY_WITH_MAPPING = true;
-
 // vertex count is only used with double buffer mapping
 static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t instance_count, uint32_t max_index) {
     GxmRecordState &state = context.record;
@@ -322,15 +318,18 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
 
     for (int i = 0; i < max_stream_idx; i++) {
         if (state.vertex_streams[i].data) {
-            if (context.state.features.enable_memory_mapping && !VERTEX_STREAM_COPY_WITH_MAPPING) {
+            const bool mapped = context.state.features.enable_memory_mapping;
+            uint32_t stream_size = state.vertex_streams[i].size;
+            // by the time we bind the game may already have recycled this block so prefer the copy taken when the scene was kicked
+            const uint8_t *snapshot = mapped
+                ? renderer::stream_snapshot_get(state.vertex_streams[i].snapshot, stream_size, context.frame_timestamp)
+                : nullptr;
+            if (mapped && !snapshot) {
                 auto [buffer, offset] = context.state.get_matching_mapping(state.vertex_streams[i].data.cast<void>());
 
                 context.vertex_stream_offsets[i] = offset;
                 context.vertex_stream_buffers[i] = buffer;
             } else {
-                uint32_t stream_size = state.vertex_streams[i].size;
-                // by the time we bind the game may already have recycled this block so prefer the copy the guest thread took
-                const uint8_t *snapshot = renderer::stream_snapshot_get(state.vertex_streams[i].snapshot, stream_size);
                 const uint8_t *stream = snapshot ? snapshot : state.vertex_streams[i].data.get(mem);
 #ifdef __APPLE__
                 // Vulkan allows any stride, but Metal only allows multiples of 4.
