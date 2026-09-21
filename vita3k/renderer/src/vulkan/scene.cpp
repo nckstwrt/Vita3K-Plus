@@ -330,6 +330,8 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
                 context.vertex_stream_offsets[i] = offset;
                 context.vertex_stream_buffers[i] = buffer;
             } else {
+                if (!context.vertex_stream_ring_buffer.handle())
+                    context.vertex_stream_ring_buffer.create();
                 const uint8_t *stream = snapshot ? snapshot : state.vertex_streams[i].data.get(mem);
 #ifdef __APPLE__
                 // Vulkan allows any stride, but Metal only allows multiples of 4.

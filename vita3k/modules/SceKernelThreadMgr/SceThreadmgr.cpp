@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include "SceThreadmgr.h"
+#include <modules/guest_code_fixes.h>
 #include <modules/module_parent.h>
 
 #include <kernel/callback.h>
@@ -1185,6 +1186,7 @@ static int delay_thread_cb(EmuEnvState &emuenv, SceUID thread_id, SceUInt delay_
 
 EXPORT(int, sceKernelDelayThread, SceUInt delay) {
     TRACY_FUNC(sceKernelDelayThread, delay);
+    note_guest_delay(emuenv, thread_id);
     return delay_thread(emuenv.kernel, thread_id, delay);
 }
 

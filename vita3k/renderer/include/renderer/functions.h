@@ -104,6 +104,7 @@ void set_vertex_stream(State &state, Context *ctx, const std::size_t index, cons
 void stream_snapshot_kick(MemState &mem, CommandList &list);
 const uint8_t *stream_snapshot_get(uint64_t handle, uint32_t size, uint64_t frame);
 void stream_snapshot_disable_for_program(uint32_t program_addr, uint32_t program_flags);
+void stream_snapshot_reset();
 void draw(State &state, Context *ctx, SceGxmPrimitiveType prim_type, SceGxmIndexFormat index_type, Ptr<const void> index_data, const std::uint32_t index_count, const std::uint32_t instance_count);
 void transfer_copy(State &state, uint32_t colorKeyValue, uint32_t colorKeyMask, SceGxmTransferColorKeyMode colorKeyMode, const SceGxmTransferImage *images, SceGxmTransferType srcType, SceGxmTransferType destType);
 void transfer_downscale(State &state, const SceGxmTransferImage *src, const SceGxmTransferImage *dest);

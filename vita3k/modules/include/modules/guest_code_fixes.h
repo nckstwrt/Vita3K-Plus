@@ -21,6 +21,9 @@
 
 struct EmuEnvState;
 
-// Repairs known defects in Sony libraries that games ship in their own sce_module folder. Each fix is found by the
-// library's exact code when the module loads, never by title: a build whose bytes differ is left untouched.
+// Repairs known defects in Sony libraries, whether a game ships them in its own sce_module folder or they load from the
+// firmware. Each fix is found by the library's exact code when the module loads (never by title)
 void apply_guest_code_fixes(EmuEnvState &emuenv, const SceKernelModuleInfo &module);
+
+// called by sceKernelDelayThread and reports a thread whose sleeps inside a patched wait runs long
+void note_guest_delay(EmuEnvState &emuenv, SceUID thread_id);

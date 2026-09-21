@@ -334,6 +334,8 @@ void stream_snapshot_kick(MemState &mem, CommandList &list) {
     }
 
     const std::lock_guard<std::mutex> lock(g_snap_mutex);
+    if (g_snap_disabled.load(std::memory_order_relaxed))
+        return;
     for (Command *cmd = from; cmd; cmd = cmd == list.last ? nullptr : cmd->next) {
         if (cmd->opcode != CommandOpcode::SetState)
             continue;
@@ -385,10 +387,26 @@ const uint8_t *stream_snapshot_get(const uint64_t handle, const uint32_t size, c
     return scratch.data();
 }
 
+void stream_snapshot_reset() {
+    const std::lock_guard<std::mutex> lock(g_snap_mutex);
+    g_snap_disabled = false;
+    std::vector<uint8_t>().swap(g_snap_ring);
+    g_snap_copied = 0;
+    g_snap_bound = 0;
+    g_snap_stale = 0;
+    g_snap_over_budget = 0;
+    g_snap_budget_frame = ~0ull;
+    g_snap_budget_used = 0;
+}
+
 void stream_snapshot_disable_for_program(const uint32_t program_addr, const uint32_t program_flags) {
-    if (!g_snap_disabled.exchange(true))
-        LOG_INFO("[SNAPSHOT] disabled for this session: the program at 0x{:08X} (flags 0x{:X}) writes memory from the GPU, so a copy of a vertex stream taken on the guest thread could miss what the GPU writes into it later",
-            program_addr, program_flags);
+    if (g_snap_disabled.exchange(true))
+        return;
+    {
+        const std::lock_guard<std::mutex> lock(g_snap_mutex);
+        std::vector<uint8_t>().swap(g_snap_ring);
+    }
+    LOG_INFO("[SNAPSHOT] disabled for this game: the program at 0x{:08X} (flags 0x{:X}) writes memory from the GPU, so a copy of a vertex stream taken on the guest thread could miss what the GPU writes into it later", program_addr, program_flags);
 }
 
 void set_vertex_stream(State &state, Context *ctx, const std::size_t index, const std::size_t data_len, const Ptr<const void> stream) {

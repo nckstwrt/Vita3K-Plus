@@ -952,10 +952,15 @@ static void display_entry_thread(EmuEnvState &emuenv) {
         }
         emuenv.gxm.display_worker_state.store(3, std::memory_order_relaxed);
 
+        const bool early_release = emuenv.gxm.display_queue_early_release;
+        if (early_release)
+            display_queue.pop();
+
         // check if we're shutting down before calling run_guest_function to avoid deadlock
         if (emuenv.display.abort.load()) {
             LOG_DEBUG("Abort detected, freeing callback data and exiting");
-            display_queue.pop();
+            if (!early_release)
+                display_queue.pop();
             free(emuenv.mem, display_callback->data);
             break;
         }
@@ -976,7 +981,8 @@ static void display_entry_thread(EmuEnvState &emuenv) {
         free(emuenv.mem, display_callback->data);
 
         // the entry stays pending until its callback has returned
-        display_queue.pop();
+        if (!early_release)
+            display_queue.pop();
         emuenv.gxm.display_entries_done.fetch_add(1, std::memory_order_relaxed);
     }
 }
@@ -2446,6 +2452,7 @@ EXPORT(int, sceGxmDisplayQueueAddEntry, Ptr<SceGxmSyncObject> oldBuffer, Ptr<Sce
 
     // function may be blocking here (expected behavior)
     emuenv.gxm.display_queue.push(display_callback);
+    emuenv.gxm.display_entries_pushed.fetch_add(1, std::memory_order_relaxed);
 
     // TODO: I do this because the sync function does not have access to the display state, but this is not great
     renderer::Context *active_renderer_context = nullptr;
@@ -2461,6 +2468,10 @@ EXPORT(int, sceGxmDisplayQueueFinish) {
     TRACY_FUNC(sceGxmDisplayQueueFinish);
     guest_sched_release_for_block();
     emuenv.gxm.display_queue.wait_empty();
+    // with the early release the last entries leave the queue before their callbacks have run
+    while (emuenv.gxm.display_queue_early_release && !emuenv.gxm.display_queue.is_aborted()
+        && emuenv.gxm.display_entries_done.load(std::memory_order_relaxed) < emuenv.gxm.display_entries_pushed.load(std::memory_order_relaxed))
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
 
     return 0;
 }
@@ -3069,8 +3080,12 @@ EXPORT(int, sceGxmInitialize, const SceGxmInitializeParams *params) {
 
     emuenv.gxm.params = *params;
     // hack, limit the number of frame rendering at the same time to at most 3
-    const uint32_t max_queue_size = std::max(std::min(params->displayQueueMaxPendingCount, 3U), 1U);
+    const uint32_t pending = std::max(std::min(params->displayQueueMaxPendingCount, 3U), 1U);
+    emuenv.gxm.display_queue_early_release = emuenv.renderer->mapping_method == MappingMethod::DoubleBuffer;
+    const uint32_t max_queue_size = emuenv.gxm.display_queue_early_release ? std::max(pending - 1, 1U) : pending;
     emuenv.gxm.display_queue.maxPendingCount_ = max_queue_size;
+    LOG_INFO("[DISPLAYQ] displayQueueMaxPendingCount {} -> queue depth {}{}", params->displayQueueMaxPendingCount, max_queue_size,
+        emuenv.gxm.display_queue_early_release ? ", released once the frame is rendered (Double Buffer)" : ", released after the flip callback");
 
     const ThreadStatePtr main_thread = emuenv.kernel.get_thread(thread_id);
     const ThreadStatePtr display_queue_thread = emuenv.kernel.create_thread(emuenv.mem, "SceGxmDisplayQueue", Ptr<void>(0), SCE_KERNEL_HIGHEST_PRIORITY_USER, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_DEFAULT, nullptr);
@@ -3082,7 +3097,9 @@ EXPORT(int, sceGxmInitialize, const SceGxmInitializeParams *params) {
     // Reset the queue in case sceGxmTerminate was called earlier
     emuenv.gxm.display_queue.reset();
     emuenv.gxm.display_entries_done.store(0, std::memory_order_relaxed);
+    emuenv.gxm.display_entries_pushed.store(0, std::memory_order_relaxed);
     gxm_program_registry_clear();
+    renderer::stream_snapshot_reset();
     emuenv.gxm.display_host_thread = std::thread(display_entry_thread, std::ref(emuenv));
     emuenv.gxm.notification_region = Ptr<uint32_t>(alloc(emuenv.mem, MiB(1), "SceGxmNotificationRegion"));
     memset(emuenv.gxm.notification_region.get(emuenv.mem), 0, MiB(1));
