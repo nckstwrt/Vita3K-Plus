@@ -61,8 +61,6 @@ TRACY_MODULE_NAME(SceGxm);
 // Precomputed vertex/fragment state applies to every draw once set on the context, not only sceGxmDrawPrecomputed.
 static constexpr bool use_precomputed_state_on_draw = true;
 
-static constexpr bool deferred_list_restarts_from_installed_buffer = true;
-
 template <>
 std::string to_debug_str<SceGxmColorFormat>(const MemState &mem, SceGxmColorFormat type) {
     switch (type) {
@@ -987,8 +985,14 @@ static void display_entry_thread(EmuEnvState &emuenv) {
     }
 }
 
+namespace command_list_registry {
+static std::mutex mtx;
+static std::unordered_set<const renderer::CommandList *> lists;
+} // namespace command_list_registry
+
 static Ptr<void> gxmRunDeferredMemoryCallback(KernelState &kernel, const MemState &mem, std::mutex &global_lock, std::uint32_t &return_size, Ptr<SceGxmDeferredContextCallback> callback, Ptr<void> userdata,
     const std::uint32_t size, const SceUID thread_id) {
+    const std::uint32_t min_size = std::max<std::uint32_t>(1024, size + 4);
     if (!callback) {
         // libgxm would fail the reservation, jumping to address 0 would kill the process
         static std::atomic<int> reported{ 0 };
@@ -1001,11 +1005,17 @@ static Ptr<void> gxmRunDeferredMemoryCallback(KernelState &kernel, const MemStat
 
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
     const Address final_size_addr = stack_alloc(*thread->cpu, 4);
+    *Ptr<std::uint32_t>(final_size_addr).get(mem) = 0;
 
-    Ptr<void> result(thread->run_callback(callback.address(), { userdata.address(), size, final_size_addr }));
+    Ptr<void> result(thread->run_callback(callback.address(), { userdata.address(), min_size, final_size_addr }));
 
     return_size = *Ptr<std::uint32_t>(final_size_addr).get(mem);
     stack_free(*thread->cpu, 4);
+
+    if (!result || return_size < min_size) {
+        return_size = 0;
+        return Ptr<void>();
+    }
 
     return result;
 }
@@ -1082,6 +1092,11 @@ struct SceGxmContext {
     void free_command_list(SceGxmCommandList *command_list) {
         assert(command_list->list);
 
+        {
+            const std::lock_guard<std::mutex> guard(command_list_registry::mtx);
+            command_list_registry::lists.erase(command_list->list);
+        }
+
         // command list has been overwritten, free the memory
         // everything except the command_list except was allocated using malloc
         renderer::Command *cmd = command_list->list->first;
@@ -1131,6 +1146,9 @@ struct SceGxmContext {
 
     // insert new memory range used by a command list
     void insert_new_memory_range() {
+        if (alloc_space.address() == alloc_space_start.address())
+            return;
+
         CommandListRange range = {
             alloc_space_start.address(),
             alloc_space.address(),
@@ -1154,6 +1172,8 @@ struct SceGxmContext {
         if (state.active && state.type == SCE_GXM_CONTEXT_TYPE_DEFERRED) {
             // update memory ranges
             insert_new_memory_range();
+            // a failed refill must not record this span again (that would free this list)
+            alloc_space_start = alloc_space;
         }
 
         std::uint32_t actual_size = 0;
@@ -1171,10 +1191,8 @@ struct SceGxmContext {
                 state.vdm_buffer_size = 0;
             }
         } else {
-            constexpr uint32_t DEFAULT_SIZE = 1024;
-
-            Ptr<void> space = gxmRunDeferredMemoryCallback(kern, mem, callback_lock, actual_size, state.vdm_memory_callback,
-                state.memory_callback_userdata, DEFAULT_SIZE, thread_id);
+            // room for one 4-byte entry
+            Ptr<void> space = gxmRunDeferredMemoryCallback(kern, mem, callback_lock, actual_size, state.vdm_memory_callback, state.memory_callback_userdata, 4, thread_id);
 
             if (!space) {
                 LOG_ERROR("VDM callback runs out of memory!");
@@ -1545,34 +1563,6 @@ static const uint8_t mask_gxp[] = {
 };
 // clang-format on
 
-static constexpr std::uint32_t DEFAULT_RING_SIZE = 4096;
-
-namespace deferred_ring {
-struct InstalledBuffers {
-    Ptr<void> vertex;
-    uint32_t vertex_size = 0;
-    Ptr<void> fragment;
-    uint32_t fragment_size = 0;
-};
-static std::mutex installed_mtx;
-static std::unordered_map<const SceGxmContext *, InstalledBuffers> installed;
-static InstalledBuffers get_installed(const SceGxmContext *ctx) {
-    const std::lock_guard<std::mutex> guard(installed_mtx);
-    auto it = installed.find(ctx);
-    return it == installed.end() ? InstalledBuffers{} : it->second;
-}
-static void set_installed_vertex(const SceGxmContext *ctx, Ptr<void> mem, uint32_t size) {
-    const std::lock_guard<std::mutex> guard(installed_mtx);
-    installed[ctx].vertex = mem;
-    installed[ctx].vertex_size = size;
-}
-static void set_installed_fragment(const SceGxmContext *ctx, Ptr<void> mem, uint32_t size) {
-    const std::lock_guard<std::mutex> guard(installed_mtx);
-    installed[ctx].fragment = mem;
-    installed[ctx].fragment_size = size;
-}
-} // namespace deferred_ring
-
 static VertexCacheHash hash_data(const void *data, size_t size) {
     auto hash = XXH3_64bits(data, size);
     return static_cast<VertexCacheHash>(hash);
@@ -1766,47 +1756,15 @@ EXPORT(int, sceGxmBeginCommandList, SceGxmContext *deferredContext) {
         return RET_ERROR(SCE_GXM_ERROR_WITHIN_COMMAND_LIST);
     }
 
-    const Address prev_vring = deferredContext->state.vertex_ring_buffer.address();
-    if (deferred_list_restarts_from_installed_buffer) {
-        // a list starts from what the game installed; a callback chunk taken by the previous list is dropped
-        const deferred_ring::InstalledBuffers base = deferred_ring::get_installed(deferredContext);
-        deferredContext->state.vertex_ring_buffer = base.vertex;
-        deferredContext->state.vertex_ring_buffer_size = base.vertex_size;
-        deferredContext->state.fragment_ring_buffer = base.fragment;
-        deferredContext->state.fragment_ring_buffer_size = base.fragment_size;
-    }
-    deferredContext->state.fragment_ring_buffer_used = 0;
-    deferredContext->state.vertex_ring_buffer_used = 0;
-
-    deferredContext->curr_command_list = new SceGxmCommandList();
-
+    // libgxm only takes VDM memory here (the vertex and fragment buffers go on where the last list stopped)
     if (!deferredContext->make_new_alloc_space(emuenv.kernel, emuenv.mem, thread_id)) {
         return RET_ERROR(SCE_GXM_ERROR_RESERVE_FAILED);
     }
 
+    deferredContext->curr_command_list = new SceGxmCommandList();
+
     // in case the same vdm buffer was used for two consecutive command lists
     deferredContext->alloc_space_start = deferredContext->alloc_space;
-
-    if (!deferredContext->state.vertex_ring_buffer) {
-        deferredContext->state.vertex_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, emuenv.gxm.callback_lock, deferredContext->state.vertex_ring_buffer_size,
-            deferredContext->state.vertex_memory_callback, deferredContext->state.memory_callback_userdata, DEFAULT_RING_SIZE, thread_id);
-        // a fresh buffer starts empty
-        deferredContext->state.vertex_ring_buffer_used = 0;
-
-        if (!deferredContext->state.vertex_ring_buffer) {
-            return RET_ERROR(SCE_GXM_ERROR_RESERVE_FAILED);
-        }
-    }
-
-    if (!deferredContext->state.fragment_ring_buffer) {
-        deferredContext->state.fragment_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, emuenv.gxm.callback_lock, deferredContext->state.fragment_ring_buffer_size,
-            deferredContext->state.fragment_memory_callback, deferredContext->state.memory_callback_userdata, DEFAULT_RING_SIZE, thread_id);
-        deferredContext->state.fragment_ring_buffer_used = 0;
-
-        if (!deferredContext->state.fragment_ring_buffer) {
-            return RET_ERROR(SCE_GXM_ERROR_RESERVE_FAILED);
-        }
-    }
 
     // Set command allocate functions
     KernelState *kernel = &emuenv.kernel;
@@ -2148,8 +2106,6 @@ EXPORT(int, sceGxmCreateContext, const SceGxmContextParams *params, Ptr<SceGxmCo
     ctx->state.fragment_ring_buffer = params->fragmentRingBufferMem;
     ctx->state.vertex_ring_buffer = params->vertexRingBufferMem;
     ctx->state.fragment_ring_buffer_size = params->fragmentRingBufferMemSize;
-    deferred_ring::set_installed_vertex(ctx, params->vertexRingBufferMem, params->vertexRingBufferMemSize);
-    deferred_ring::set_installed_fragment(ctx, params->fragmentRingBufferMem, params->fragmentRingBufferMemSize);
     ctx->state.vertex_ring_buffer_size = params->vertexRingBufferMemSize;
 
     ctx->state.type = SCE_GXM_CONTEXT_TYPE_IMMEDIATE;
@@ -2210,6 +2166,16 @@ EXPORT(int, sceGxmCreateDeferredContext, SceGxmDeferredContextParams *params, Pt
     ctx->state.fragment_memory_callback = params->fragmentCallback;
     ctx->state.vdm_memory_callback = params->vdmCallback;
     ctx->state.memory_callback_userdata = params->userData;
+
+    const bool has_vdm = params->vdmBufferMem && params->vdmBufferMemSize;
+    const bool has_vertex = params->vertexBufferMem && params->vertexBufferMemSize;
+    const bool has_fragment = params->fragmentBufferMem && params->fragmentBufferMemSize;
+    ctx->state.vdm_buffer = has_vdm ? params->vdmBufferMem : Ptr<void>();
+    ctx->state.vdm_buffer_size = has_vdm ? params->vdmBufferMemSize : 0;
+    ctx->state.vertex_ring_buffer = has_vertex ? params->vertexBufferMem : Ptr<void>();
+    ctx->state.vertex_ring_buffer_size = has_vertex ? params->vertexBufferMemSize : 0;
+    ctx->state.fragment_ring_buffer = has_fragment ? params->fragmentBufferMem : Ptr<void>();
+    ctx->state.fragment_ring_buffer_size = has_fragment ? params->fragmentBufferMemSize : 0;
 
     ctx->state.type = SCE_GXM_CONTEXT_TYPE_DEFERRED;
 
@@ -2802,8 +2768,16 @@ EXPORT(int, sceGxmDrawPrecomputed, SceGxmContext *context, SceGxmPrecomputedDraw
 
 EXPORT(int, sceGxmEndCommandList, SceGxmContext *deferredContext, SceGxmCommandList *commandList) {
     TRACY_FUNC(sceGxmEndCommandList, deferredContext, commandList);
+    if (!deferredContext) {
+        return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
+    }
+
     if (deferredContext->state.type != SCE_GXM_CONTEXT_TYPE_DEFERRED) {
         return RET_ERROR(SCE_GXM_ERROR_INVALID_VALUE);
+    }
+
+    if (!commandList) {
+        return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
     }
 
     if (!deferredContext->state.active) {
@@ -2811,13 +2785,20 @@ EXPORT(int, sceGxmEndCommandList, SceGxmContext *deferredContext, SceGxmCommandL
     }
 
     // only set the first two fields for commandList (its size is assumed to be 32 bytes by the game)
-    commandList->list = deferredContext->linearly_allocate<renderer::CommandList>(emuenv.kernel, emuenv.mem,
+    renderer::CommandList *list = deferredContext->linearly_allocate<renderer::CommandList>(emuenv.kernel, emuenv.mem,
         thread_id);
+    if (!list)
+        list = static_cast<renderer::CommandList *>(malloc(sizeof(renderer::CommandList)));
+    commandList->list = list;
 
     // also update our own command list
     deferredContext->curr_command_list->list = commandList->list;
 
     *commandList->list = deferredContext->renderer->command_list;
+    {
+        const std::lock_guard<std::mutex> guard(command_list_registry::mtx);
+        command_list_registry::lists.insert(commandList->list);
+    }
 
     // insert last memory range
     deferredContext->insert_new_memory_range();
@@ -2890,11 +2871,16 @@ EXPORT(int, sceGxmExecuteCommandList, SceGxmContext *context, SceGxmCommandList 
         return RET_ERROR(SCE_GXM_ERROR_NOT_WITHIN_SCENE);
     }
 
-    if (!commandList || !commandList->list)
+    if (!commandList)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
-    // copied because the game may reuse or execute the list again before the render thread reaches it
-    renderer::append_command_list(*context->renderer, *commandList->list);
+    {
+        const std::lock_guard<std::mutex> guard(command_list_registry::mtx);
+        if (!command_list_registry::lists.contains(commandList->list))
+            return RET_ERROR(SCE_GXM_ERROR_INVALID_VALUE);
+
+        renderer::append_command_list(*context->renderer, *commandList->list);
+    }
 
     // Restore back our GXM state
     gxmContextStateRestore(*emuenv.renderer, context, emuenv.mem, true);
@@ -2961,7 +2947,8 @@ EXPORT(int, sceGxmGetDeferredContextFragmentBuffer, const SceGxmContext *deferre
         return RET_ERROR(SCE_GXM_ERROR_WITHIN_COMMAND_LIST);
     }
 
-    *mem = deferredContext->state.fragment_ring_buffer;
+    const auto &state = deferredContext->state;
+    *mem = state.fragment_ring_buffer ? Ptr<void>(state.fragment_ring_buffer.address() + static_cast<Address>(state.fragment_ring_buffer_used)) : Ptr<void>();
     return 0;
 }
 
@@ -2979,7 +2966,10 @@ EXPORT(int, sceGxmGetDeferredContextVdmBuffer, const SceGxmContext *deferredCont
         return RET_ERROR(SCE_GXM_ERROR_WITHIN_COMMAND_LIST);
     }
 
-    *mem = deferredContext->state.vdm_buffer;
+    if (deferredContext->state.vdm_buffer && deferredContext->state.vdm_buffer_size > 0)
+        *mem = deferredContext->state.vdm_buffer;
+    else
+        *mem = deferredContext->alloc_space.cast<void>();
     return 0;
 }
 
@@ -2997,7 +2987,8 @@ EXPORT(int, sceGxmGetDeferredContextVertexBuffer, const SceGxmContext *deferredC
         return RET_ERROR(SCE_GXM_ERROR_WITHIN_COMMAND_LIST);
     }
 
-    *mem = deferredContext->state.vertex_ring_buffer;
+    const auto &state = deferredContext->state;
+    *mem = state.vertex_ring_buffer ? Ptr<void>(state.vertex_ring_buffer.address() + static_cast<Address>(state.vertex_ring_buffer_used)) : Ptr<void>();
     return 0;
 }
 
@@ -3886,16 +3877,16 @@ EXPORT(int, sceGxmReserveFragmentDefaultUniformBuffer, SceGxmContext *context, P
     }
 
     if (next_used > context->state.fragment_ring_buffer_size) {
+        context->state.fragment_ring_buffer_used = 0;
         if (context->state.type != SCE_GXM_CONTEXT_TYPE_IMMEDIATE) {
             context->state.fragment_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, emuenv.gxm.callback_lock, context->state.fragment_ring_buffer_size,
-                context->state.fragment_memory_callback, context->state.memory_callback_userdata, DEFAULT_RING_SIZE, thread_id);
+                context->state.fragment_memory_callback, context->state.memory_callback_userdata, static_cast<uint32_t>(size), thread_id);
 
             if (!context->state.fragment_ring_buffer) {
                 return RET_ERROR(SCE_GXM_ERROR_RESERVE_FAILED);
             }
+            context->state.fragment_ring_buffer_used = align(context->state.fragment_ring_buffer.address(), 4) - context->state.fragment_ring_buffer.address();
         }
-
-        context->state.fragment_ring_buffer_used = 0;
     }
 
     *uniformBuffer = context->state.fragment_ring_buffer.cast<uint8_t>() + static_cast<int32_t>(context->state.fragment_ring_buffer_used);
@@ -3931,16 +3922,16 @@ EXPORT(int, sceGxmReserveVertexDefaultUniformBuffer, SceGxmContext *context, Ptr
     }
 
     if (next_used > context->state.vertex_ring_buffer_size) {
+        context->state.vertex_ring_buffer_used = 0;
         if (context->state.type != SCE_GXM_CONTEXT_TYPE_IMMEDIATE) {
             context->state.vertex_ring_buffer = gxmRunDeferredMemoryCallback(emuenv.kernel, emuenv.mem, emuenv.gxm.callback_lock, context->state.vertex_ring_buffer_size,
-                context->state.vertex_memory_callback, context->state.memory_callback_userdata, DEFAULT_RING_SIZE, thread_id);
+                context->state.vertex_memory_callback, context->state.memory_callback_userdata, static_cast<uint32_t>(size), thread_id);
 
             if (!context->state.vertex_ring_buffer) {
                 return RET_ERROR(SCE_GXM_ERROR_RESERVE_FAILED);
             }
+            context->state.vertex_ring_buffer_used = align(context->state.vertex_ring_buffer.address(), 4) - context->state.vertex_ring_buffer.address();
         }
-
-        context->state.vertex_ring_buffer_used = 0;
     }
 
     *uniformBuffer = context->state.vertex_ring_buffer.cast<uint8_t>() + static_cast<int32_t>(context->state.vertex_ring_buffer_used);
@@ -4107,7 +4098,6 @@ EXPORT(int, sceGxmSetDeferredContextFragmentBuffer, SceGxmContext *deferredConte
     deferredContext->state.fragment_ring_buffer = mem;
     deferredContext->state.fragment_ring_buffer_size = size;
     deferredContext->state.fragment_ring_buffer_used = 0;
-    deferred_ring::set_installed_fragment(deferredContext, mem, size);
 
     return 0;
 }
@@ -4130,8 +4120,10 @@ EXPORT(int, sceGxmSetDeferredContextVdmBuffer, SceGxmContext *deferredContext, P
     deferredContext->state.vdm_buffer = mem;
     deferredContext->state.vdm_buffer_size = size;
 
-    // make sure the next call will use the new vdm buffer
-    deferredContext->alloc_space = deferredContext->alloc_space_end;
+    if (mem)
+        deferredContext->alloc_space = deferredContext->alloc_space_end;
+    else
+        deferredContext->alloc_space = deferredContext->alloc_space_end = Ptr<uint8_t>();
 
     return 0;
 }
@@ -4161,7 +4153,6 @@ EXPORT(int, sceGxmSetDeferredContextVertexBuffer, SceGxmContext *deferredContext
     deferredContext->state.vertex_ring_buffer = mem;
     deferredContext->state.vertex_ring_buffer_size = size;
     deferredContext->state.vertex_ring_buffer_used = 0;
-    deferred_ring::set_installed_vertex(deferredContext, mem, size);
 
     return 0;
 }
