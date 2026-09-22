@@ -1007,11 +1007,7 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
     const auto add_binding = [&](uint32_t binding, uint32_t stream_index) {
         const SceGxmVertexStream &stream = vertex_program.streams[stream_index];
         const bool is_instanced = gxm::is_stream_instancing(static_cast<SceGxmIndexSource>(stream.indexSource));
-#ifdef __APPLE__
         const uint32_t stride = align(stream.stride, 4);
-#else
-        const uint32_t stride = stream.stride;
-#endif
         binding_descr.push_back(vk::VertexInputBindingDescription{
             .binding = binding,
             .stride = stride,

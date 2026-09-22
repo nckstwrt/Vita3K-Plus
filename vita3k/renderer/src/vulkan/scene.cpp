@@ -127,9 +127,8 @@ void mid_scene_flush(VKContext &context, const SceGxmNotification notification) 
     }
 }
 
-#ifdef __APPLE__
-// restride vertex attribute binding strides to multiple of 4
-// needed for metal because it only allows multiples of 4.
+// Vulkan requires each vertex attribute address, which includes stride * index, to be a multiple of
+// the component size of its format. A stride that is not a multiple of 4 breaks that for 3 of every 4 vertices
 void restride_stream(const uint8_t *&stream, uint32_t &size, uint32_t stride) {
     const uint32_t new_stride = align(stride, 4);
     const uint32_t nb_vertex_input = ((size + stride - 1) / stride);
@@ -142,7 +141,6 @@ void restride_stream(const uint8_t *&stream, uint32_t &size, uint32_t stride) {
     stream = new_data;
     size = nb_vertex_input * new_stride;
 }
-#endif
 
 // when needed, how many descriptor of the given size we allocate for each frame at once
 static constexpr uint32_t DESCRIPTOR_PACK_SIZE = 64;
@@ -319,12 +317,14 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
     for (int i = 0; i < max_stream_idx; i++) {
         if (state.vertex_streams[i].data) {
             const bool mapped = context.state.features.enable_memory_mapping;
+            // an unaligned stride has to be repacked which means this stream cannot stay mapped
+            const bool restride = (vertex_program.streams[i].stride % 4) != 0;
             uint32_t stream_size = state.vertex_streams[i].size;
             // by the time we bind the game may already have recycled this block so prefer the copy taken when the scene was kicked
             const uint8_t *snapshot = mapped
                 ? renderer::stream_snapshot_get(state.vertex_streams[i].snapshot, stream_size, context.frame_timestamp)
                 : nullptr;
-            if (mapped && !snapshot) {
+            if (mapped && !snapshot && !restride) {
                 auto [buffer, offset] = context.state.get_matching_mapping(state.vertex_streams[i].data.cast<void>());
 
                 context.vertex_stream_offsets[i] = offset;
@@ -333,22 +333,15 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
                 if (!context.vertex_stream_ring_buffer.handle())
                     context.vertex_stream_ring_buffer.create();
                 const uint8_t *stream = snapshot ? snapshot : state.vertex_streams[i].data.get(mem);
-#ifdef __APPLE__
-                // Vulkan allows any stride, but Metal only allows multiples of 4.
-                const bool restride = vertex_program.streams[i].stride % 4 != 0;
-                if (restride) {
+                if (restride)
                     restride_stream(stream, stream_size, vertex_program.streams[i].stride);
-                }
-#endif
+
                 context.vertex_stream_ring_buffer.allocate(context.prerender_cmd, stream_size, stream);
                 context.vertex_stream_offsets[i] = context.vertex_stream_ring_buffer.data_offset;
                 context.vertex_stream_buffers[i] = context.vertex_stream_ring_buffer.handle();
 
-#ifdef __APPLE__
-                if (restride) {
+                if (restride)
                     delete[] stream;
-                }
-#endif
             }
 
             state.vertex_streams[i].data = nullptr;
