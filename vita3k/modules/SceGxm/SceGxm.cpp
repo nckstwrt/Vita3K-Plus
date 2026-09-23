@@ -2080,8 +2080,11 @@ EXPORT(int, sceGxmColorSurfaceSetGammaMode, SceGxmColorSurface *surface, SceGxmC
 
 EXPORT(void, sceGxmColorSurfaceSetScaleMode, SceGxmColorSurface *surface, SceGxmColorSurfaceScaleMode scaleMode) {
     TRACY_FUNC(sceGxmColorSurfaceSetScaleMode, surface, scaleMode);
-    assert(surface);
-    UNIMPLEMENTED();
+    if (!surface) {
+        return;
+    }
+
+    surface->downscale = scaleMode == SCE_GXM_COLOR_SURFACE_SCALE_MSAA_DOWNSCALE;
 }
 
 EXPORT(int, sceGxmCreateContext, const SceGxmContextParams *params, Ptr<SceGxmContext> *context) {

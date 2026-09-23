@@ -226,7 +226,7 @@ EXPORT(int, sceAvcdecDecode, SceAvcdecCtrl *decoder, const SceAvcdecAu *au, SceA
     const bool is_yuvp3 = static_cast<bool>(pPicture->frame.pixelType & SCE_AVCDEC_PIXEL_YUV420_RASTER);
     decoder_info->set_output_format(is_yuvp3);
     decoder_info->configure(&options);
-    decoder_info->set_res(pPicture->frame.frameWidth, pPicture->frame.frameHeight);
+    decoder_info->set_res(pPicture->frame.frameWidth, pPicture->frame.frameHeight, pPicture->frame.framePitch);
 
     const bool empty_au = au->es.size == 0 || !au->es.pBuf;
     const bool sent = empty_au ? true : decoder_info->send(au->es.pBuf.cast<uint8_t>().get(emuenv.mem), au->es.size);
@@ -383,7 +383,7 @@ EXPORT(int, sceAvcdecDecodeStop, SceAvcdecCtrl *decoder, SceAvcdecArrayPicture *
             }
 
             decoder_info->set_output_format(static_cast<bool>(pPicture->frame.pixelType & SCE_AVCDEC_PIXEL_YUV420_RASTER));
-            decoder_info->set_res(pPicture->frame.frameWidth, pPicture->frame.frameHeight);
+            decoder_info->set_res(pPicture->frame.frameWidth, pPicture->frame.frameHeight, pPicture->frame.framePitch);
             uint8_t *output = pPicture->frame.pPicture[0].cast<uint8_t>().get(emuenv.mem);
             if (!decoder_info->drain(output))
                 break;

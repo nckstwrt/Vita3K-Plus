@@ -25,30 +25,31 @@ extern "C" {
 
 #include <cassert>
 
-void copy_yuv_data_from_frame(AVFrame *frame, uint8_t *dest, const uint32_t width, const uint32_t height, bool is_p3) {
-    for (size_t i = 0; i < height; i++) {
-        memcpy(dest, &frame->data[0][frame->linesize[0] * i], width);
-        dest += width;
-    }
+void copy_yuv_data_from_frame(AVFrame *frame, uint8_t *dest, const uint32_t width, const uint32_t height, bool is_p3, const uint32_t pitch) {
+    const bool pitched = pitch > width;
+    const size_t y_pitch = pitched ? pitch : width;
+    for (size_t i = 0; i < height; i++)
+        memcpy(dest + i * y_pitch, &frame->data[0][frame->linesize[0] * i], width);
 
+    uint8_t *const chroma = dest + y_pitch * height;
     if (is_p3) {
+        const size_t uv_pitch = pitched ? pitch / 2 : width / 2;
+        uint8_t *const v_plane = chroma + uv_pitch * (height / 2);
         for (size_t i = 0; i < height / 2; i++) {
-            memcpy(dest, &frame->data[1][frame->linesize[1] * i], width / 2);
-            dest += width / 2;
-        }
-        for (size_t i = 0; i < height / 2; i++) {
-            memcpy(dest, &frame->data[2][frame->linesize[2] * i], width / 2);
-            dest += width / 2;
+            memcpy(chroma + i * uv_pitch, &frame->data[1][frame->linesize[1] * i], width / 2);
+            memcpy(v_plane + i * uv_pitch, &frame->data[2][frame->linesize[2] * i], width / 2);
         }
     } else {
         // p2 format, U and V are interleaved
+        const size_t uv_pitch = pitched ? pitch : 2 * (width / 2);
         for (size_t i = 0; i < height / 2; i++) {
             const uint8_t *src_u = &frame->data[1][frame->linesize[1] * i];
             const uint8_t *src_v = &frame->data[2][frame->linesize[2] * i];
+            uint8_t *row = chroma + i * uv_pitch;
             for (size_t j = 0; j < width / 2; j++) {
-                dest[0] = src_u[j];
-                dest[1] = src_v[j];
-                dest += 2;
+                row[0] = src_u[j];
+                row[1] = src_v[j];
+                row += 2;
             }
         }
     }
@@ -78,7 +79,7 @@ static bool receive_h264_frame(H264DecoderState &decoder, uint8_t *data, Decoder
     }
 
     if (data)
-        copy_yuv_data_from_frame(frame, data, decoder.width_in, decoder.height_in, decoder.output_yuvp3);
+        copy_yuv_data_from_frame(frame, data, decoder.width_in, decoder.height_in, decoder.output_yuvp3, decoder.pitch_in);
 
     if (size)
         *size = { { static_cast<uint32_t>(decoder.context->width), static_cast<uint32_t>(decoder.context->height) } };
@@ -93,6 +94,10 @@ static bool receive_h264_frame(H264DecoderState &decoder, uint8_t *data, Decoder
 
 uint32_t H264DecoderState::buffer_size(DecoderSize size) {
     return size.width * size.height * 3 / 2;
+}
+
+uint32_t H264DecoderState::frame_bytes() const {
+    return (pitch_in > width_in ? pitch_in : width_in) * height_in * 3 / 2;
 }
 
 uint32_t H264DecoderState::get(DecoderQuery query) {
@@ -206,9 +211,10 @@ void H264DecoderState::configure(void *options) {
     dts = static_cast<uint64_t>(opt->dts_upper) << 32u | static_cast<uint64_t>(opt->dts_lower);
 }
 
-void H264DecoderState::set_res(const uint32_t width, const uint32_t height) {
+void H264DecoderState::set_res(const uint32_t width, const uint32_t height, const uint32_t pitch) {
     width_in = width;
     height_in = height;
+    pitch_in = pitch;
 }
 
 void H264DecoderState::get_res(uint32_t &width, uint32_t &height) {
@@ -256,7 +262,7 @@ void H264DecoderState::flush() {
         if (error == 0 || error == AVERROR_EOF || error == AVERROR(EAGAIN)) {
             // Drain everything
             std::vector<HeldPicture> drained;
-            const size_t bytes = buffer_size({ { width_in, height_in } });
+            const size_t bytes = frame_bytes();
             for (;;) {
                 HeldPicture pic;
                 pic.data.resize(bytes);
@@ -265,6 +271,7 @@ void H264DecoderState::flush() {
                 pic.pts = pts_out;
                 pic.width = width_out;
                 pic.height = height_out;
+                pic.pitch = pitch_in;
                 pic.yuvp3 = output_yuvp3;
                 drained.push_back(std::move(pic));
                 if (drained.size() > 8)
@@ -316,7 +323,8 @@ void H264DecoderState::stash_picture(const uint8_t *data, uint64_t pic_pts, uint
     pic.width = width;
     pic.height = height;
     pic.yuvp3 = yuvp3;
-    pic.data.assign(data, data + buffer_size({ { width_in, height_in } }));
+    pic.pitch = pitch_in;
+    pic.data.assign(data, data + frame_bytes());
     hold_insert(held, std::move(pic));
 }
 
@@ -325,7 +333,7 @@ bool H264DecoderState::take_held_picture(uint8_t *out, uint64_t hash, uint32_t w
     for (auto it = held.begin(); it != held.end(); ++it) {
         if (it->au_hash != hash)
             continue;
-        if (it->yuvp3 != yuvp3 || width_in != width || height_in != height || it->data.size() != buffer_size({ { width, height } }))
+        if (it->yuvp3 != yuvp3 || width_in != width || height_in != height || it->pitch != pitch_in || it->data.size() != frame_bytes())
             return false;
         if (out)
             memcpy(out, it->data.data(), it->data.size());
