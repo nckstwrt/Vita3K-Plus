@@ -343,6 +343,7 @@ private:
     bool depth_alias_unavailable = false;
 
     bool ensure_depth_alias_pipeline();
+    bool ensure_depth_alias_scratch(vk::DeviceSize size);
     std::optional<TextureLookupResult> retrieve_depth_as_rgba_alias(const SceGxmTexture &texture, TextureViewport *texture_viewport, DepthStencilSurfaceCacheInfo &cached_info,
         uint32_t offset_bytes, SurfaceTiling tiling, uint32_t stride_samples, uint32_t width, uint32_t height);
 
