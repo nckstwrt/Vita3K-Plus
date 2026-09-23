@@ -30,7 +30,14 @@ extern "C" {
 
 #include <util/log.h>
 
-AacDecoderState::AacDecoderState(uint32_t sample_rate, uint32_t channels) {
+#include <algorithm>
+
+AacDecoderState::AacDecoderState(uint32_t sample_rate, uint32_t channels, bool sbr) {
+    // SBR doubles the core rate the guest gives
+    output_sample_rate = sbr ? sample_rate * 2 : sample_rate;
+    output_channels = channels;
+    is_sbr = sbr;
+
     codec = avcodec_find_decoder(AV_CODEC_ID_AAC);
     assert(codec);
 
@@ -45,16 +52,6 @@ AacDecoderState::AacDecoderState(uint32_t sample_rate, uint32_t channels) {
 
     int err = avcodec_open2(context, codec, nullptr);
     assert(err == 0);
-
-    swr = nullptr;
-    int ret = swr_alloc_set_opts2(&swr,
-        &context->ch_layout, AV_SAMPLE_FMT_S16, sample_rate,
-        &context->ch_layout, AV_SAMPLE_FMT_FLTP, sample_rate,
-        0, nullptr);
-    assert(ret == 0);
-
-    ret = swr_init(swr);
-    assert(ret == 0);
 }
 
 AacDecoderState::~AacDecoderState() {
@@ -64,9 +61,9 @@ AacDecoderState::~AacDecoderState() {
 
 uint32_t AacDecoderState::get(DecoderQuery query) {
     switch (query) {
-    case DecoderQuery::CHANNELS: return context->ch_layout.nb_channels;
+    case DecoderQuery::CHANNELS: return output_channels;
     case DecoderQuery::BIT_RATE: return context->bit_rate;
-    case DecoderQuery::SAMPLE_RATE: return context->sample_rate;
+    case DecoderQuery::SAMPLE_RATE: return output_sample_rate;
     default:
         return 0;
     }
@@ -96,15 +93,65 @@ bool AacDecoderState::send(const uint8_t *data, uint32_t size) {
 }
 
 bool AacDecoderState::receive(uint8_t *data, DecoderSize *size) {
-    assert(frame->format == AV_SAMPLE_FMT_FLTP);
+    if (frame->nb_samples <= 0) {
+        if (size)
+            size->samples = 0;
+        return true;
+    }
 
+    // FFmpeg decodes implicit SBR in mono as stereo the guest gets the layout it asked for
+    const int input_sample_rate = frame->sample_rate > 0 ? frame->sample_rate : context->sample_rate;
+    const int input_channels = frame->ch_layout.nb_channels > 0 ? frame->ch_layout.nb_channels : context->ch_layout.nb_channels;
+    if (input_sample_rate <= 0 || input_channels <= 0) {
+        LOG_WARN("AAC frame has an invalid format: {} Hz, {} channels.", input_sample_rate, input_channels);
+        return false;
+    }
+
+    if (!swr || configured_input_sample_rate != input_sample_rate || configured_input_channels != input_channels
+        || configured_input_format != frame->format) {
+        AVChannelLayout input_layout{};
+        if (frame->ch_layout.nb_channels > 0)
+            av_channel_layout_copy(&input_layout, &frame->ch_layout);
+        else
+            av_channel_layout_default(&input_layout, input_channels);
+        AVChannelLayout output_layout{};
+        av_channel_layout_default(&output_layout, static_cast<int>(output_channels));
+
+        SwrContext *new_swr = nullptr;
+        const int ret = swr_alloc_set_opts2(&new_swr,
+            &output_layout, AV_SAMPLE_FMT_S16, static_cast<int>(output_sample_rate),
+            &input_layout, static_cast<AVSampleFormat>(frame->format), input_sample_rate,
+            0, nullptr);
+        av_channel_layout_uninit(&output_layout);
+        av_channel_layout_uninit(&input_layout);
+        if (ret < 0 || !new_swr || swr_init(new_swr) < 0) {
+            swr_free(&new_swr);
+            LOG_WARN("Failed to configure the AAC converter: {} Hz {} ch -> {} Hz {} ch.", input_sample_rate, input_channels, output_sample_rate, output_channels);
+            return false;
+        }
+
+        swr_free(&swr);
+        swr = new_swr;
+        configured_input_sample_rate = input_sample_rate;
+        configured_input_channels = input_channels;
+        configured_input_format = frame->format;
+    }
+
+    const int max_samples = is_sbr ? 2048 : 1024;
+    int converted_samples;
     if (data) {
-        int ret = swr_convert(swr, &data, frame->nb_samples, const_cast<const uint8_t **>(frame->extended_data), frame->nb_samples);
-        assert(ret >= 0);
+        const int capacity = std::min(swr_get_out_samples(swr, frame->nb_samples), max_samples);
+        converted_samples = swr_convert(swr, &data, capacity, const_cast<const uint8_t **>(frame->extended_data), frame->nb_samples);
+        if (converted_samples < 0) {
+            LOG_WARN("AAC conversion failed: {}.", codec_error_name(converted_samples));
+            return false;
+        }
+    } else {
+        converted_samples = std::min(swr_get_out_samples(swr, frame->nb_samples), max_samples);
     }
 
     if (size) {
-        size->samples = frame->nb_samples;
+        size->samples = static_cast<uint32_t>(converted_samples);
     }
 
     return true;
