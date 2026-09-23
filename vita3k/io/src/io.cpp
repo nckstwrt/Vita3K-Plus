@@ -179,6 +179,7 @@ void io_deinit(IOState &io) {
     {
         const std::lock_guard<std::mutex> lock(io.cachemap_mutex);
         io.cachemap.clear();
+        io.indexed_roots.clear();
     }
 
     {
@@ -232,6 +233,12 @@ bool find_case_isens_path(IOState &io, VitaIoDevice &device, const fs::path &tra
     }
     }
 
+    {
+        const std::lock_guard<std::mutex> lock(io.cachemap_mutex);
+        if (io.indexed_roots.contains(final_path))
+            return true;
+    }
+
     boost::system::error_code ec;
     if (!fs::exists(final_path, ec))
         return false;
@@ -243,6 +250,8 @@ bool find_case_isens_path(IOState &io, VitaIoDevice &device, const fs::path &tra
     const std::lock_guard<std::mutex> lock(io.cachemap_mutex);
     for (auto &[lower, original] : found)
         io.cachemap.emplace(std::move(lower), std::move(original));
+    if (!ec)
+        io.indexed_roots.insert(final_path);
 
     return true;
 }
