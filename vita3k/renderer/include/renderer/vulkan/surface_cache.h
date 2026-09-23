@@ -198,6 +198,8 @@ struct DepthSurfaceView {
     uint64_t scene_timestamp;
     uint32_t delta_col;
     uint32_t delta_row;
+    // U8U8U8U8 texture format of a S8D24 colour alias (0 = a depth/stencil copy)
+    uint32_t rgba_alias_format = 0;
 };
 
 struct DepthStencilSurfaceCacheInfo : public SurfaceCacheInfo {
@@ -214,6 +216,7 @@ struct DepthStencilSurfaceCacheInfo : public SurfaceCacheInfo {
 
     bool depth_content_stored = true;
     Address last_scene_color_addr = 0;
+    uint64_t last_attached_frame = 0;
 
     // used when reading from this depth stencil in a shader with texture viewport enabled
     vk::ImageView depth_view = nullptr;
@@ -328,6 +331,20 @@ private:
 
     // lazily build the reinterpret compute pipeline (no-op once built)
     void ensure_reinterpret_pipeline();
+
+    // rebuilds the S8D24 words of a depth/stencil surface for a U8U8U8U8 texture over it
+    vk::ShaderModule depth_alias_shader = nullptr;
+    vk::DescriptorSetLayout depth_alias_desc_layout = nullptr;
+    vk::PipelineLayout depth_alias_pipeline_layout = nullptr;
+    vk::Pipeline depth_alias_pipeline = nullptr;
+    vk::DescriptorPool depth_alias_desc_pool = nullptr;
+    vk::DescriptorSet depth_alias_desc_set = nullptr;
+    vkutil::Buffer depth_alias_scratch;
+    bool depth_alias_unavailable = false;
+
+    bool ensure_depth_alias_pipeline();
+    std::optional<TextureLookupResult> retrieve_depth_as_rgba_alias(const SceGxmTexture &texture, TextureViewport *texture_viewport, DepthStencilSurfaceCacheInfo &cached_info,
+        uint32_t offset_bytes, SurfaceTiling tiling, uint32_t stride_samples, uint32_t width, uint32_t height);
 
     // record and submit a one-off command buffer that copies the surface image into the
     // mapped memory buffer at its guest address (shared by check_for_surface and

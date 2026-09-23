@@ -496,6 +496,21 @@ void VKSurfaceCache::cleanup() {
         reinterpret_desc_sets.clear();
     }
 
+    if (depth_alias_shader) {
+        state.device.destroy(depth_alias_pipeline);
+        state.device.destroy(depth_alias_pipeline_layout);
+        state.device.destroy(depth_alias_desc_layout);
+        state.device.destroy(depth_alias_desc_pool);
+        state.device.destroy(depth_alias_shader);
+        depth_alias_pipeline = nullptr;
+        depth_alias_pipeline_layout = nullptr;
+        depth_alias_desc_layout = nullptr;
+        depth_alias_desc_pool = nullptr;
+        depth_alias_desc_set = nullptr;
+        depth_alias_shader = nullptr;
+        depth_alias_scratch.destroy();
+    }
+
     for (auto &[cube_address, cube] : cube_textures)
         cube.texture.destroy();
     cube_textures.clear();
@@ -1787,6 +1802,8 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_depth_stencil_for_framebuffer(Sce
     if (cached_info != nullptr) {
         // this the most recently used depth-stencil surface
         ds_surface_queue.set_as_mru(cached_info);
+        if (scene_context)
+            cached_info->last_attached_frame = scene_context->frame_timestamp;
 
         const bool need_remake = cached_info->texture.width < width
             || cached_info->texture.height < height
@@ -1870,6 +1887,8 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_depth_stencil_for_framebuffer(Sce
 
     // update the lookup info
     ds_surface_queue.set_as_mru(cached_info);
+    if (scene_context)
+        cached_info->last_attached_frame = scene_context->frame_timestamp;
     if (depth_stencil->depth_data)
         depth_address_lookup[depth_stencil->depth_data.address()] = cached_info;
     if (depth_stencil->stencil_data)
@@ -1928,6 +1947,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
     SceGxmTextureBaseFormat base_format = gxm::get_base_format(gxm::get_format(texture));
     bool can_be_depth = false;
     bool can_be_stencil = false;
+    bool rgba_alias = false;
 
     uint32_t bytes_per_sample = 4;
     switch (base_format) {
@@ -1943,6 +1963,11 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
     case SCE_GXM_TEXTURE_BASE_FORMAT_X8U24:
     case SCE_GXM_TEXTURE_BASE_FORMAT_F32:
     case SCE_GXM_TEXTURE_BASE_FORMAT_F32M:
+        can_be_depth = true;
+        break;
+        // S8D24 words as colour
+    case SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8U8:
+        rgba_alias = true;
         can_be_depth = true;
         break;
     default:
@@ -2031,6 +2056,9 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
         return std::nullopt;
 
     DepthStencilSurfaceCacheInfo &cached_info = *found_info;
+    if (rgba_alias)
+        return retrieve_depth_as_rgba_alias(texture, texture_viewport, cached_info, address - surface_address, tiling, stride_samples, width, height);
+
     if (tiling != cached_info.tiling || stride_samples != cached_info.stride_samples)
         return std::nullopt;
 
@@ -2096,7 +2124,8 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
     int read_surface_idx = -1;
     for (int i = 0; i < cached_info.read_surfaces.size(); i++) {
         auto &read_surface = cached_info.read_surfaces[i];
-        if (read_surface.depth_view.width == width
+        if (read_surface.rgba_alias_format == 0
+            && read_surface.depth_view.width == width
             && read_surface.depth_view.height == height
             && read_surface.delta_row == delta_row_samples
             && read_surface.delta_col == delta_col_samples) {
@@ -2208,6 +2237,136 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
         img_view.view,
         img_view.layout,
         img_view.format
+    };
+}
+
+static constexpr uint64_t DEPTH_ALIAS_MAX_AGE_FRAMES = 2;
+static constexpr vk::DeviceSize DEPTH_ALIAS_SCRATCH_BYTES = 16 * 1024 * 1024;
+
+std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_as_rgba_alias(const SceGxmTexture &texture, TextureViewport *texture_viewport, DepthStencilSurfaceCacheInfo &cached_info,
+    const uint32_t offset_bytes, const SurfaceTiling tiling, const uint32_t stride_samples, const uint32_t width, const uint32_t height) {
+    VKContext *context = reinterpret_cast<VKContext *>(state.context);
+    const vk::Format depth_format = cached_info.texture.format;
+    const bool float_depth = depth_format == vk::Format::eD32SfloatS8Uint;
+    const uint32_t delta_col_samples = (offset_bytes / 4) % stride_samples;
+    const uint32_t delta_row_samples = (offset_bytes / 4) / stride_samples;
+    const uint32_t source_x = static_cast<uint32_t>(delta_col_samples * state.res_multiplier);
+    const uint32_t source_y = static_cast<uint32_t>(delta_row_samples * state.res_multiplier);
+
+    if (tiling != cached_info.tiling || stride_samples != cached_info.stride_samples
+        || (tiling == SurfaceTiling::Tiled && offset_bytes != 0)
+        || cached_info.surface.get_format() != SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24
+        || cached_info.multisample_mode != SCE_GXM_MULTISAMPLE_NONE
+        || (!float_depth && depth_format != vk::Format::eD24UnormS8Uint)
+        || context->frame_timestamp - cached_info.last_attached_frame > DEPTH_ALIAS_MAX_AGE_FRAMES
+        || width == 0 || height == 0
+        || static_cast<uint64_t>(source_x) + width > cached_info.texture.width
+        || static_cast<uint64_t>(source_y) + height > cached_info.texture.height
+        || !ensure_depth_alias_pipeline())
+        return std::nullopt;
+
+    const uint32_t band_rows = static_cast<uint32_t>(std::min<vk::DeviceSize>(height, (depth_alias_scratch.size - 3) / 5 / width));
+    if (band_rows == 0)
+        return std::nullopt;
+
+    ds_surface_queue.set_as_mru(&cached_info);
+
+    const SceGxmTextureFormat texture_format = gxm::get_format(texture);
+    const vk::Format alias_format = texture.gamma_mode ? vk::Format::eR8G8B8A8Srgb : vk::Format::eR8G8B8A8Unorm;
+    DepthSurfaceView *alias = nullptr;
+    for (auto &read_surface : cached_info.read_surfaces) {
+        if (read_surface.rgba_alias_format == static_cast<uint32_t>(texture_format)
+            && read_surface.depth_view.format == alias_format
+            && read_surface.depth_view.width == width
+            && read_surface.depth_view.height == height
+            && read_surface.delta_col == delta_col_samples
+            && read_surface.delta_row == delta_row_samples) {
+            alias = &read_surface;
+            break;
+        }
+    }
+    if (!alias) {
+        DepthSurfaceView view{
+            .depth_view = vkutil::Image(width, height, alias_format),
+            .scene_timestamp = 0,
+            .delta_col = delta_col_samples,
+            .delta_row = delta_row_samples,
+            .rgba_alias_format = static_cast<uint32_t>(texture_format)
+        };
+        view.depth_view.init_image(vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst, texture::translate_swizzle(texture_format));
+        cached_info.read_surfaces.emplace_back(std::move(view));
+        alias = &cached_info.read_surfaces.back();
+    }
+
+    if (alias->scene_timestamp != context->scene_timestamp) {
+        vk::CommandBuffer cmd_buffer = context->prerender_cmd;
+
+        cached_info.texture.transition_to(cmd_buffer, vkutil::ImageLayout::TransferSrc, vkutil::ds_subresource_range);
+        alias->depth_view.transition_to_discard(cmd_buffer, vkutil::ImageLayout::TransferDst);
+        cmd_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, depth_alias_pipeline);
+        cmd_buffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, depth_alias_pipeline_layout, 0, depth_alias_desc_set, {});
+
+        vk::BufferMemoryBarrier barrier{
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = depth_alias_scratch.buffer,
+            .offset = 0,
+            .size = VK_WHOLE_SIZE
+        };
+        for (uint32_t y = 0; y < height; y += band_rows) {
+            const uint32_t rows = std::min(band_rows, height - y);
+            const uint32_t count = width * rows;
+
+            barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite | vk::AccessFlagBits::eShaderWrite;
+            barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+            cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer | vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, barrier, {});
+
+            const std::array<vk::BufferImageCopy, 2> to_buffer{
+                vk::BufferImageCopy{
+                    .bufferOffset = 0,
+                    .imageSubresource = { vk::ImageAspectFlagBits::eDepth, 0, 0, 1 },
+                    .imageOffset = { static_cast<int32_t>(source_x), static_cast<int32_t>(source_y + y), 0 },
+                    .imageExtent = { width, rows, 1 } },
+                vk::BufferImageCopy{
+                    .bufferOffset = static_cast<vk::DeviceSize>(count) * 4,
+                    .imageSubresource = { vk::ImageAspectFlagBits::eStencil, 0, 0, 1 },
+                    .imageOffset = { static_cast<int32_t>(source_x), static_cast<int32_t>(source_y + y), 0 },
+                    .imageExtent = { width, rows, 1 } }
+            };
+            cmd_buffer.copyImageToBuffer(cached_info.texture.image, vk::ImageLayout::eTransferSrcOptimal, depth_alias_scratch.buffer, to_buffer);
+
+            barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+            barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+            cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eComputeShader, {}, {}, barrier, {});
+
+            const std::array<uint32_t, 4> params{ width, rows, count, float_depth ? 1u : 0u };
+            cmd_buffer.pushConstants(depth_alias_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(params), params.data());
+            cmd_buffer.dispatch((width + 7) / 8, (rows + 7) / 8, 1);
+
+            barrier.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
+            barrier.dstAccessMask = vk::AccessFlagBits::eTransferRead;
+            cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, barrier, {});
+
+            const vk::BufferImageCopy to_image{
+                .bufferOffset = 0,
+                .imageSubresource = vkutil::color_subresource_layer,
+                .imageOffset = { 0, static_cast<int32_t>(y), 0 },
+                .imageExtent = { width, rows, 1 }
+            };
+            cmd_buffer.copyBufferToImage(depth_alias_scratch.buffer, alias->depth_view.image, vk::ImageLayout::eTransferDstOptimal, to_image);
+        }
+
+        cached_info.texture.transition_to(cmd_buffer, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
+        alias->depth_view.transition_to(cmd_buffer, vkutil::ImageLayout::SampledImage);
+        alias->scene_timestamp = context->scene_timestamp;
+    }
+
+    if (texture_viewport)
+        *texture_viewport = TextureViewport{};
+    return TextureLookupResult{
+        alias->depth_view.view,
+        alias->depth_view.layout,
+        alias->depth_view.format
     };
 }
 
@@ -3206,6 +3365,80 @@ void VKSurfaceCache::ensure_reinterpret_pipeline() {
     alloc_info.setSetLayouts(layouts);
     reinterpret_desc_sets = state.device.allocateDescriptorSets(alloc_info);
     reinterpret_desc_idx = 0;
+}
+
+bool VKSurfaceCache::ensure_depth_alias_pipeline() {
+    if (depth_alias_pipeline)
+        return true;
+    if (depth_alias_unavailable)
+        return false;
+
+    if (!(state.physical_device_queue_families[state.general_family_index].queueFlags & vk::QueueFlagBits::eCompute)) {
+        LOG_ERROR("The graphics queue has no compute support, a U8U8U8U8 texture over a depth buffer will read guest memory instead");
+        depth_alias_unavailable = true;
+        return false;
+    }
+    const fs::path shader_path = state.static_assets / "shaders-builtin/vulkan" / "depth_alias_pack.comp.spv";
+    depth_alias_shader = vkutil::load_shader(state.device, shader_path);
+    if (!depth_alias_shader) {
+        LOG_ERROR("Could not load {}, a U8U8U8U8 texture over a depth buffer will read guest memory instead", shader_path);
+        depth_alias_unavailable = true;
+        return false;
+    }
+
+    const vk::DescriptorSetLayoutBinding binding{
+        .binding = 0,
+        .descriptorType = vk::DescriptorType::eStorageBuffer,
+        .descriptorCount = 1,
+        .stageFlags = vk::ShaderStageFlagBits::eCompute
+    };
+    vk::DescriptorSetLayoutCreateInfo layout_info{};
+    layout_info.setBindings(binding);
+    depth_alias_desc_layout = state.device.createDescriptorSetLayout(layout_info);
+
+    const vk::PushConstantRange push_range{
+        .stageFlags = vk::ShaderStageFlagBits::eCompute,
+        .offset = 0,
+        .size = 4 * sizeof(uint32_t)
+    };
+    vk::PipelineLayoutCreateInfo pl_info{};
+    pl_info.setSetLayouts(depth_alias_desc_layout);
+    pl_info.setPushConstantRanges(push_range);
+    depth_alias_pipeline_layout = state.device.createPipelineLayout(pl_info);
+
+    const vk::DeviceSize scratch_bytes = std::min<vk::DeviceSize>(DEPTH_ALIAS_SCRATCH_BYTES, state.physical_device_properties.limits.maxStorageBufferRange);
+    depth_alias_scratch = vkutil::Buffer(scratch_bytes);
+    depth_alias_scratch.init_buffer(vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst);
+
+    const vk::DescriptorPoolSize pool_size{ vk::DescriptorType::eStorageBuffer, 1 };
+    vk::DescriptorPoolCreateInfo pool_info{ .maxSets = 1 };
+    pool_info.setPoolSizes(pool_size);
+    depth_alias_desc_pool = state.device.createDescriptorPool(pool_info);
+
+    vk::DescriptorSetAllocateInfo alloc_info{ .descriptorPool = depth_alias_desc_pool };
+    alloc_info.setSetLayouts(depth_alias_desc_layout);
+    depth_alias_desc_set = state.device.allocateDescriptorSets(alloc_info).front();
+
+    const vk::DescriptorBufferInfo buffer_info{ depth_alias_scratch.buffer, 0, VK_WHOLE_SIZE };
+    vk::WriteDescriptorSet write{
+        .dstSet = depth_alias_desc_set,
+        .dstBinding = 0,
+        .descriptorCount = 1,
+        .descriptorType = vk::DescriptorType::eStorageBuffer
+    };
+    write.setBufferInfo(buffer_info);
+    state.device.updateDescriptorSets(write, {});
+
+    // last, as a pipeline means everything above is ready
+    const vk::ComputePipelineCreateInfo pipeline_info{
+        .stage = vk::PipelineShaderStageCreateInfo{
+            .stage = vk::ShaderStageFlagBits::eCompute,
+            .module = depth_alias_shader,
+            .pName = "main" },
+        .layout = depth_alias_pipeline_layout
+    };
+    depth_alias_pipeline = state.device.createComputePipeline(nullptr, pipeline_info).value;
+    return true;
 }
 
 } // namespace renderer::vulkan

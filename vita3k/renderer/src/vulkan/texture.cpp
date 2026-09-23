@@ -36,8 +36,7 @@ namespace renderer::vulkan {
 
 // return if this format can be used to read a depth stencil buffer
 // Only return the formats we support and make sense for now
-// (technically we can read a D24S8 or D32 as R8R8R8R8, but it is not implemented
-// yet and no game I am aware of does it)
+// (U8U8U8U8 reads the packed words of an S8D24 buffer. Reading a D32 that way is not implemented)
 static bool is_depth_stencil_compatible_format(SceGxmTextureBaseFormat format, bool &can_be_depth) {
     switch (format) {
         // D16 format
@@ -53,6 +52,9 @@ static bool is_depth_stencil_compatible_format(SceGxmTextureBaseFormat format, b
         // 8bit stencil
     case SCE_GXM_TEXTURE_BASE_FORMAT_U8:
     case SCE_GXM_TEXTURE_BASE_FORMAT_S8:
+        return true;
+        // S8D24 words as colour
+    case SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8U8:
         return true;
     default:
         return false;

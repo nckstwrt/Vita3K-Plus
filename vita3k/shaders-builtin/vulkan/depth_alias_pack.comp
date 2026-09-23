@@ -1,0 +1,37 @@
+#version 450
+
+// Rewrites each depth word in place as the guest S8D24 word: depth24 | stencil << 24. The buffer holds the depth
+// aspect as one 32-bit word per texel (D32_SFLOAT, or X8_D24 with the depth in the low 24 bits), then from
+// stencil_word_offset the stencil aspect as one byte per texel.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, set = 0, binding = 0) buffer Scratch {
+    uint words[];
+};
+
+layout(push_constant) uniform Parameters {
+    uint width;
+    uint height;
+    uint stencil_word_offset;
+    uint float_depth;
+} params;
+
+void main() {
+    const uvec2 pos = gl_GlobalInvocationID.xy;
+    if (pos.x >= params.width || pos.y >= params.height)
+        return;
+
+    const uint i = pos.y * params.width + pos.x;
+    uint depth;
+    if (params.float_depth != 0u) {
+        // quantise to the 24 bits the guest stores
+        float value = uintBitsToFloat(words[i]);
+        value = isnan(value) ? 0.0 : clamp(value, 0.0, 1.0);
+        depth = uint(roundEven(value * 16777215.0));
+    } else {
+        depth = words[i] & 0x00FFFFFFu;
+    }
+    const uint stencil = (words[params.stencil_word_offset + (i >> 2u)] >> ((i & 3u) * 8u)) & 0xFFu;
+    words[i] = depth | (stencil << 24u);
+}
