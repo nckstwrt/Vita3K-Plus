@@ -17,7 +17,7 @@ https://github.com/nckstwrt/Vita3K-Plus/releases
 > [!IMPORTANT]
 > **Freezing or hangs:** Enable **Accurate Thread Scheduling** in Graphics settings (which is the new default).  
 > This is needed for games such as *Dead or Alive 5 Plus*, *Sonic*, *Samurai Warriors 3*, etc.
-> Sonic can be temperamental but should start ok 80% of the time
+> Sonic might require you set Guest Cores to 1 to start up
 
 ## Enhancements
 
