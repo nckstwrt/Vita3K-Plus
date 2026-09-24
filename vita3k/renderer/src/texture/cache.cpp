@@ -674,15 +674,17 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
             upload_format = SCE_GXM_TEXTURE_BASE_FORMAT_F32;
             break;
         case SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P2:
-        case SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P3:
+        case SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P3: {
+            const bool is_p3 = base_format == SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P3;
+            const auto yuv_swizzle = static_cast<SceGxmTextureSwizzleYUV420Mode>(fmt & SCE_GXM_TEXTURE_SWIZZLE_MASK);
+            const bool v_plane_first = is_p3 && (yuv_swizzle == SCE_GXM_TEXTURE_SWIZZLE_YVU_CSC0 || yuv_swizzle == SCE_GXM_TEXTURE_SWIZZLE_YVU_CSC1);
             texture_data_decompressed.resize(pixels_per_stride * memory_height * 4);
-            yuv420_texture_to_rgb(yuv_conversion_cache, texture_data_decompressed.data(),
-                static_cast<const uint8_t *>(pixels), pixels_per_stride, memory_height, layout_width, layout_height,
-                base_format == SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P3);
+            yuv420_texture_to_rgb(yuv_conversion_cache, texture_data_decompressed.data(), static_cast<const uint8_t *>(pixels), pixels_per_stride, memory_height, layout_width, layout_height, is_p3, v_plane_first);
             pixels = texture_data_decompressed.data();
             bpp = 32;
             upload_format = SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8U8;
             break;
+        }
         default:
             break;
         }

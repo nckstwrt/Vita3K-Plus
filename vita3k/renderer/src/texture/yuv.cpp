@@ -18,6 +18,8 @@
 #include <renderer/functions.h>
 #include <renderer/texture_cache.h>
 
+#include <utility>
+
 extern "C" {
 #include <libswscale/swscale.h>
 }
@@ -49,7 +51,7 @@ static SwsContext *get_sws_context(YUVConversionCache &cache, size_t width, size
     return context;
 }
 
-void yuv420_texture_to_rgb(YUVConversionCache &cache, uint8_t *dst, const uint8_t *src, uint32_t width, uint32_t height, uint32_t layout_width, uint32_t layout_height, bool is_p3) {
+void yuv420_texture_to_rgb(YUVConversionCache &cache, uint8_t *dst, const uint8_t *src, uint32_t width, uint32_t height, uint32_t layout_width, uint32_t layout_height, bool is_p3, bool v_plane_first) {
     SwsContext *context = get_sws_context(cache, width, height, is_p3);
     assert(context);
 
@@ -58,6 +60,8 @@ void yuv420_texture_to_rgb(YUVConversionCache &cache, uint8_t *dst, const uint8_
         src + layout_width * layout_height, // U(V for P2) Slice
         src + layout_width * layout_height + layout_width * layout_height / 4, // V Slice (for P3)
     };
+    if (v_plane_first)
+        std::swap(slices[1], slices[2]);
 
     int strides[] = {
         static_cast<int>(width),

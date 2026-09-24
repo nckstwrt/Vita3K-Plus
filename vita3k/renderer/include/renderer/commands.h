@@ -87,7 +87,8 @@ enum class CommandOpcode : std::uint8_t {
     DestroyRenderTarget,
     DestroyContext,
 
-    MemoryUnmapFlush
+    MemoryUnmapFlush,
+    SyncGuestRange
 };
 
 enum CommandErrorCode {

@@ -2698,6 +2698,28 @@ bool VKSurfaceCache::sync_surface_for_gpu_read(Address address, uint32_t size) {
     return true;
 }
 
+int VKSurfaceCache::sync_surfaces_for_cpu_read(MemState &mem, Address address, uint32_t size) {
+    if (!state.features.enable_memory_mapping || state.disable_surface_sync || !state.context)
+        return 0;
+
+    const VKContext &context = *static_cast<VKContext *>(state.context);
+    const uint64_t range_end = static_cast<uint64_t>(address) + size;
+    std::vector<ColorSurfaceCacheInfo *> to_sync;
+    for (const auto &[base, info] : color_address_lookup) {
+        if (base >= range_end || static_cast<uint64_t>(base) + info->total_bytes <= address)
+            continue;
+        const bool recent = info->last_frame_rendered + MAX_FRAMES_RENDERING > context.frame_timestamp;
+        const bool cpu_newer = info->dirty && *info->dirty;
+        if (recent && !cpu_newer)
+            to_sync.push_back(info);
+    }
+
+    for (ColorSurfaceCacheInfo *info : to_sync)
+        submit_immediate_surface_sync(*info, &mem);
+
+    return static_cast<int>(to_sync.size());
+}
+
 ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
     struct ForgetWrittenSurface {
         ColorSurfaceCacheInfo *&surface;

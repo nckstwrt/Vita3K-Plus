@@ -110,6 +110,7 @@ void transfer_copy(State &state, uint32_t colorKeyValue, uint32_t colorKeyMask, 
 void transfer_downscale(State &state, const SceGxmTransferImage *src, const SceGxmTransferImage *dest);
 void transfer_fill(State &state, uint32_t fillColor, const SceGxmTransferImage *dest);
 void sync_surface_data(State &state, Context *ctx, const SceGxmNotification vertex_notification, const SceGxmNotification fragment_notification);
+int sync_guest_range(State &state, Address address, uint32_t size);
 
 bool create_context(State &state, std::unique_ptr<Context> &context);
 void destroy_context(State &state, std::unique_ptr<Context> &context);
@@ -188,7 +189,7 @@ namespace texture {
 // Paletted textures.
 void palette_texture_to_rgba_4(uint32_t *dst, const uint8_t *src, uint32_t width, uint32_t height, const uint32_t *palette);
 void palette_texture_to_rgba_8(uint32_t *dst, const uint8_t *src, uint32_t width, uint32_t height, const uint32_t *palette);
-void yuv420_texture_to_rgb(YUVConversionCache &cache, uint8_t *dst, const uint8_t *src, uint32_t width, uint32_t height, uint32_t layout_width, uint32_t layout_height, bool is_p3);
+void yuv420_texture_to_rgb(YUVConversionCache &cache, uint8_t *dst, const uint8_t *src, uint32_t width, uint32_t height, uint32_t layout_width, uint32_t layout_height, bool is_p3, bool v_plane_first);
 const uint32_t *get_texture_palette(const SceGxmTexture &texture, const MemState &mem);
 
 // Assume fmt is a bcn format

@@ -19,6 +19,8 @@
 
 #include <codec/state.h>
 #include <codec/types.h>
+#include <kernel/thread/thread_state.h>
+#include <renderer/functions.h>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceJpegEncUser);
@@ -33,6 +35,9 @@ struct SceJpegEncoderContext {
 
     int32_t compressRatio;
     int32_t headerMode;
+
+    int32_t validWidth;
+    int32_t validHeight;
 };
 
 static int sceJpegEncoderInitImpl(SceJpegEncoderContext *context, int32_t inWidth, int32_t inHeight, int32_t pixelFormat, Ptr<uint8_t> outBuffer, uint32_t outSize, SceJpegEncoderInitParamOption option = SCE_JPEGENC_INIT_PARAM_OPTION_NONE) {
@@ -46,13 +51,16 @@ static int sceJpegEncoderInitImpl(SceJpegEncoderContext *context, int32_t inWidt
     context->compressRatio = 64;
     context->headerMode = SCE_JPEGENC_HEADER_MODE_JPEG;
 
+    context->validWidth = inWidth;
+    context->validHeight = inHeight;
+
     return 0;
 }
 
 EXPORT(int, sceJpegEncoderCsc, SceJpegEncoderContext *context, Ptr<uint8_t> outBuffer, Ptr<uint8_t> inBuffer, int32_t inPitch, int32_t inPixelFormat) {
     TRACY_FUNC(sceJpegEncoderCsc, context, outBuffer, inBuffer, inPitch, inPixelFormat);
-    auto inBufferData = inBuffer.get(emuenv.mem);
-    auto outBufferData = outBuffer.get(emuenv.mem);
+    if (!context || !outBuffer.valid(emuenv.mem) || !inBuffer.valid(emuenv.mem))
+        return RET_ERROR(SCE_JPEGENC_ERROR_INVALID_POINTER);
 
     DecoderColorSpace color_space = COLORSPACE_UNKNOWN;
 
@@ -67,23 +75,23 @@ EXPORT(int, sceJpegEncoderCsc, SceJpegEncoderContext *context, Ptr<uint8_t> outB
         return SCE_JPEGENC_ERROR_INVALID_PIXELFORMAT;
     }
 
-    if (inPixelFormat != SCE_JPEGENC_PIXEL_RGBA8888) {
-        return STUBBED("Only RGBA8888 to YCbCr is implemented.");
-    }
+    const bool is_bgra = inPixelFormat == SCE_JPEGENC_PIXEL_BGRA8888;
+    if (!is_bgra && inPixelFormat != SCE_JPEGENC_PIXEL_RGBA8888)
+        return RET_ERROR(SCE_JPEGENC_ERROR_INVALID_PIXELFORMAT);
 
-    convert_rgb_to_yuv(inBufferData, outBufferData, context->inWidth, context->inHeight, color_space, inPitch);
+    guest_sched_release_for_block();
+    renderer::sync_guest_range(*emuenv.renderer, inBuffer.address(), static_cast<uint32_t>(inPitch) * 4 * context->inHeight);
+
+    const bool hw_csc_pitch = context->pixelFormat & SCE_JPEGENC_PITCH_HW_CSC;
+    convert_rgb_to_yuv(inBuffer.get(emuenv.mem), outBuffer.get(emuenv.mem), context->inWidth, context->inHeight, color_space, inPitch, is_bgra, hw_csc_pitch);
 
     return 0;
 }
 
 EXPORT(int, sceJpegEncoderEncode, SceJpegEncoderContext *context, Ptr<uint8_t> inBuffer) {
     TRACY_FUNC(sceJpegEncoderEncode, context, inBuffer);
-
-    auto inBufferData = inBuffer.get(emuenv.mem);
-    auto outBufferData = context->outBuffer.get(emuenv.mem);
-
-    int width = context->inWidth;
-    int height = context->inHeight;
+    if (!context || !inBuffer.valid(emuenv.mem) || !context->outBuffer.valid(emuenv.mem))
+        return RET_ERROR(SCE_JPEGENC_ERROR_INVALID_POINTER);
 
     DecoderColorSpace color_space = COLORSPACE_UNKNOWN;
 
@@ -98,7 +106,9 @@ EXPORT(int, sceJpegEncoderEncode, SceJpegEncoderContext *context, Ptr<uint8_t> i
         return SCE_JPEGENC_ERROR_INVALID_PIXELFORMAT;
     }
 
-    uint32_t size = convert_yuv_to_jpeg(inBufferData, outBufferData, width, height, context->outSize, color_space, context->compressRatio);
+    const bool hw_csc_pitch = context->pixelFormat & SCE_JPEGENC_PITCH_HW_CSC;
+    uint32_t size = convert_yuv_to_jpeg(inBuffer.get(emuenv.mem), context->outBuffer.get(emuenv.mem), context->inWidth, context->inHeight,
+        context->validWidth, context->validHeight, hw_csc_pitch, context->outSize, color_space, context->compressRatio);
 
     if (size == -1) {
         return SCE_JPEGENC_ERROR_INSUFFICIENT_BUFFER;
@@ -156,5 +166,13 @@ EXPORT(int, sceJpegEncoderSetOutputAddr, SceJpegEncoderContext *context, Ptr<uin
 
 EXPORT(int, sceJpegEncoderSetValidRegion, SceJpegEncoderContext *context, int32_t inWidth, int32_t inHeight) {
     TRACY_FUNC(sceJpegEncoderSetValidRegion, context, inWidth, inHeight);
-    return UNIMPLEMENTED();
+    if (!context)
+        return RET_ERROR(SCE_JPEGENC_ERROR_INVALID_POINTER);
+
+    if (inWidth <= 0 || inHeight <= 0 || inWidth > context->inWidth || inHeight > context->inHeight)
+        return RET_ERROR(SCE_JPEGENC_ERROR_IMAGE_SIZE);
+
+    context->validWidth = inWidth;
+    context->validHeight = inHeight;
+    return 0;
 }

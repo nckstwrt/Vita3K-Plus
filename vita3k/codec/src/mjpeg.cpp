@@ -76,33 +76,35 @@ void convert_yuv_to_rgb(const uint8_t *yuv, uint8_t *rgba, uint32_t frame_width,
     sws_freeContext(context);
 }
 
-void convert_rgb_to_yuv(const uint8_t *rgba, uint8_t *yuv, uint32_t width, uint32_t height, const DecoderColorSpace color_space, int32_t in_pitch) {
+void get_yuv_frame_layout(uint32_t width, uint32_t height, DecoderColorSpace color_space, bool hw_csc_pitch, uint32_t pitch[3], uint32_t offset[3]) {
+    const uint32_t chroma_width = (color_space == COLORSPACE_YUV444P) ? width : (width + 1) / 2;
+    const uint32_t chroma_height = (color_space == COLORSPACE_YUV420P) ? (height + 1) / 2 : height;
+    pitch[0] = hw_csc_pitch ? align(width, 16) : width;
+    pitch[1] = pitch[2] = hw_csc_pitch ? align(chroma_width, 16) : chroma_width;
+    offset[0] = 0;
+    offset[1] = pitch[0] * height;
+    offset[2] = offset[1] + pitch[1] * chroma_height;
+}
+
+void convert_rgb_to_yuv(const uint8_t *rgba, uint8_t *yuv, uint32_t width, uint32_t height, const DecoderColorSpace color_space, int32_t in_pitch, bool is_bgra, bool hw_csc_pitch) {
     AVPixelFormat format = AV_PIX_FMT_NONE;
-    int strides_divisor = 1;
-    int slice_position = 8;
 
     switch (color_space) {
     case COLORSPACE_YUV444P:
         format = AV_PIX_FMT_YUV444P;
-        strides_divisor = 1;
-        slice_position = 8; // 2
         break;
     case COLORSPACE_YUV422P:
         format = AV_PIX_FMT_YUV422P;
-        strides_divisor = 2;
-        slice_position = 6; // 1.5
         break;
     case COLORSPACE_YUV420P:
         format = AV_PIX_FMT_YUV420P;
-        strides_divisor = 2;
-        slice_position = 5; // 1.25
         break;
     default:
         LOG_WARN("An attempt was made to use an unsupported color space.");
         return;
     }
 
-    SwsContext *context = sws_getContext(width, height, AV_PIX_FMT_RGBA, width, height, format,
+    SwsContext *context = sws_getContext(width, height, is_bgra ? AV_PIX_FMT_BGRA : AV_PIX_FMT_RGBA, width, height, format,
         SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND, nullptr, nullptr, nullptr);
     assert(context);
 
@@ -114,16 +116,19 @@ void convert_rgb_to_yuv(const uint8_t *rgba, uint8_t *yuv, uint32_t width, uint3
         static_cast<int>(in_pitch * 4),
     };
 
+    uint32_t pitch[3], offset[3];
+    get_yuv_frame_layout(width, height, color_space, hw_csc_pitch, pitch, offset);
+
     uint8_t *dst_slices[] = {
-        &yuv[0], // Y Slice
-        &yuv[width * height], // U Slice
-        &yuv[static_cast<uint32_t>(width * height * slice_position / 4)], // V Slice
+        &yuv[offset[0]],
+        &yuv[offset[1]],
+        &yuv[offset[2]],
     };
 
     const int dst_strides[] = {
-        static_cast<int>(width),
-        static_cast<int>(width) / strides_divisor,
-        static_cast<int>(width) / strides_divisor,
+        static_cast<int>(pitch[0]),
+        static_cast<int>(pitch[1]),
+        static_cast<int>(pitch[2]),
     };
 
     int error = sws_scale(context, slices, strides, 0, height, dst_slices, dst_strides);
@@ -174,7 +179,7 @@ static DecoderColorSpace av_pixel_format_to_colorspace(AVPixelFormat format) {
     }
 }
 
-int convert_yuv_to_jpeg(const uint8_t *yuv, uint8_t *jpeg, uint32_t width, uint32_t height, uint32_t max_size, const DecoderColorSpace color_space, int32_t compress_ratio) {
+int convert_yuv_to_jpeg(const uint8_t *yuv, uint8_t *jpeg, uint32_t frame_width, uint32_t frame_height, uint32_t width, uint32_t height, bool hw_csc_pitch, uint32_t max_size, const DecoderColorSpace color_space, int32_t compress_ratio) {
     AVPixelFormat format = AV_PIX_FMT_YUV444P;
 
     const AVCodec *codec = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
@@ -205,8 +210,12 @@ int convert_yuv_to_jpeg(const uint8_t *yuv, uint8_t *jpeg, uint32_t width, uint3
     frame->height = context->height;
     frame->quality = FF_QP2LAMBDA * ((compress_ratio) * (16 - 1) / 255 + 1);
 
-    ret = av_image_fill_arrays(frame->data, frame->linesize, yuv, context->pix_fmt, context->width, context->height, 1);
-    assert(ret >= 0);
+    uint32_t pitch[3], offset[3];
+    get_yuv_frame_layout(frame_width, frame_height, color_space, hw_csc_pitch, pitch, offset);
+    for (int i = 0; i < 3; i++) {
+        frame->data[i] = const_cast<uint8_t *>(&yuv[offset[i]]);
+        frame->linesize[i] = static_cast<int>(pitch[i]);
+    }
 
     AVPacket *pkt = av_packet_alloc();
 

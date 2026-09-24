@@ -433,6 +433,10 @@ void sync_surface_data(State &state, Context *ctx, const SceGxmNotification vert
     renderer::add_command(ctx, renderer::CommandOpcode::SyncSurfaceData, nullptr, vertex_notification, fragment_notification);
 }
 
+int sync_guest_range(State &state, Address address, uint32_t size) {
+    return renderer::send_single_command(state, nullptr, renderer::CommandOpcode::SyncGuestRange, true, address, size);
+}
+
 bool create_context(State &state, std::unique_ptr<Context> &context) {
     return renderer::send_single_command(state, nullptr, renderer::CommandOpcode::CreateContext, true, &context) > CommandErrorCodeNone;
 }

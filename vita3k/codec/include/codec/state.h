@@ -316,9 +316,10 @@ struct PlayerState {
     ~PlayerState();
 };
 
-void convert_rgb_to_yuv(const uint8_t *rgba, uint8_t *yuv, uint32_t width, uint32_t height, const DecoderColorSpace color_space, int32_t in_pitch);
+void get_yuv_frame_layout(uint32_t width, uint32_t height, DecoderColorSpace color_space, bool hw_csc_pitch, uint32_t pitch[3], uint32_t offset[3]);
+void convert_rgb_to_yuv(const uint8_t *rgba, uint8_t *yuv, uint32_t width, uint32_t height, const DecoderColorSpace color_space, int32_t in_pitch, bool is_bgra, bool hw_csc_pitch);
 void convert_yuv_to_rgb(const uint8_t *yuv, uint8_t *rgba, uint32_t frame_width, const DecoderColorSpace color_space, bool is_bgra, MJpegPitch pitch[4]);
-int convert_yuv_to_jpeg(const uint8_t *yuv, uint8_t *jpeg, uint32_t width, uint32_t height, uint32_t max_size, const DecoderColorSpace color_space, int32_t compress_ratio);
+int convert_yuv_to_jpeg(const uint8_t *yuv, uint8_t *jpeg, uint32_t frame_width, uint32_t frame_height, uint32_t width, uint32_t height, bool hw_csc_pitch, uint32_t max_size, const DecoderColorSpace color_space, int32_t compress_ratio);
 void copy_yuv_data_from_frame(AVFrame *frame, uint8_t *dest, const uint32_t width, const uint32_t height, bool is_p3, const uint32_t pitch = 0);
 void calculate_pitch_info(uint32_t width, uint32_t height, int downscale_ratio, DecoderColorSpace color_space, bool use_standard_decoder, MJpegPitch output_pitch[4]);
 std::string codec_error_name(int error);

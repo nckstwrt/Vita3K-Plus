@@ -69,6 +69,7 @@ COMMAND(handle_draw);
 COMMAND(handle_transfer_copy);
 COMMAND(handle_transfer_downscale);
 COMMAND(handle_transfer_fill);
+COMMAND(handle_sync_guest_range);
 
 // Sync
 COMMAND(handle_nop);

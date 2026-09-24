@@ -442,4 +442,16 @@ COMMAND(handle_transfer_fill) {
     delete dest;
 }
 
+COMMAND(handle_sync_guest_range) {
+    TRACY_FUNC_COMMANDS(handle_sync_guest_range);
+    const Address address = helper.pop<Address>();
+    const uint32_t size = helper.pop<uint32_t>();
+
+    int synced = 0;
+    if (renderer.current_backend == Backend::Vulkan)
+        synced = dynamic_cast<vulkan::VKState &>(renderer).surface_cache.sync_surfaces_for_cpu_read(mem, address, size);
+
+    complete_command(renderer, helper, synced);
+}
+
 } // namespace renderer
