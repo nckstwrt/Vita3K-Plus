@@ -21,6 +21,33 @@ https://github.com/nckstwrt/Vita3K-Plus/releases
 
 ## Enhancements
 
+# v1.2 - Not yet released
+- **Soul Sacrifice Delta** - Outline missing regression + floor textures fixed (Thanks doctorthoss and NaGaa95!)
+- **Madden 13** - Commentary + Crowd sounds working + Load/Save Fixes
+- **Mortal Kombat** - Broken video colours fixed
+- **Ridge Racer** - Reflections fixed
+- **Resistance** - Fixed level not fully loading on slower devices
+- **Ragnarok Odyssey ACE** - Graphics now working correctly on Android
+- **Demon Gaze** - Now loads into game
+- **Super Hero Nation** - Cloud Graphics Fixed
+- **Dragon Quest Heroes II** - No longer crashes when in game
+- **Ys VIII** - Lacrimosa of Dana - regression issue fixed
+- **Need For Speed** - Fixed Anisotropic Filtering + Crash sounds
+- **Gundam Breaker 3** - Corrected minor mech drawing issues
+- **Epic Mickey 2** - Fixed the broken white parts of the graphics
+- **Fifa 15** - Commentary audio working + Crowd graphics fixed
+- **Skullgirls 2nd Encore** - Fix background and character graphics
+- **Dead Or Alive Xtreme 3** - Graphics fixed
+- **Ys Celcetta** - Fixed not loading on Android
+- **Jet Set Radio** - Game booting and Graphics Fixed
+- **Golden Time** - Game now booting and running fine
+- **Shin Gundam Mosou** - Fix missing laser/effect graphics. Fix voices/dialogue. (thanks to mohawku-bit's Enhanced version which was used as a reference)
+- **Injustice** - Gods Among Us - Projectiles now show
+- **Uncharted** - Fix for camera pictures being green
+- **Mali Vertex Issue** - Fixes some vertices appearing stretched (e.g. The title screen butterfly in Soul Sacrifice Delta)
+- **Adreno 6xx + Turnip** - Fix for black checkered pattern sometimes appearing in some games
+
+
 # v1.1 - Released 13th Sept 2026
 - **Dead Or Alive 5 Plus** - Working - On Android requires Adreno, Turnip and the new setting Thread Scheduling Accuracy On
 - **Metal Gear Solid 3** - Freezes fixed/worked around. Blending graphics fixed. On-Screen Touchpad fixes.
