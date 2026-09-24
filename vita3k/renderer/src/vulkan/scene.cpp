@@ -49,6 +49,28 @@ static bool draw_drops_fragments_beyond_far_plane(const GxmRecordState &record) 
     return drop_fragments_beyond_far_plane && front_drops && back_drops;
 }
 
+// a vertex program can read a uniform buffer past its declared size so Double Buffer copies the rest of a large buffer too
+constexpr uint32_t UNIFORM_SLACK_MIN_DECLARED = 1024;
+constexpr uint32_t UNIFORM_SLACK_WINDOW = 16 * 1024;
+
+static void copy_uniform_slack(VKContext &context, MemState &mem, const Address address, const uint32_t declared) {
+    VKState &state = context.state;
+    const auto mapping = state.mapped_memories.lower_bound(address);
+    if (mapping == state.mapped_memories.end() || static_cast<uint64_t>(address) >= static_cast<uint64_t>(mapping->first) + mapping->second.size)
+        return;
+    const vkutil::Buffer *buffer = std::get_if<vkutil::Buffer>(&mapping->second.buffer_impl);
+    const uint8_t *guest = Ptr<const uint8_t>(address).get(mem);
+    if (!buffer || !buffer->mapped_data || !guest)
+        return;
+
+    const uint64_t end = std::min<uint64_t>({ static_cast<uint64_t>(address) + UNIFORM_SLACK_WINDOW,
+        static_cast<uint64_t>(mapping->first) + mapping->second.size, state.surface_cache.color_surface_limit(address) });
+    if (end <= static_cast<uint64_t>(address) + declared)
+        return;
+    uint8_t *mirror = reinterpret_cast<uint8_t *>(buffer->mapped_data) + (address - mapping->first);
+    memcpy(mirror + declared, guest + declared, static_cast<size_t>(end - address - declared));
+}
+
 void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *program, const bool vertex_shader, const int block_num, const int size, Ptr<uint8_t> data) {
     auto offset = program->uniform_buffer_data_offsets.at(block_num);
     if (offset == static_cast<std::uint32_t>(-1)) {
@@ -61,6 +83,8 @@ void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *
 
         if (!aliases_surface && context.state.mapping_method == MappingMethod::DoubleBuffer) {
             context.state.buffer_trapping.access_buffer(data.address(), data_size_upload, mem, false, true);
+            if (data_size_upload >= UNIFORM_SLACK_MIN_DECLARED && !context.state.has_shader_store)
+                copy_uniform_slack(context, mem, data.address(), data_size_upload);
         }
 
         const uint64_t buffer_address = context.state.get_matching_device_address(data.address());

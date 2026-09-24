@@ -423,6 +423,8 @@ public:
     // mapped memory buffer so the shader reads up-to-date data. Returns true if the address
     // belongs to such a surface.
     bool sync_surface_for_gpu_read(Address address, uint32_t size);
+    // how far guest data can be copied from address before reaching a colour surface
+    Address color_surface_limit(Address address) const;
     int sync_surfaces_for_cpu_read(MemState &mem, Address address, uint32_t size);
 
     // If non-null, the return value must be sent as a PostSurfaceSyncRequest

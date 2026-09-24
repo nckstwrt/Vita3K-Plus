@@ -2698,6 +2698,17 @@ bool VKSurfaceCache::sync_surface_for_gpu_read(Address address, uint32_t size) {
     return true;
 }
 
+Address VKSurfaceCache::color_surface_limit(const Address address) const {
+    auto it = color_address_lookup.upper_bound(address);
+    const Address next = it == color_address_lookup.end() ? ~0u : it->first;
+    if (it != color_address_lookup.begin()) {
+        --it;
+        if (static_cast<uint64_t>(it->first) + it->second->total_bytes > address)
+            return address;
+    }
+    return next;
+}
+
 int VKSurfaceCache::sync_surfaces_for_cpu_read(MemState &mem, Address address, uint32_t size) {
     if (!state.features.enable_memory_mapping || state.disable_surface_sync || !state.context)
         return 0;
