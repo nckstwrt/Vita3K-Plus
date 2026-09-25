@@ -1580,6 +1580,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
         // there are 4 cores, each having 4 pipelines, assume the thread buffer is evenly divided
         // between all of them and each pipeline only does things in its segment
         const uint32_t size_in_f32 = program.thread_buffer_count / (4 * 4 * sizeof(float));
+        spv_params.thread_buffer_f32_count = size_in_f32;
         spv::Id thread_buffer = b.makeArrayType(f32, b.makeUintConstant(size_in_f32), sizeof(float));
 
         spv_params.thread_buffer = b.createVariable(spv::NoPrecision, spv::StorageClassPrivate, thread_buffer, "thread_buffer");

@@ -189,6 +189,7 @@ struct ShaderProgram {
     UniformBufferSizes uniform_buffer_sizes; // Size of the buffer in 4-bytes unit
     UniformBufferSizes uniform_buffer_data_offsets; // Offset of the buffer in 4-bytes unit
     size_t max_total_uniform_buffer_storage;
+    uint32_t dynamic_uniform_buffers = 0; // blocks can read through a computed address past their declared size
     uint16_t buffer_count; // max buffer index used by the shader + 1
 
     uint16_t texture_count; // max texture index used by the shader + 1

@@ -49,8 +49,7 @@ static bool draw_drops_fragments_beyond_far_plane(const GxmRecordState &record) 
     return drop_fragments_beyond_far_plane && front_drops && back_drops;
 }
 
-// a vertex program can read a uniform buffer past its declared size so Double Buffer copies the rest of a large buffer too
-constexpr uint32_t UNIFORM_SLACK_MIN_DECLARED = 1024;
+// a program can index a uniform buffer past its declared size (therefore Double Buffer copies the rest of it too)
 constexpr uint32_t UNIFORM_SLACK_WINDOW = 16 * 1024;
 
 static void copy_uniform_slack(VKContext &context, MemState &mem, const Address address, const uint32_t declared) {
@@ -83,7 +82,7 @@ void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *
 
         if (!aliases_surface && context.state.mapping_method == MappingMethod::DoubleBuffer) {
             context.state.buffer_trapping.access_buffer(data.address(), data_size_upload, mem, false, true);
-            if (data_size_upload >= UNIFORM_SLACK_MIN_DECLARED && !context.state.has_shader_store)
+            if ((program->dynamic_uniform_buffers & (1u << block_num)) && !context.state.has_shader_store)
                 copy_uniform_slack(context, mem, data.address(), data_size_upload);
         }
 

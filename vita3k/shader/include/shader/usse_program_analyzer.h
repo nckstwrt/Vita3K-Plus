@@ -237,5 +237,7 @@ void get_attribute_informations(const SceGxmProgram &program, AttributeInformati
 // return the max used buffer index + 1
 int get_uniform_buffer_sizes(const SceGxmProgram &program, UniformBufferSizes &sizes);
 
+std::uint32_t get_dynamic_uniform_buffers(const SceGxmProgram &program);
+
 void analyze(USSEBlockNode &root, USSEOffset end_offset, const AnalyzeReadFunction &read_func);
 } // namespace shader::usse
