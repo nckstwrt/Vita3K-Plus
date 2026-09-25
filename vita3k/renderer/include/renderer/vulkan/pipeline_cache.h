@@ -169,6 +169,8 @@ public:
 
     // true when an attribute offset is past maxVertexInputAttributeOffset
     bool needs_attribute_bindings(const ProgramBinding &vertex_program) const;
+    // true when the stride of the stream leaves one of its attributes unaligned so it is repacked into a multiple of 4
+    bool needs_restride(const ProgramBinding &vertex_program, uint32_t stream_index) const;
 
     void set_async_compilation(bool enable);
 };

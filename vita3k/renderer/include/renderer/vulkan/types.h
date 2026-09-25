@@ -21,6 +21,7 @@
 
 #include <renderer/types.h>
 #include <shader/uniform_block.h>
+#include <deque>
 #include <unordered_map>
 #include <vkutil/objects.h>
 
@@ -292,6 +293,15 @@ struct VKContext : public renderer::Context {
     vk::Buffer vertex_stream_buffers[SCE_GXM_MAX_VERTEX_STREAMS];
     vk::DeviceSize vertex_stream_offsets[SCE_GXM_MAX_VERTEX_STREAMS] = {};
 
+    struct VertexRingMark {
+        uint64_t end;
+        vk::Fence fence;
+        uint64_t frame;
+    };
+    std::deque<VertexRingMark> vertex_ring_marks;
+    uint64_t vertex_ring_free = 0;
+    std::vector<vkutil::Buffer> vertex_ring_retired;
+
     shader::RenderVertUniformBlock prev_vert_ublock;
     shader::RenderFragUniformBlock prev_frag_ublock;
 
@@ -398,6 +408,9 @@ struct VKContext : public renderer::Context {
 
     // check (when the render target has macroblock set) if we are drawing to another block
     void check_for_macroblock_change(bool is_draw);
+
+    // waits for the GPU until size bytes can be copied without overwriting what a submission still reads
+    void vertex_ring_make_room(uint32_t size);
 
 private:
     void wait_thread_function(const MemState &mem);

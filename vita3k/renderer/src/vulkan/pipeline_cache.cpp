@@ -1007,7 +1007,7 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
     const auto add_binding = [&](uint32_t binding, uint32_t stream_index) {
         const SceGxmVertexStream &stream = vertex_program.streams[stream_index];
         const bool is_instanced = gxm::is_stream_instancing(static_cast<SceGxmIndexSource>(stream.indexSource));
-        const uint32_t stride = align(stream.stride, 4);
+        const uint32_t stride = needs_restride(vertex_program, stream_index) ? align(stream.stride, 4) : stream.stride;
         binding_descr.push_back(vk::VertexInputBindingDescription{
             .binding = binding,
             .stride = stride,
@@ -1125,6 +1125,47 @@ bool PipelineCache::needs_attribute_bindings(const ProgramBinding &vertex_progra
             return true;
     }
     return false;
+}
+
+static uint32_t attribute_component_size(const SceGxmVertexAttribute &attribute, const shader::usse::AttributeInformation &info) {
+    if (!info.regformat)
+        return gxm::attribute_format_size(attribute.format);
+
+    switch (info.gxm_type) {
+    case SCE_GXM_PARAMETER_TYPE_U8:
+    case SCE_GXM_PARAMETER_TYPE_S8:
+    case SCE_GXM_PARAMETER_TYPE_C10:
+        return 1;
+    case SCE_GXM_PARAMETER_TYPE_U16:
+    case SCE_GXM_PARAMETER_TYPE_S16:
+    case SCE_GXM_PARAMETER_TYPE_F16:
+        return 2;
+    default:
+        return 4;
+    }
+}
+
+bool PipelineCache::needs_restride(const ProgramBinding &vertex_program, const uint32_t stream_index) const {
+    const uint32_t stride = vertex_program.streams[stream_index].stride;
+    if (stride % 4 == 0)
+        return false;
+
+#ifdef __APPLE__
+    // Metal only takes a stride that is a multiple of 4
+    return true;
+#else
+    // Vulkan wants each attribute address to be a multiple of the component size of its format (so fine at any stride)
+    const VertexProgram *vkvert = vertex_program.vertex_program.get();
+    for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
+        if (attribute.streamIndex != stream_index)
+            continue;
+
+        const auto it = vkvert->attribute_infos.find(attribute.regIndex);
+        if (it != vkvert->attribute_infos.end() && stride % attribute_component_size(attribute, it->second) != 0)
+            return true;
+    }
+    return false;
+#endif
 }
 
 void PipelineCache::compiler_thread(MemState &mem) {

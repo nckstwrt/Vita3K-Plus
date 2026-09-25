@@ -272,8 +272,6 @@ constexpr size_t SNAP_RING_SIZE = 64u * 1024u * 1024u;
 // only a small stream is copied (every stream a game has been seen to recycle is a small per-draw block)
 // a game that indexes deep into a large shared buffer which would overlap the ring every frame
 constexpr uint32_t SNAP_MAX_BYTES = 16u * 1024u;
-// the Vulkan vertex ring these copies are bound through wraps without waiting for the GPU so one frame must stay well inside it
-constexpr uint32_t SNAP_FRAME_BUDGET = 8u * 1024u * 1024u;
 
 struct SnapHeader {
     uint64_t handle;
@@ -287,9 +285,7 @@ uint64_t g_snap_cursor = 0;
 uint64_t g_snap_copied = 0;
 uint64_t g_snap_bound = 0;
 uint64_t g_snap_stale = 0;
-uint64_t g_snap_over_budget = 0;
-uint64_t g_snap_budget_frame = ~0ull;
-uint32_t g_snap_budget_used = 0;
+uint64_t g_snap_mismatch = 0;
 int64_t g_snap_next_report = 0;
 std::atomic<bool> g_snap_disabled{ false };
 
@@ -350,7 +346,7 @@ void stream_snapshot_kick(MemState &mem, CommandList &list) {
     }
 }
 
-const uint8_t *stream_snapshot_get(const uint64_t handle, const uint32_t size, const uint64_t frame) {
+const uint8_t *stream_snapshot_get(const uint64_t handle, const uint32_t size) {
     if (!GUEST_STREAM_SNAPSHOT || handle == ~0ull || !size)
         return nullptr;
 
@@ -358,7 +354,7 @@ const uint8_t *stream_snapshot_get(const uint64_t handle, const uint32_t size, c
     const int64_t now = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     if (now >= g_snap_next_report) {
         g_snap_next_report = now + 10000000;
-        LOG_INFO("[SNAPSHOT] copied {} bound {} stale {} over-budget {}", g_snap_copied, g_snap_bound, g_snap_stale, g_snap_over_budget);
+        LOG_INFO("[SNAPSHOT] copied {} bound {} stale {} mismatch {}", g_snap_copied, g_snap_bound, g_snap_stale, g_snap_mismatch);
     }
 
     if (g_snap_ring.empty() || g_snap_cursor < handle || g_snap_cursor - handle > SNAP_RING_SIZE) {
@@ -368,18 +364,10 @@ const uint8_t *stream_snapshot_get(const uint64_t handle, const uint32_t size, c
     const uint8_t *const at = g_snap_ring.data() + static_cast<size_t>(handle % SNAP_RING_SIZE);
     SnapHeader header;
     memcpy(&header, at, sizeof(header));
-    if (header.handle != handle || size > header.size)
-        return nullptr;
-
-    if (frame != g_snap_budget_frame) {
-        g_snap_budget_frame = frame;
-        g_snap_budget_used = 0;
-    }
-    if (g_snap_budget_used + size > SNAP_FRAME_BUDGET) {
-        g_snap_over_budget++;
+    if (header.handle != handle || size > header.size) {
+        g_snap_mismatch++;
         return nullptr;
     }
-    g_snap_budget_used += size;
     g_snap_bound++;
 
     thread_local std::vector<uint8_t> scratch;
@@ -394,9 +382,7 @@ void stream_snapshot_reset() {
     g_snap_copied = 0;
     g_snap_bound = 0;
     g_snap_stale = 0;
-    g_snap_over_budget = 0;
-    g_snap_budget_frame = ~0ull;
-    g_snap_budget_used = 0;
+    g_snap_mismatch = 0;
 }
 
 void stream_snapshot_disable_for_program(const uint32_t program_addr, const uint32_t program_flags) {

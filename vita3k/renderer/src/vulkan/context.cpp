@@ -648,6 +648,13 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
     state.frame().rendered_fences.push_back(fence);
     state.submit_serial++; // seq-248
 
+    // the vertex ring data of this submission stays untouched until its fence has signalled
+    if (fence && vertex_stream_ring_buffer.handle() && (vertex_ring_marks.empty() || vertex_ring_marks.back().end != vertex_stream_ring_buffer.position()))
+        vertex_ring_marks.push_back({ vertex_stream_ring_buffer.position(), fence, frame_timestamp });
+    for (vkutil::Buffer &old_ring : vertex_ring_retired)
+        state.frame().destroy_queue.add_buffer(old_ring);
+    vertex_ring_retired.clear();
+
     if (state.features.enable_memory_mapping) {
         // send it to the wait queue
         state.request_queue.push(FenceWaitRequest{ fence, state.submit_serial });
@@ -668,7 +675,7 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
                     const uint32_t rect_row_bytes = surface_info->post_sync_width * bpp;
                     const uint32_t rect_row_count = surface_info->post_sync_height;
                     if (rect_row_count > 0 && rect_row_bytes > 0)
-                        state.request_queue.push(BufferSyncRequest{ rect_start, (rect_row_count - 1) * row_stride_bytes + rect_row_bytes, row_stride_bytes, rect_row_bytes, rect_row_count });
+                        state.request_queue.push(BufferSyncRequest{rect_start, (rect_row_count - 1) * row_stride_bytes + rect_row_bytes, row_stride_bytes, rect_row_bytes, rect_row_count });
                 } else if (render_target->has_macroblock_sync && state.res_multiplier != 1.0f && rendered_rect_x1 > rendered_rect_x0 && rendered_rect_y1 > rendered_rect_y0) {
                     const uint32_t bpp = gxm::bits_per_pixel(surface_info->format) / 8;
                     const uint32_t row_stride_bytes = surface_info->stride_bytes;
@@ -705,6 +712,64 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
             state.request_queue.push(PostSurfaceSyncRequest{ *surface_info });
         }
     }
+}
+
+void VKContext::vertex_ring_make_room(const uint32_t size) {
+    vkutil::HostRingBuffer &ring = vertex_stream_ring_buffer;
+    if (ring.position_after(size) - vertex_ring_free <= ring.get_capacity())
+        return;
+
+    // what the scene being recorded has put in the ring cannot be waited for
+    uint64_t unsubmitted_start = 0;
+    try {
+        while (!vertex_ring_marks.empty() && state.device.getFenceStatus(vertex_ring_marks.front().fence) == vk::Result::eSuccess) {
+            vertex_ring_free = vertex_ring_marks.front().end;
+            vertex_ring_marks.pop_front();
+        }
+
+        unsubmitted_start = vertex_ring_marks.empty() ? vertex_ring_free : vertex_ring_marks.back().end;
+        if (ring.position_after(size) - unsubmitted_start <= ring.get_capacity()) {
+            while (!vertex_ring_marks.empty() && ring.position_after(size) - vertex_ring_free > ring.get_capacity()) {
+                const VertexRingMark mark = vertex_ring_marks.front();
+                if (state.device.waitForFences(mark.fence, VK_TRUE, 5'000'000'000ULL) != vk::Result::eSuccess) {
+                    // better to risk overwriting a copy than to hang the renderer
+                    LOG_ERROR("The fence of frame {} did not signal within 5 s, the scenes in flight are no longer protected in the vertex ring", mark.frame);
+                    vertex_ring_marks.clear();
+                    vertex_ring_free = unsubmitted_start;
+                    return;
+                }
+                vertex_ring_free = mark.end;
+                vertex_ring_marks.pop_front();
+            }
+            return;
+        }
+    } catch (const vk::SystemError &error) {
+        LOG_ERROR("Could not wait for the GPU to free the vertex ring: {}", error.what());
+        vertex_ring_marks.clear();
+        vertex_ring_free = ring.position();
+        return;
+    }
+
+    // the scene being recorded needs more than the whole ring so it goes on in a larger one
+    constexpr uint64_t max_capacity = 512ull * 1024 * 1024;
+    const uint64_t needed = ring.position_after(size) - unsubmitted_start;
+    const uint64_t old_capacity = ring.get_capacity();
+    uint64_t new_capacity = old_capacity;
+    while (new_capacity < 2 * needed && new_capacity < max_capacity)
+        new_capacity *= 2;
+
+    vkutil::Buffer old_ring;
+    if (new_capacity == old_capacity || !ring.grow(new_capacity, old_ring)) {
+        LOG_ERROR("The scene being recorded needs {} B of the {} B vertex ring and it could not grow to {} B, its earlier copies can be overwritten", needed, old_capacity, new_capacity);
+        vertex_ring_marks.clear();
+        vertex_ring_free = ring.position();
+        return;
+    }
+
+    vertex_ring_retired.push_back(std::move(old_ring));
+    vertex_ring_marks.clear();
+    vertex_ring_free = 0;
+    LOG_WARN("The scene being recorded needs {} B of the {} B vertex ring, it goes on in a {} B ring", needed, old_capacity, new_capacity);
 }
 
 void VKContext::check_for_macroblock_change(bool is_draw) {
@@ -781,6 +846,12 @@ void new_frame(VKContext &context) {
                 assert(false);
                 return;
             }
+        }
+
+        // the frame waited for above is done with its part of the vertex ring and its fences are about to be reset
+        while (!context.vertex_ring_marks.empty() && context.vertex_ring_marks.front().frame + MAX_FRAMES_RENDERING <= context.frame_timestamp) {
+            context.vertex_ring_free = context.vertex_ring_marks.front().end;
+            context.vertex_ring_marks.pop_front();
         }
 
         // reset the fences in both case (the wait thread does not do that as they can still be used)

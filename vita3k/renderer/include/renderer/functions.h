@@ -102,7 +102,7 @@ void set_visibility_index(State &state, Context *ctx, bool enable, uint32_t inde
 void set_context(State &state, Context *ctx, RenderTarget *target, SceGxmColorSurface *color_surface, SceGxmDepthStencilSurface *depth_stencil_surface);
 void set_vertex_stream(State &state, Context *ctx, const std::size_t index, const std::size_t data_len, const Ptr<const void> stream);
 void stream_snapshot_kick(MemState &mem, CommandList &list);
-const uint8_t *stream_snapshot_get(uint64_t handle, uint32_t size, uint64_t frame);
+const uint8_t *stream_snapshot_get(uint64_t handle, uint32_t size);
 void stream_snapshot_disable_for_program(uint32_t program_addr, uint32_t program_flags);
 void stream_snapshot_reset();
 void draw(State &state, Context *ctx, SceGxmPrimitiveType prim_type, SceGxmIndexFormat index_type, Ptr<const void> index_data, const std::uint32_t index_count, const std::uint32_t instance_count);

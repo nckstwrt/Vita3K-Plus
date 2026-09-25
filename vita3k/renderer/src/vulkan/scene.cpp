@@ -340,12 +340,12 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
     for (int i = 0; i < max_stream_idx; i++) {
         if (state.vertex_streams[i].data) {
             const bool mapped = context.state.features.enable_memory_mapping;
-            // an unaligned stride has to be repacked which means this stream cannot stay mapped
-            const bool restride = (vertex_program.streams[i].stride % 4) != 0;
+            // a stride that leaves an attribute unaligned has to be repacked which means this stream cannot stay mapped
+            const bool restride = context.state.pipeline_cache.needs_restride(vertex_program, i);
             uint32_t stream_size = state.vertex_streams[i].size;
             // by the time we bind the game may already have recycled this block so prefer the copy taken when the scene was kicked
             const uint8_t *snapshot = mapped
-                ? renderer::stream_snapshot_get(state.vertex_streams[i].snapshot, stream_size, context.frame_timestamp)
+                ? renderer::stream_snapshot_get(state.vertex_streams[i].snapshot, stream_size)
                 : nullptr;
             if (mapped && !snapshot && !restride) {
                 auto [buffer, offset] = context.state.get_matching_mapping(state.vertex_streams[i].data.cast<void>());
@@ -359,6 +359,7 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
                 if (restride)
                     restride_stream(stream, stream_size, vertex_program.streams[i].stride);
 
+                context.vertex_ring_make_room(stream_size);
                 context.vertex_stream_ring_buffer.allocate(context.prerender_cmd, stream_size, stream);
                 context.vertex_stream_offsets[i] = context.vertex_stream_ring_buffer.data_offset;
                 context.vertex_stream_buffers[i] = context.vertex_stream_ring_buffer.handle();

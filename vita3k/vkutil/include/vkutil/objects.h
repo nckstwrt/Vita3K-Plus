@@ -97,6 +97,7 @@ protected:
 
     uint32_t cursor = ~0;
     uint32_t capacity;
+    uint64_t lap_start = 0;
 
 public:
     // any buffer alignment on vulkan is at most 256 on 99% of instances
@@ -109,6 +110,15 @@ public:
 
     // Allocate new data from ring buffer
     void allocate(const uint32_t data_size);
+    // how far the ring has moved since it was created
+    uint64_t position() const {
+        return lap_start + (cursor < capacity ? cursor : capacity);
+    }
+    // what position() will be after allocate(data_size)
+    uint64_t position_after(const uint32_t data_size) const;
+    uint32_t get_capacity() const {
+        return capacity;
+    }
     // copy the content to the framebuffer
     // cmd_buffer may not be used
     virtual void copy(vk::CommandBuffer cmd_buffer, const uint32_t size, const void *data, const uint32_t offset = 0) = 0;
@@ -151,6 +161,9 @@ public:
     void create() override;
 
     void copy(vk::CommandBuffer cmd_buffer, const uint32_t size, const void *data, const uint32_t offset = 0) override;
+
+    // moves to an empty buffer of new_capacity bytes and hands the old one back (as the GPU may still be reading it)
+    bool grow(const size_t new_capacity, Buffer &old_buffer);
 };
 
 // Queue that contains GPU objects that are planned to be destroyed (deferred destruction)

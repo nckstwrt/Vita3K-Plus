@@ -202,14 +202,24 @@ RingBuffer::RingBuffer(vk::BufferUsageFlags usage, const size_t capacity)
 }
 
 void RingBuffer::allocate(const uint32_t data_size) {
-    if (cursor + data_size > capacity)
+    if (cursor + data_size > capacity) {
+        lap_start += capacity;
         cursor = 0;
+    }
 
     data_offset = cursor;
 
     cursor += data_size;
 
     cursor = align(cursor, alignment);
+}
+
+uint64_t RingBuffer::position_after(const uint32_t data_size) const {
+    if (cursor + data_size > capacity)
+        return lap_start + capacity + align(data_size, alignment);
+
+    const uint32_t end = align(cursor + data_size, alignment);
+    return lap_start + (end < capacity ? end : capacity);
 }
 
 void HostRingBuffer::create() {
@@ -226,6 +236,23 @@ void HostRingBuffer::copy(vk::CommandBuffer cmd_buffer, const uint32_t size, con
 
     if (!is_coherent)
         allocator.flushAllocation(buffer.allocation, data_offset + offset, size);
+}
+
+bool HostRingBuffer::grow(const size_t new_capacity, Buffer &old_buffer) {
+    Buffer larger(new_capacity + (buffer.size - capacity));
+    try {
+        larger.init_buffer(usage, vma_mapped_alloc);
+    } catch (const std::exception &) {
+        return false;
+    }
+
+    old_buffer = std::move(buffer);
+    buffer = std::move(larger);
+    capacity = static_cast<uint32_t>(new_capacity);
+    is_coherent = static_cast<bool>(allocator.getAllocationMemoryProperties(buffer.allocation) & vk::MemoryPropertyFlagBits::eHostCoherent);
+    cursor = 0;
+    lap_start = 0;
+    return true;
 }
 
 void LocalRingBuffer::create() {
