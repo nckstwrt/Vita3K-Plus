@@ -660,8 +660,16 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
 
             // we must sync the two buffers
             if (surface_info && surface_info->need_buffer_sync) {
-                if (render_target->has_macroblock_sync && state.res_multiplier != 1.0f
-                    && rendered_rect_x1 > rendered_rect_x0 && rendered_rect_y1 > rendered_rect_y0) {
+                if (surface_info->partial_write_back) {
+                    // only the rows of the rect the GPU copied are fresh in the mirror the rest of it may be older than guest memory
+                    const uint32_t bpp = gxm::bits_per_pixel(surface_info->format) / 8;
+                    const uint32_t row_stride_bytes = surface_info->stride_bytes;
+                    const Address rect_start = surface_info->data.address() + static_cast<uint32_t>(surface_info->post_sync_y0) * row_stride_bytes + static_cast<uint32_t>(surface_info->post_sync_x0) * bpp;
+                    const uint32_t rect_row_bytes = surface_info->post_sync_width * bpp;
+                    const uint32_t rect_row_count = surface_info->post_sync_height;
+                    if (rect_row_count > 0 && rect_row_bytes > 0)
+                        state.request_queue.push(BufferSyncRequest{ rect_start, (rect_row_count - 1) * row_stride_bytes + rect_row_bytes, row_stride_bytes, rect_row_bytes, rect_row_count });
+                } else if (render_target->has_macroblock_sync && state.res_multiplier != 1.0f && rendered_rect_x1 > rendered_rect_x0 && rendered_rect_y1 > rendered_rect_y0) {
                     const uint32_t bpp = gxm::bits_per_pixel(surface_info->format) / 8;
                     const uint32_t row_stride_bytes = surface_info->stride_bytes;
                     const int32_t nx0 = static_cast<int32_t>(rendered_rect_x0 / state.res_multiplier);
@@ -672,12 +680,7 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
                     const uint32_t rect_row_bytes = static_cast<uint32_t>(nx1 - nx0) * bpp;
                     const uint32_t rect_row_count = static_cast<uint32_t>(ny1 - ny0);
                     if (rect_row_count > 0 && rect_row_bytes > 0)
-                        state.request_queue.push(BufferSyncRequest{
-                            rect_start,
-                            (rect_row_count - 1) * row_stride_bytes + rect_row_bytes,
-                            row_stride_bytes,
-                            rect_row_bytes,
-                            rect_row_count });
+                        state.request_queue.push(BufferSyncRequest{ rect_start, (rect_row_count - 1) * row_stride_bytes + rect_row_bytes, row_stride_bytes, rect_row_bytes, rect_row_count });
                 } else {
                     state.request_queue.push(BufferSyncRequest{ surface_info->data.address(), static_cast<uint32_t>(surface_info->total_bytes) });
                 }

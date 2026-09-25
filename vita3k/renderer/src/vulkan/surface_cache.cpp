@@ -611,11 +611,19 @@ bool VKSurfaceCache::try_upload_guest_content(ColorSurfaceCacheInfo &info, MemSt
 }
 
 void VKSurfaceCache::note_scene_draw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
-    if (!last_written_surface || x1 <= x0 || y1 <= y0)
+    if (!last_written_surface)
         return;
     ColorSurfaceCacheInfo &info = *last_written_surface;
-    // scaled -> unscaled, rounded outward to the 32px tile the hardware writes back as a whole
+    info.scene_x0 = info.scene_x1 = 0;
+    info.scene_y0 = info.scene_y1 = 0;
+    if (x1 <= x0 || y1 <= y0)
+        return;
     const float inv = 1.0f / state.res_multiplier;
+    info.scene_x0 = std::clamp<int32_t>(static_cast<int32_t>(std::floor(x0 * inv)), 0, info.original_width);
+    info.scene_y0 = std::clamp<int32_t>(static_cast<int32_t>(std::floor(y0 * inv)), 0, info.original_height);
+    info.scene_x1 = std::clamp<int32_t>(static_cast<int32_t>(std::ceil(x1 * inv)), 0, info.original_width);
+    info.scene_y1 = std::clamp<int32_t>(static_cast<int32_t>(std::ceil(y1 * inv)), 0, info.original_height);
+    // scaled -> unscaled, rounded outward to the 32px tile the hardware writes back as a whole
     int32_t ux0 = static_cast<int32_t>(std::floor(x0 * inv / 32.0f)) * 32;
     int32_t uy0 = static_cast<int32_t>(std::floor(y0 * inv / 32.0f)) * 32;
     int32_t ux1 = static_cast<int32_t>(std::ceil(x1 * inv / 32.0f)) * 32;
@@ -2862,13 +2870,29 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
             rt_clamped = true;
         }
     }
+    bool partial_scene_sync = false;
     if (is_small_writeback_surface(last_written_surface->tiling, last_written_surface->original_width, last_written_surface->original_height)) {
         const ColorSurfaceCacheInfo &ws = *last_written_surface;
         const bool covers_all = ws.written_x0 <= 0 && ws.written_y0 <= 0
             && ws.written_x1 >= static_cast<int32_t>(ws.original_width)
             && ws.written_y1 >= static_cast<int32_t>(ws.original_height);
-        if (!covers_all)
-            return nullptr;
+        if (!covers_all) {
+            // a surface drawn only in part (NFS Most Wanted's exposure meter atlas, read by the CPU) gives back just what
+            // this scene drew: those pixels are fresh while the rest of our image may be older than guest memory
+            const int32_t px0 = std::max(sync_x0, ws.scene_x0);
+            const int32_t py0 = std::max(sync_y0, ws.scene_y0);
+            const int32_t px1 = std::min(sync_x0 + static_cast<int32_t>(sync_w), ws.scene_x1);
+            const int32_t py1 = std::min(sync_y0 + static_cast<int32_t>(sync_h), ws.scene_y1);
+            if (ws.tiling != SurfaceTiling::Linear || needs_copy_buffer || px1 <= px0 || py1 <= py0)
+                return nullptr;
+            sync_x0 = px0;
+            sync_y0 = py0;
+            sync_w = static_cast<uint32_t>(px1 - px0);
+            sync_h = static_cast<uint32_t>(py1 - py0);
+            clamp_sync = true;
+            rt_clamped = true;
+            partial_scene_sync = true;
+        }
     }
 
     bool skip_writeback = false;
@@ -3003,6 +3027,7 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
     last_written_surface->post_sync_y0 = sync_y0;
     last_written_surface->post_sync_width = sync_w;
     last_written_surface->post_sync_height = sync_h;
+    last_written_surface->partial_write_back = partial_scene_sync;
 
     vk::BufferImageCopy copy{
         .bufferOffset = offset,
