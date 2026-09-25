@@ -15,7 +15,8 @@ object UiLanguages {
 
     val options: List<UiLanguageOption> = listOf(
         UiLanguageOption("", "System Default"),
-        UiLanguageOption("en", "English")
+        UiLanguageOption("en", "English"),
+        UiLanguageOption("zh-Hans", "简体中文")
     )
 
     fun currentTag(context: Context): String =
