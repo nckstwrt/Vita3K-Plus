@@ -32,6 +32,7 @@
 
 namespace renderer {
 struct FragmentProgram;
+struct ProgramBinding;
 struct VertexProgram;
 } // namespace renderer
 
@@ -286,7 +287,8 @@ struct SceGxmFragmentProgram {
     // only necessary with async compilation
     std::atomic<uint32_t> compile_threads_on = 0;
     bool is_maskupdate;
-    std::unique_ptr<renderer::FragmentProgram> renderer_data;
+    std::shared_ptr<renderer::FragmentProgram> renderer_data;
+    std::shared_ptr<renderer::ProgramBinding> renderer_binding;
 };
 
 struct SceGxmNotification {
@@ -333,7 +335,8 @@ struct SceGxmVertexProgram {
     Ptr<const SceGxmProgram> program;
     std::vector<SceGxmVertexStream> streams;
     std::vector<SceGxmVertexAttribute> attributes;
-    std::unique_ptr<renderer::VertexProgram> renderer_data;
+    std::shared_ptr<renderer::VertexProgram> renderer_data;
+    std::shared_ptr<renderer::ProgramBinding> renderer_binding;
     uint64_t key_hash;
     // only necessary with async compilation
     std::atomic<uint32_t> compile_threads_on = 0;
