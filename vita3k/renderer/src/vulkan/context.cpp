@@ -29,6 +29,7 @@
 #include <util/overloaded.h>
 
 #include <algorithm>
+#include <cmath>
 
 namespace renderer::vulkan {
 
@@ -192,6 +193,13 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.draw_rect_y0 = INT32_MAX;
     context.draw_rect_x1 = 0;
     context.draw_rect_y1 = 0;
+
+    context.half_pixel_fill_cols = 0;
+    context.half_pixel_fill_rows = 0;
+    context.half_pixel_col_y0 = INT32_MAX;
+    context.half_pixel_col_y1 = 0;
+    context.half_pixel_row_x0 = INT32_MAX;
+    context.half_pixel_row_x1 = 0;
 
     context.render_target = rt;
     context.scene_timestamp++;
@@ -570,6 +578,8 @@ void VKContext::stop_render_pass() {
     render_cmd.endRenderPass();
 
     in_renderpass = false;
+
+    fill_half_pixel_strips();
 }
 
 void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNotification &notif2, bool submit) {
@@ -675,7 +685,7 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
                     const uint32_t rect_row_bytes = surface_info->post_sync_width * bpp;
                     const uint32_t rect_row_count = surface_info->post_sync_height;
                     if (rect_row_count > 0 && rect_row_bytes > 0)
-                        state.request_queue.push(BufferSyncRequest{rect_start, (rect_row_count - 1) * row_stride_bytes + rect_row_bytes, row_stride_bytes, rect_row_bytes, rect_row_count });
+                        state.request_queue.push(BufferSyncRequest{ rect_start, (rect_row_count - 1) * row_stride_bytes + rect_row_bytes, row_stride_bytes, rect_row_bytes, rect_row_count });
                 } else if (render_target->has_macroblock_sync && state.res_multiplier != 1.0f && rendered_rect_x1 > rendered_rect_x0 && rendered_rect_y1 > rendered_rect_y0) {
                     const uint32_t bpp = gxm::bits_per_pixel(surface_info->format) / 8;
                     const uint32_t row_stride_bytes = surface_info->stride_bytes;
@@ -770,6 +780,130 @@ void VKContext::vertex_ring_make_room(const uint32_t size) {
     vertex_ring_marks.clear();
     vertex_ring_free = 0;
     LOG_WARN("The scene being recorded needs {} B of the {} B vertex ring, it goes on in a {} B ring", needed, old_capacity, new_capacity);
+}
+
+static bool is_raw_word_format(const SceGxmColorBaseFormat format) {
+    return format == SCE_GXM_COLOR_BASE_FORMAT_F32 || format == SCE_GXM_COLOR_BASE_FORMAT_F32F32;
+}
+
+void VKContext::note_half_pixel_origin(const int32_t x0, const int32_t y0, const int32_t x1, const int32_t y1) {
+    const float scale = state.res_multiplier * surface_downscale;
+    if (std::abs(scale - 1.0f) < 1e-4f || !render_target || render_target->multisample_mode != SCE_GXM_MULTISAMPLE_NONE)
+        return;
+
+    const bool raw_words = is_raw_word_format(record.color_base_format);
+    const auto lines_to_fill = [&](const float edge, const int32_t scissor_start) -> uint32_t {
+        const float native_edge = edge / scale;
+        const float native_pixel = std::floor(native_edge + 1e-4f);
+        const float fraction = native_edge - native_pixel;
+        if (std::abs(fraction) < 1e-3f || native_pixel != 0.0f || fraction > 0.5f + 1e-3f || scissor_start > 0)
+            return 0;
+        const int32_t first = static_cast<int32_t>(std::floor(edge - 0.5f + 1e-4f)) + 1;
+        // up to 1.5x that line belongs to the next native pixel (fine for an image wrong for raw words)
+        if (first <= 0 || (raw_words && (static_cast<float>(first) + 0.5f) / scale >= 1.0f - 1e-4f))
+            return 0;
+        return static_cast<uint32_t>(first);
+    };
+
+    const uint32_t cols = lines_to_fill(std::min(viewport.x, viewport.x + viewport.width), scissor.offset.x);
+    const uint32_t rows = lines_to_fill(std::min(viewport.y, viewport.y + viewport.height), scissor.offset.y);
+    if (cols != 0 && static_cast<int32_t>(cols) < x1) {
+        half_pixel_fill_cols = std::max(half_pixel_fill_cols, cols);
+        half_pixel_col_y0 = std::min(half_pixel_col_y0, y0);
+        half_pixel_col_y1 = std::max(half_pixel_col_y1, y1);
+    }
+    if (rows != 0 && static_cast<int32_t>(rows) < y1) {
+        half_pixel_fill_rows = std::max(half_pixel_fill_rows, rows);
+        half_pixel_row_x0 = std::min(half_pixel_row_x0, x0);
+        half_pixel_row_x1 = std::max(half_pixel_row_x1, x1);
+    }
+}
+
+void VKContext::fill_half_pixel_strips() {
+    const uint32_t cols = half_pixel_fill_cols, rows = half_pixel_fill_rows;
+    int32_t col_y0 = half_pixel_col_y0, col_y1 = half_pixel_col_y1;
+    int32_t row_x0 = half_pixel_row_x0, row_x1 = half_pixel_row_x1;
+    half_pixel_fill_cols = 0;
+    half_pixel_fill_rows = 0;
+    half_pixel_col_y0 = INT32_MAX;
+    half_pixel_col_y1 = 0;
+    half_pixel_row_x0 = INT32_MAX;
+    half_pixel_row_x1 = 0;
+
+    vkutil::Image *const color = current_color_base_image;
+    if ((cols == 0 && rows == 0) || in_renderpass || !render_cmd || record.color_surface.data.address() == 0 || !color || !color->image)
+        return;
+
+    vkutil::Image *const raw = (current_color_raw_image && current_color_raw_image->image) ? current_color_raw_image : nullptr;
+    const std::array<vk::Image, 2> images = { color->image, raw ? raw->image : vk::Image() };
+    const uint32_t image_count = raw ? 2 : 1;
+    const int32_t width = static_cast<int32_t>(raw ? std::min(color->width, raw->width) : color->width);
+    const int32_t height = static_cast<int32_t>(raw ? std::min(color->height, raw->height) : color->height);
+
+    col_y0 = std::max(col_y0, 0);
+    col_y1 = std::min(col_y1, height);
+    const bool fill_cols = cols != 0 && static_cast<int32_t>(cols) < width && col_y1 > col_y0;
+    // the rows span the filled columns too so the corner is filled
+    row_x0 = fill_cols ? 0 : std::max(row_x0, 0);
+    row_x1 = std::min(row_x1, width);
+    const bool fill_rows = rows != 0 && static_cast<int32_t>(rows) < height && row_x1 > row_x0;
+    if (!fill_cols && !fill_rows)
+        return;
+
+    const auto barrier = [&](const vk::PipelineStageFlags src_stage, const vk::AccessFlags src_access, const vk::PipelineStageFlags dst_stage, const vk::AccessFlags dst_access) {
+        std::array<vk::ImageMemoryBarrier, 2> barriers;
+        for (uint32_t i = 0; i < image_count; i++)
+            barriers[i] = vk::ImageMemoryBarrier{
+                .srcAccessMask = src_access,
+                .dstAccessMask = dst_access,
+                .oldLayout = vk::ImageLayout::eGeneral,
+                .newLayout = vk::ImageLayout::eGeneral,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = images[i],
+                .subresourceRange = vkutil::color_subresource_range
+            };
+        render_cmd.pipelineBarrier(src_stage, dst_stage, {}, {}, {}, vk::ArrayProxy<const vk::ImageMemoryBarrier>(image_count, barriers.data()));
+    };
+    const auto copy_lines = [&](const std::vector<vk::ImageCopy> &regions) {
+        for (uint32_t i = 0; i < image_count; i++)
+            render_cmd.copyImage(images[i], vk::ImageLayout::eGeneral, images[i], vk::ImageLayout::eGeneral, regions);
+    };
+
+    barrier(vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eFragmentShader,
+        vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eShaderWrite,
+        vk::PipelineStageFlagBits::eTransfer, vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite);
+
+    std::vector<vk::ImageCopy> regions;
+    if (fill_cols) {
+        for (uint32_t c = 0; c < cols; c++)
+            regions.push_back(vk::ImageCopy{
+                .srcSubresource = vkutil::color_subresource_layer,
+                .srcOffset = { static_cast<int32_t>(cols), col_y0, 0 },
+                .dstSubresource = vkutil::color_subresource_layer,
+                .dstOffset = { static_cast<int32_t>(c), col_y0, 0 },
+                .extent = { 1, static_cast<uint32_t>(col_y1 - col_y0), 1 } });
+        copy_lines(regions);
+    }
+    if (fill_rows) {
+        if (fill_cols)
+            barrier(vk::PipelineStageFlagBits::eTransfer, vk::AccessFlagBits::eTransferWrite,
+                vk::PipelineStageFlagBits::eTransfer, vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite);
+        regions.clear();
+        for (uint32_t r = 0; r < rows; r++)
+            regions.push_back(vk::ImageCopy{
+                .srcSubresource = vkutil::color_subresource_layer,
+                .srcOffset = { row_x0, static_cast<int32_t>(rows), 0 },
+                .dstSubresource = vkutil::color_subresource_layer,
+                .dstOffset = { row_x0, static_cast<int32_t>(r), 0 },
+                .extent = { static_cast<uint32_t>(row_x1 - row_x0), 1, 1 } });
+        copy_lines(regions);
+    }
+
+    barrier(vk::PipelineStageFlagBits::eTransfer, vk::AccessFlagBits::eTransferWrite,
+        vk::PipelineStageFlagBits::eAllCommands,
+        vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite
+            | vk::AccessFlagBits::eInputAttachmentRead | vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite);
 }
 
 void VKContext::check_for_macroblock_change(bool is_draw) {

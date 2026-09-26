@@ -458,6 +458,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
             context.draw_rect_y0 = std::min(context.draw_rect_y0, y0);
             context.draw_rect_x1 = std::max(context.draw_rect_x1, x1);
             context.draw_rect_y1 = std::max(context.draw_rect_y1, y1);
+            context.note_half_pixel_origin(x0, y0, x1, y1);
         }
     }
     context.scene_has_drawn = true;

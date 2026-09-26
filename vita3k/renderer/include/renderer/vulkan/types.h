@@ -19,9 +19,9 @@
 
 #include <renderer/texture_cache.h>
 
+#include <deque>
 #include <renderer/types.h>
 #include <shader/uniform_block.h>
-#include <deque>
 #include <unordered_map>
 #include <vkutil/objects.h>
 
@@ -386,6 +386,14 @@ struct VKContext : public renderer::Context {
     int32_t draw_rect_x1 = 0;
     int32_t draw_rect_y1 = 0;
 
+    // image lines an upscaled viewport starting inside the first native pixel leaves unrasterized
+    uint32_t half_pixel_fill_cols = 0;
+    uint32_t half_pixel_fill_rows = 0;
+    int32_t half_pixel_col_y0 = INT32_MAX;
+    int32_t half_pixel_col_y1 = 0;
+    int32_t half_pixel_row_x0 = INT32_MAX;
+    int32_t half_pixel_row_x1 = 0;
+
     // used if necessary to restart easily the render pass
     vk::RenderPassBeginInfo curr_renderpass_info;
     // only useful if shader interlock is enabled, to know if we need to transition
@@ -411,6 +419,9 @@ struct VKContext : public renderer::Context {
 
     // waits for the GPU until size bytes can be copied without overwriting what a submission still reads
     void vertex_ring_make_room(uint32_t size);
+
+    void note_half_pixel_origin(int32_t x0, int32_t y0, int32_t x1, int32_t y1);
+    void fill_half_pixel_strips();
 
 private:
     void wait_thread_function(const MemState &mem);

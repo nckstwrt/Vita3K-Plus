@@ -1135,7 +1135,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             };
             if (bytes_per_pixel_requested == bytes_per_pixel_in_store) {
                 const bool full_width_read = (start_x == 0) && (width == info.width);
-                if (full_width_read && !non_integer_downsample) {
+                if ((full_width_read && !non_integer_downsample) || raw_bits_cast) {
                     casted->texture.width = width;
                     casted->texture.height = height;
                 } else {
@@ -2977,7 +2977,8 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
             .dstSubresource = vkutil::color_subresource_layer,
             .dstOffsets = std::array<vk::Offset3D, 2>{ vk::Offset3D{ dst_x0, dst_y0, 0 }, vk::Offset3D{ dst_x1, dst_y1, 1 } },
         };
-        const vk::Filter sync_filter = sync_from_raw ? vk::Filter::eNearest : vk::Filter::eLinear;
+        const bool raw_words = last_written_surface->format == SCE_GXM_COLOR_BASE_FORMAT_F32 || last_written_surface->format == SCE_GXM_COLOR_BASE_FORMAT_F32F32;
+        const vk::Filter sync_filter = (sync_from_raw || raw_words) ? vk::Filter::eNearest : vk::Filter::eLinear;
         cmd_buffer.blitImage(image_to_copy, image_layout, blit_image.image, vk::ImageLayout::eTransferDstOptimal, blit, sync_filter);
 
         blit_image.transition_to(cmd_buffer, vkutil::ImageLayout::TransferSrc);
