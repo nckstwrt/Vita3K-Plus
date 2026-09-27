@@ -39,6 +39,7 @@
 #include <SDL3/SDL_main.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <optional>
@@ -274,6 +275,24 @@ SDLMAIN_DECLSPEC int SDL_main(int argc, char *argv[]) {
         jni_env->DeleteLocalRef(activity);
     };
 
+    // SDL's own device rescan stalls after an SDL re-init (its deadline outlives SDL_Quit, its clock does not)
+    const auto poll_input_devices = []() {
+        JNIEnv *jni_env = reinterpret_cast<JNIEnv *>(SDL_GetAndroidJNIEnv());
+        jobject activity = reinterpret_cast<jobject>(SDL_GetAndroidActivity());
+        if (!jni_env || !activity)
+            return;
+
+        jclass clazz = jni_env->GetObjectClass(activity);
+        jmethodID method_id = jni_env->GetMethodID(clazz, "pollControllerDevices", "()V");
+        if (method_id)
+            jni_env->CallVoidMethod(activity, method_id);
+        if (jni_env->ExceptionCheck())
+            jni_env->ExceptionClear();
+
+        jni_env->DeleteLocalRef(clazz);
+        jni_env->DeleteLocalRef(activity);
+    };
+
     const auto sync_current_game_id = [](const std::string &game_id) {
         JNIEnv *jni_env = reinterpret_cast<JNIEnv *>(SDL_GetAndroidJNIEnv());
         jobject activity = reinterpret_cast<jobject>(SDL_GetAndroidActivity());
@@ -329,6 +348,7 @@ SDLMAIN_DECLSPEC int SDL_main(int argc, char *argv[]) {
             break;
         }
 
+        poll_input_devices();
         refresh_controllers(emuenv->ctrl, *emuenv);
 
         {
@@ -443,7 +463,14 @@ SDLMAIN_DECLSPEC int SDL_main(int argc, char *argv[]) {
         app::LaunchRuntimeMetrics runtime_metrics{};
 
         bool running = !pending_launch_request.has_value();
+        auto next_device_poll = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         while (running) {
+            const auto loop_now = std::chrono::steady_clock::now();
+            if (loop_now >= next_device_poll) {
+                next_device_poll = loop_now + std::chrono::seconds(3);
+                poll_input_devices();
+            }
+
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
                 switch (event.type) {

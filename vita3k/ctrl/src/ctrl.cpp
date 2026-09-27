@@ -26,6 +26,7 @@
 #include <util/log.h>
 
 #include <cmath>
+#include <set>
 
 static int reserve_port(CtrlState &state) {
     for (int i = 0; i < SCE_CTRL_MAX_WIRELESS_NUM; i++) {
@@ -61,69 +62,89 @@ void refresh_controllers(CtrlState &state, EmuEnvState &emuenv) {
 
             ++controller;
         } else {
+            LOG_INFO("[CTRL] '{}' disconnected from port {}", controller->second.name, controller->second.port);
             state.free_ports[controller->second.port] = true;
             controller = state.controllers.erase(controller);
             state.controllers_num--;
         }
     }
 
+    // gamepads left out are reported once each
+    static std::set<SDL_JoystickID> reported_skips;
+
     // Add new controllers
     int num_gamepads = 0;
     const auto gamepads = SDL_GetGamepads(&num_gamepads);
     for (int gamepad_index = 0; gamepad_index < num_gamepads; ++gamepad_index) {
         const auto gamepad_id = gamepads[gamepad_index];
+        const char *id_name = SDL_GetGamepadNameForID(gamepad_id);
+        const std::string_view name = id_name ? id_name : "unnamed";
         if (state.controllers_num >= SCE_CTRL_MAX_WIRELESS_NUM) {
+            if (reported_skips.insert(gamepad_id).second)
+                LOG_WARN("[CTRL] '{}' (gamepad {}) ignored, {} controllers are already connected", name, gamepad_id, state.controllers_num);
             break;
         }
 
 #ifdef __ANDROID__
         // for whatever reasons, fingerprint sensors are detected as controllers, filter them out
-        const char *controller_name = SDL_GetGamepadNameForID(gamepad_id);
-        if (controller_name != nullptr && (std::string_view(controller_name).starts_with("uinput-") || std::string_view(controller_name).starts_with("gf_")))
+        if (name.starts_with("uinput-") || name.starts_with("gf_"))
             continue;
 #endif
 
         const SDL_GUID guid = SDL_GetJoystickGUIDForID(gamepad_id);
-        if (!state.controllers.contains(guid)) {
-            Controller new_controller;
-            new_controller.port = reserve_port(state);
-            if (new_controller.port == -1) { // Port not available
-                break;
-            }
-            const GamepadPtr controller(SDL_OpenGamepad(gamepad_id), SDL_CloseGamepad);
-            if (controller == nullptr) {
-                continue;
-            }
-            auto controller_name = SDL_GetGamepadName(controller.get());
-            if (controller_name == nullptr) {
-                continue;
-            }
-            new_controller.controller = controller;
-            SDL_SetGamepadPlayerIndex(controller.get(), new_controller.port);
-            new_controller.name = controller_name;
-
-            new_controller.has_gyro = SDL_GamepadHasSensor(controller.get(), SDL_SENSOR_GYRO);
-            if (new_controller.has_gyro)
-                SDL_SetGamepadSensorEnabled(controller.get(), SDL_SENSOR_GYRO, true);
-            new_controller.has_accel = SDL_GamepadHasSensor(controller.get(), SDL_SENSOR_ACCEL);
-            if (new_controller.has_accel)
-                SDL_SetGamepadSensorEnabled(controller.get(), SDL_SENSOR_ACCEL, true);
-
-            new_controller.has_led = SDL_GetBooleanProperty(SDL_GetGamepadProperties(controller.get()), SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
-            if (new_controller.has_led) {
-                auto &color = emuenv.cfg.controller_led_color;
-                if (!color.empty()) {
-                    color.resize(3);
-                    SDL_SetGamepadLED(controller.get(), color[0], color[1], color[2]);
-                }
-            }
-
-            found_gyro |= new_controller.has_gyro;
-            found_accel |= new_controller.has_accel;
-
-            state.controllers.emplace(guid, new_controller);
-            state.controllers_num++;
+        const auto existing = state.controllers.find(guid);
+        if (existing != state.controllers.end()) {
+            const SDL_JoystickID existing_id = SDL_GetGamepadID(existing->second.controller.get());
+            if (existing_id != gamepad_id && reported_skips.insert(gamepad_id).second)
+                LOG_WARN("[CTRL] '{}' (gamepad {}) not used, it shares its GUID with connected '{}' (gamepad {})", name, gamepad_id, existing->second.name, existing_id);
+            continue;
         }
+
+        const GamepadPtr controller(SDL_OpenGamepad(gamepad_id), SDL_CloseGamepad);
+        if (controller == nullptr) {
+            LOG_WARN("[CTRL] could not open '{}' (gamepad {}): {}", name, gamepad_id, SDL_GetError());
+            continue;
+        }
+        auto controller_name = SDL_GetGamepadName(controller.get());
+        if (controller_name == nullptr) {
+            LOG_WARN("[CTRL] gamepad {} has no name, ignored", gamepad_id);
+            continue;
+        }
+
+        // reserved after the open so a failed open holds no port
+        Controller new_controller;
+        new_controller.port = reserve_port(state);
+        if (new_controller.port == -1) {
+            LOG_WARN("[CTRL] no free port for '{}' (gamepad {})", controller_name, gamepad_id);
+            break;
+        }
+        new_controller.controller = controller;
+        SDL_SetGamepadPlayerIndex(controller.get(), new_controller.port);
+        new_controller.name = controller_name;
+
+        new_controller.has_gyro = SDL_GamepadHasSensor(controller.get(), SDL_SENSOR_GYRO);
+        if (new_controller.has_gyro)
+            SDL_SetGamepadSensorEnabled(controller.get(), SDL_SENSOR_GYRO, true);
+        new_controller.has_accel = SDL_GamepadHasSensor(controller.get(), SDL_SENSOR_ACCEL);
+        if (new_controller.has_accel)
+            SDL_SetGamepadSensorEnabled(controller.get(), SDL_SENSOR_ACCEL, true);
+
+        new_controller.has_led = SDL_GetBooleanProperty(SDL_GetGamepadProperties(controller.get()), SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
+        if (new_controller.has_led) {
+            auto &color = emuenv.cfg.controller_led_color;
+            if (!color.empty()) {
+                color.resize(3);
+                SDL_SetGamepadLED(controller.get(), color[0], color[1], color[2]);
+            }
+        }
+
+        found_gyro |= new_controller.has_gyro;
+        found_accel |= new_controller.has_accel;
+
+        LOG_INFO("[CTRL] '{}' connected on port {} (gamepad {}{}{})", controller_name, new_controller.port, gamepad_id,
+            new_controller.has_gyro ? ", gyro" : "", new_controller.has_accel ? ", accelerometer" : "");
+        state.controllers.emplace(guid, new_controller);
+        state.controllers_num++;
     }
     SDL_free(gamepads);
     state.has_motion_support = found_gyro && found_accel;
@@ -256,7 +277,7 @@ static void retrieve_ctrl_data(EmuEnvState &emuenv, int port, bool is_v2, bool n
             buttons ^= ~0;
     };
 
-    if (state.overlay_input_intercepted.load(std::memory_order_relaxed) || emuenv.drop_inputs) {
+    if (state.input_intercepted() || emuenv.drop_inputs) {
         reset_axes();
         return;
     }

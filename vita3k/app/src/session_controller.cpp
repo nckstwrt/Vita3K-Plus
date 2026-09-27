@@ -26,6 +26,7 @@
 #include <interface.h>
 #include <io/state.h>
 #include <kernel/state.h>
+#include <overlay/display_manager.h>
 #include <motion/state.h>
 #include <renderer/functions.h>
 #include <util/log.h>
@@ -229,8 +230,15 @@ void AppSessionController::apply_runtime_state_locked() {
 
     emuenv.drop_inputs = paused;
 
-    const bool overlay_intercepted = paused || input_intercepted;
-    emuenv.ctrl.overlay_input_intercepted.store(overlay_intercepted, std::memory_order_relaxed);
+    const bool session_intercepted = paused || input_intercepted;
+    if (emuenv.ctrl.session_input_intercepted.exchange(session_intercepted, std::memory_order_relaxed) != session_intercepted)
+        LOG_INFO("[CTRL] game input {} by the pause menu or a pause", session_intercepted ? "blocked" : "released");
+    // a native overlay block without a running overlay input loop is stale
+    if (!session_intercepted && emuenv.ctrl.native_overlay_intercepted.load(std::memory_order_relaxed)
+        && !(emuenv.overlay_manager && emuenv.overlay_manager->input_loop_active())) {
+        emuenv.ctrl.native_overlay_intercepted.store(false, std::memory_order_relaxed);
+        LOG_WARN("[CTRL] cleared a native overlay input block that no running overlay holds");
+    }
 
     emuenv.renderer->paused.store(paused, std::memory_order_relaxed);
 }

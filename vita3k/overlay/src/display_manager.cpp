@@ -259,6 +259,7 @@ void display_manager::input_thread_loop() {
                 input_context.prologue_completed = true;
             }
 
+            m_active_input_loops.fetch_add(1, std::memory_order_relaxed);
             int32_t result;
             if (input_context.input_loop_override) {
                 result = input_context.input_loop_override();
@@ -274,6 +275,7 @@ void display_manager::input_thread_loop() {
                     return m_input_token_stack.empty();
                 });
             }
+            m_active_input_loops.fetch_sub(1, std::memory_order_relaxed);
 
             if (result == user_interface::selection_code::interrupted) {
                 assert(m_input_thread_interrupted.load());

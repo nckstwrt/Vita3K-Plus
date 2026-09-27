@@ -75,6 +75,7 @@ private:
     std::atomic<bool> m_input_thread_abort{ false };
     std::atomic<bool> m_input_thread_interrupted{ false };
     std::atomic<bool> m_paused{ false };
+    std::atomic<int> m_active_input_loops{ 0 };
     std::mutex m_input_stack_guard;
     std::condition_variable m_input_stack_cv;
 
@@ -98,6 +99,8 @@ public:
     // Pause/unpause all overlay input processing.
     void set_paused(bool paused) { m_paused.store(paused, std::memory_order_relaxed); }
     bool is_paused() const { return m_paused.load(std::memory_order_relaxed); }
+
+    bool input_loop_active() const { return m_active_input_loops.load(std::memory_order_relaxed) > 0; }
 
     // Push an interactive overlay onto the input thread for processing.
     void attach_thread_input(

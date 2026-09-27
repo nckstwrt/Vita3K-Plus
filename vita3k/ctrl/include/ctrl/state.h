@@ -75,7 +75,12 @@ struct CtrlState {
 
     VirtualKeyboardState keyboard_state;
 
-    std::atomic<bool> overlay_input_intercepted{ false };
+    // separate so neither writer can clear the other's block
+    std::atomic<bool> native_overlay_intercepted{ false };
+    std::atomic<bool> session_input_intercepted{ false };
+    bool input_intercepted() const {
+        return native_overlay_intercepted.load(std::memory_order_relaxed) || session_input_intercepted.load(std::memory_order_relaxed);
+    }
 
     struct OverlayMouseState {
         std::atomic<float> x{ 0.f };
@@ -93,7 +98,8 @@ struct CtrlState {
         input_mode_ext = SCE_CTRL_MODE_DIGITAL;
         std::fill_n(last_vcount, 5, 0);
         keyboard_state = {};
-        overlay_input_intercepted.store(false, std::memory_order_relaxed);
+        native_overlay_intercepted.store(false, std::memory_order_relaxed);
+        session_input_intercepted.store(false, std::memory_order_relaxed);
         overlay_mouse.x.store(0.f, std::memory_order_relaxed);
         overlay_mouse.y.store(0.f, std::memory_order_relaxed);
         overlay_mouse.pressed.store(false, std::memory_order_relaxed);

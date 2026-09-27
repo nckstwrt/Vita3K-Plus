@@ -661,12 +661,8 @@ void apply_renderer_config(EmuEnvState &emuenv) {
             return poll_overlay_input(emuenv);
         },
         [&emuenv](bool intercepted) {
-            auto &ctrl = emuenv.ctrl;
-            if (intercepted) {
-                ctrl.overlay_input_intercepted.store(true, std::memory_order_relaxed);
-            } else {
-                ctrl.overlay_input_intercepted.store(false, std::memory_order_relaxed);
-            }
+            if (emuenv.ctrl.native_overlay_intercepted.exchange(intercepted, std::memory_order_relaxed) != intercepted)
+                LOG_INFO("[CTRL] game input {} by a native overlay", intercepted ? "blocked" : "released");
         },
         [&emuenv]() -> overlay::overlay_touch_state {
             auto &mouse = emuenv.ctrl.overlay_mouse;
