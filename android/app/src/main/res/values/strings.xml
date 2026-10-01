@@ -611,6 +611,7 @@
     <string name="settings_emulator_texture_cache_desc">Enable the texture cache. Improves performance in games at the cost of additional VRAM usage.</string>
     <string name="settings_emulator_ui_language">Interface Language</string>
     <string name="settings_emulator_ui_language_desc">Select the interface language used by the Android frontend.\nUse System Default to follow the operating system language.</string>
+    <string name="settings_ui_language_system_default">System Default</string>
     <string name="settings_emulator_storage_folder">Emulated System Storage Folder</string>
     <string name="settings_emulator_storage_folder_desc">Change the location of the emulated system storage folder.\nIf you move to a different folder, move your existing data there manually.</string>
     <string name="settings_emulator_share_log">Share vita3k.log</string>
