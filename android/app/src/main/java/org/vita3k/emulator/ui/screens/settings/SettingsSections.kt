@@ -12,16 +12,23 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.provider.DocumentsContract
+import android.widget.Toast
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -31,10 +38,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import org.vita3k.emulator.NativeLib
 import org.vita3k.emulator.R
 import org.vita3k.emulator.ConnectedGamepad
+import androidx.compose.ui.platform.LocalContext
 import org.vita3k.emulator.data.CustomDriverLoadStatus
 import org.vita3k.emulator.data.EmulatorConfig
+import org.vita3k.emulator.data.VitaDocumentsProvider
 import org.vita3k.emulator.data.FirmwareLinks
 import org.vita3k.emulator.data.UiLanguages
 import org.vita3k.emulator.overlay.OverlayConfig
@@ -539,6 +549,16 @@ private fun GpuSettingsSection(
                     ),
                     onShowHelp = onShowHelp
                 )
+                SettingsToggleRow(
+                    title = stringResource(R.string.settings_gpu_accurate_scheduling),
+                    checked = cfg.accurateThreadScheduling,
+                    onCheckedChange = { onUpdate { accurateThreadScheduling = it } },
+                    help = SettingsHelpEntry(
+                        title = stringResource(R.string.settings_gpu_accurate_scheduling),
+                        body = stringResource(R.string.settings_gpu_accurate_scheduling_desc)
+                    ),
+                    onShowHelp = onShowHelp
+                )
                 val hasSupportedMemoryMapping = supportedMemoryMappingMask > 1
                 val memoryMappingTitle = stringResource(R.string.settings_gpu_memory_mapping)
                 val memoryMappingHelp = helpEntry(memoryMappingTitle, stringResource(R.string.settings_gpu_memory_mapping_desc))
@@ -753,6 +773,63 @@ private fun GpuSettingsSection(
                 ),
                 onShowHelp = onShowHelp
             )
+            if (!isPerApp) {
+                // Clears every title's cache, like the desktop button. A single title can be
+                // cleared from its own entry in the app list (AppAction.DELETE_SHADER_CACHE).
+                var confirmClearShaderCache by remember { mutableStateOf(false) }
+                var clearShaderCacheResult by remember { mutableStateOf<Boolean?>(null) }
+                val clearTitle = stringResource(R.string.settings_gpu_clear_shader_cache)
+                SettingsActionRow(
+                    title = clearTitle,
+                    value = stringResource(R.string.settings_gpu_clear_shader_cache_summary),
+                    onClick = { confirmClearShaderCache = true },
+                    actionLabel = stringResource(R.string.settings_gpu_clear_shader_cache_action),
+                    onActionClick = { confirmClearShaderCache = true },
+                    help = SettingsHelpEntry(
+                        title = clearTitle,
+                        body = stringResource(R.string.settings_gpu_clear_shader_cache_desc),
+                        scope = SettingsScope.Global
+                    ),
+                    onShowHelp = onShowHelp
+                )
+                if (confirmClearShaderCache) {
+                    AlertDialog(
+                        onDismissRequest = { confirmClearShaderCache = false },
+                        title = { Text(clearTitle) },
+                        text = { Text(stringResource(R.string.settings_gpu_clear_shader_cache_confirm)) },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                confirmClearShaderCache = false
+                                clearShaderCacheResult = NativeLib.clearShaderCache()
+                            }) { Text(stringResource(R.string.settings_gpu_clear_shader_cache_action)) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { confirmClearShaderCache = false }) {
+                                Text(stringResource(R.string.action_cancel))
+                            }
+                        }
+                    )
+                }
+                clearShaderCacheResult?.let { cleared ->
+                    AlertDialog(
+                        onDismissRequest = { clearShaderCacheResult = null },
+                        title = { Text(clearTitle) },
+                        text = {
+                            Text(
+                                stringResource(
+                                    if (cleared) R.string.settings_gpu_clear_shader_cache_done
+                                    else R.string.settings_gpu_clear_shader_cache_empty
+                                )
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = { clearShaderCacheResult = null }) {
+                                Text(stringResource(R.string.action_ok))
+                            }
+                        }
+                    )
+                }
+            }
             if (isVulkan) {
                 SettingsToggleRow(
                     title = stringResource(R.string.settings_gpu_spirv_shader),
@@ -1544,6 +1621,41 @@ private fun EmulatorSettingsSection(
                 help = SettingsHelpEntry(
                     title = storageTitle,
                     body = stringResource(R.string.settings_emulator_storage_folder_desc),
+                    scope = SettingsScope.Global
+                ),
+                onShowHelp = onShowHelp
+            )
+            val browseContext = LocalContext.current
+            val browseTitle = stringResource(R.string.settings_emulator_browse_files)
+            val browseUnavailable = stringResource(R.string.settings_emulator_browse_files_unavailable)
+            SettingsActionRow(
+                title = browseTitle,
+                value = stringResource(R.string.settings_emulator_browse_files_value),
+                onClick = {
+                    val authority = VitaDocumentsProvider.authority(browseContext)
+                    val candidates = listOf(
+                        Intent(Intent.ACTION_VIEW)
+                            .setDataAndType(
+                                DocumentsContract.buildRootUri(authority, VitaDocumentsProvider.ROOT_ID),
+                                DocumentsContract.Root.MIME_TYPE_ITEM
+                            )
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                        Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                            .putExtra(
+                                DocumentsContract.EXTRA_INITIAL_URI,
+                                DocumentsContract.buildDocumentUri(authority, VitaDocumentsProvider.DOC_ROOT)
+                            )
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                    val launched = candidates.any { intent ->
+                        runCatching { browseContext.startActivity(intent) }.isSuccess
+                    }
+                    if (!launched)
+                        Toast.makeText(browseContext, browseUnavailable, Toast.LENGTH_LONG).show()
+                },
+                help = SettingsHelpEntry(
+                    title = browseTitle,
+                    body = stringResource(R.string.settings_emulator_browse_files_desc),
                     scope = SettingsScope.Global
                 ),
                 onShowHelp = onShowHelp

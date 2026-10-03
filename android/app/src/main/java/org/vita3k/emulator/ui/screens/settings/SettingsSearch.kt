@@ -63,6 +63,7 @@ internal fun rememberSettingsSearchEntries(
             add(entry(SettingsCategory.Gpu, R.string.settings_gpu_disable_surface_sync, R.string.settings_gpu_disable_surface_sync_desc))
         }
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_async_pipeline, R.string.settings_gpu_async_pipeline_desc))
+        add(entry(SettingsCategory.Gpu, R.string.settings_gpu_accurate_scheduling, R.string.settings_gpu_accurate_scheduling_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_screen_filter, R.string.settings_gpu_screen_filter_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_resolution, R.string.settings_gpu_resolution_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_anisotropic, R.string.settings_gpu_anisotropic_desc))
@@ -70,6 +71,7 @@ internal fun rememberSettingsSearchEntries(
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_texture_format, R.string.settings_gpu_texture_format_desc, keywords = "png dds export textures"))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_import_textures, R.string.settings_gpu_import_textures_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_shader_cache, R.string.settings_gpu_shader_cache_desc))
+        add(entry(SettingsCategory.Gpu, R.string.settings_gpu_clear_shader_cache, R.string.settings_gpu_clear_shader_cache_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_spirv_shader, R.string.settings_gpu_spirv_shader_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_fps_hack, R.string.settings_gpu_fps_hack_desc, keywords = "fps framerate 30 60 game hack"))
         if (!isPerApp && showTurboModeOption) {

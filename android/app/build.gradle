@@ -19,14 +19,16 @@ android {
 	}
 
 	defaultConfig {
-		applicationId = "org.vita3k.emulator"
+		// namespace stays org.vita3k.emulator: it is the Java package the JNI symbols are bound to
+		applicationId = "org.vita3kplus.emulator"
 		minSdk = 28
 		targetSdk = 35
-		versionCode = 21
-		versionName = "0.2.1"
+		versionCode = 110
+		versionName = "1.1"
 
 		ndk {
-			abiFilters "arm64-v8a", "x86_64"
+			// x86_64 is emulator-only and broken here: vcpkg OpenSSL cannot assemble its x86 SM3/SM4 code with the NDK.
+			abiFilters "arm64-v8a"
 		}
 	}
 

@@ -11,7 +11,7 @@
 			</rect>
 		</property>
 		<property name="windowTitle">
-			<string>About Vita3K</string>
+			<string>About Vita3K+</string>
 		</property>
 		<layout class="QVBoxLayout" name="main_layout" stretch="0,1,0">
 			<property name="spacing">
@@ -111,7 +111,7 @@
 											</font>
 										</property>
 										<property name="text">
-											<string>Vita3K PlayStation Vita Emulator</string>
+											<string>Vita3K+ PlayStation Vita Emulator</string>
 										</property>
 										<property name="alignment">
 											<set>Qt::AlignmentFlag::AlignLeading|Qt::AlignmentFlag::AlignLeft|Qt::AlignmentFlag::AlignTop</set>

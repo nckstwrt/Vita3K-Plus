@@ -20,6 +20,7 @@
 #include <renderer/commands.h>
 #include <renderer/types.h>
 
+#include <functional>
 #include <string>
 
 struct MemState;
@@ -40,8 +41,10 @@ struct YUVConversionCache;
 bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProgram &program, const SceGxmBlendInfo *blend, GXPPtrMap &gxp_ptr_map);
 bool create(std::unique_ptr<VertexProgram> &vp, State &state, const SceGxmProgram &program, GXPPtrMap &gxp_ptr_map, const std::vector<SceGxmVertexAttribute> &attributes);
 void create(SceGxmSyncObject *sync, State &state);
-void destroy(SceGxmSyncObject *sync, State &state);
+void destroy(SceGxmSyncObject *sync, State &state, std::function<void()> dealloc = nullptr);
 void finish(State &state, Context *context);
+
+bool has_dormant_mappings();
 
 enum class SyncWaitResult {
     Ready,
@@ -80,7 +83,7 @@ void set_point_line_width(State &state, Context *ctx, bool is_front, unsigned in
 void set_polygon_mode(State &state, Context *ctx, bool is_front, SceGxmPolygonMode mode);
 void set_stencil_func(State &state, Context *ctx, bool is_front, SceGxmStencilFunc func, SceGxmStencilOp stencilFail, SceGxmStencilOp depthFail, SceGxmStencilOp depthPass, unsigned char compareMask, unsigned char writeMask);
 void set_stencil_ref(State &state, Context *ctx, bool is_front, unsigned char sref);
-void set_program(State &state, Context *ctx, Ptr<const void> program, const bool is_fragment);
+void set_program(State &state, Context *ctx, Ptr<const void> program, const std::shared_ptr<ProgramBinding> &binding, bool is_fragment);
 void set_cull_mode(State &state, Context *ctx, SceGxmCullMode cull);
 void set_texture(State &state, Context *ctx, const std::uint32_t tex_index, const SceGxmTexture tex);
 void set_viewport_real(State &state, Context *ctx, float xOffset, float yOffset, float zOffset, float xScale, float yScale, float zScale);

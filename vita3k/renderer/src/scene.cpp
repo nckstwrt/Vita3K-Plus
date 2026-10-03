@@ -49,6 +49,16 @@ void destroy_command_payload(Command &cmd) {
         break;
     }
 
+    case CommandOpcode::SetState: {
+        CommandHelper helper(&cmd);
+        const GXMState state = helper.pop<GXMState>();
+        if (state == GXMState::Program) {
+            helper.pop<Ptr<void>>();
+            delete helper.pop<std::shared_ptr<ProgramBinding> *>();
+        }
+        break;
+    }
+
     default:
         break;
     }
