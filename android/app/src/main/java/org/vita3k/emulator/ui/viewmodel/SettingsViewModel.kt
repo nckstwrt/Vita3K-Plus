@@ -21,6 +21,7 @@ import org.vita3k.emulator.data.RestartRequiredSetting
 import org.vita3k.emulator.data.SettingsRepository
 import org.vita3k.emulator.data.SettingsSnapshot
 import org.vita3k.emulator.data.UiLanguages
+import org.vita3k.emulator.data.VitaDocumentsProvider
 
 data class SettingsOperationResult(
     val message: String,
@@ -210,6 +211,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 }
                 applySnapshot(titleId, routeKey, snapshot)
                 onStorageChanged()
+                VitaDocumentsProvider.notifyRootsChanged(getApplication())
                 operationResult = SettingsOperationResult(
                     str(R.string.settings_emulator_storage_folder_change_success, storagePath),
                     false

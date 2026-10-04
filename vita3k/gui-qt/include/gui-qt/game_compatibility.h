@@ -29,7 +29,7 @@
 class GameCompatibility : public QObject {
     Q_OBJECT
 public:
-    explicit GameCompatibility(CompatState &state, std::filesystem::path cache_path, QObject *parent = nullptr);
+    explicit GameCompatibility(CompatState &state, std::filesystem::path cache_path, bool allow_online_update, QObject *parent = nullptr);
 
 Q_SIGNALS:
     void db_loaded(int app_count);
