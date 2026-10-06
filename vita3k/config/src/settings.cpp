@@ -58,6 +58,12 @@ void copy_global_to_current(Config::CurrentConfig &current, const Config &cfg) {
     current.audio_volume = cfg.audio_volume;
     current.ngs_enable = cfg.ngs_enable;
     current.pstv_mode = cfg.pstv_mode;
+    current.trigger_tilt_motion = cfg.trigger_tilt_motion;
+    current.trigger_tilt_max_angle_degrees = cfg.trigger_tilt_max_angle_degrees;
+    current.trigger_tilt_sensitivity = cfg.trigger_tilt_sensitivity;
+    current.trigger_tilt_deadzone = cfg.trigger_tilt_deadzone;
+    current.trigger_tilt_smoothing = cfg.trigger_tilt_smoothing;
+    current.trigger_tilt_invert = cfg.trigger_tilt_invert;
     current.stretch_the_display_area = cfg.stretch_the_display_area;
     current.fullscreen_hd_res_pixel_perfect = cfg.fullscreen_hd_res_pixel_perfect;
     current.file_loading_delay = cfg.file_loading_delay;
@@ -103,6 +109,12 @@ void copy_current_to_global(Config &cfg, const Config::CurrentConfig &current) {
     cfg.audio_volume = current.audio_volume;
     cfg.ngs_enable = current.ngs_enable;
     cfg.pstv_mode = current.pstv_mode;
+    cfg.trigger_tilt_motion = current.trigger_tilt_motion;
+    cfg.trigger_tilt_max_angle_degrees = current.trigger_tilt_max_angle_degrees;
+    cfg.trigger_tilt_sensitivity = current.trigger_tilt_sensitivity;
+    cfg.trigger_tilt_deadzone = current.trigger_tilt_deadzone;
+    cfg.trigger_tilt_smoothing = current.trigger_tilt_smoothing;
+    cfg.trigger_tilt_invert = current.trigger_tilt_invert;
     cfg.stretch_the_display_area = current.stretch_the_display_area;
     cfg.fullscreen_hd_res_pixel_perfect = current.fullscreen_hd_res_pixel_perfect;
     cfg.file_loading_delay = current.file_loading_delay;
@@ -213,6 +225,12 @@ bool load_custom_config(Config::CurrentConfig &out, const fs::path &config_path,
     if (!config_child.child("system").empty()) {
         const auto sys = config_child.child("system");
         out.pstv_mode = sys.attribute("pstv-mode").as_bool();
+        out.trigger_tilt_motion = sys.attribute("trigger-tilt-motion").as_bool(out.trigger_tilt_motion);
+        out.trigger_tilt_max_angle_degrees = sys.attribute("trigger-tilt-max-angle-degrees").as_float(out.trigger_tilt_max_angle_degrees);
+        out.trigger_tilt_sensitivity = sys.attribute("trigger-tilt-sensitivity").as_float(out.trigger_tilt_sensitivity);
+        out.trigger_tilt_deadzone = sys.attribute("trigger-tilt-deadzone").as_float(out.trigger_tilt_deadzone);
+        out.trigger_tilt_smoothing = sys.attribute("trigger-tilt-smoothing").as_float(out.trigger_tilt_smoothing);
+        out.trigger_tilt_invert = sys.attribute("trigger-tilt-invert").as_bool(out.trigger_tilt_invert);
         out.sys_button = sys.attribute("sys-button").as_int(static_cast<int>(SCE_SYSTEM_PARAM_ENTER_BUTTON_CROSS));
         out.sys_lang = sys.attribute("sys-lang").as_int(static_cast<int>(SCE_SYSTEM_PARAM_LANG_ENGLISH_US));
         out.sys_date_format = sys.attribute("sys-date-format").as_int(static_cast<int>(SCE_SYSTEM_PARAM_DATE_FORMAT_MMDDYYYY));
@@ -297,6 +315,12 @@ bool save_custom_config(const Config::CurrentConfig &cc, const fs::path &config_
 
     auto system_child = config_child.append_child("system");
     system_child.append_attribute("pstv-mode") = cc.pstv_mode;
+    system_child.append_attribute("trigger-tilt-motion") = cc.trigger_tilt_motion;
+    system_child.append_attribute("trigger-tilt-max-angle-degrees") = cc.trigger_tilt_max_angle_degrees;
+    system_child.append_attribute("trigger-tilt-sensitivity") = cc.trigger_tilt_sensitivity;
+    system_child.append_attribute("trigger-tilt-deadzone") = cc.trigger_tilt_deadzone;
+    system_child.append_attribute("trigger-tilt-smoothing") = cc.trigger_tilt_smoothing;
+    system_child.append_attribute("trigger-tilt-invert") = cc.trigger_tilt_invert;
     system_child.append_attribute("sys-button") = cc.sys_button;
     system_child.append_attribute("sys-lang") = cc.sys_lang;
     system_child.append_attribute("sys-date-format") = cc.sys_date_format;

@@ -66,6 +66,14 @@ struct Config {
         int audio_volume = 100;
         bool ngs_enable = true;
         bool pstv_mode = false;
+        // Virtual roll driven by the configured SDL left/right trigger axes.
+        // These values can be overridden by an app-specific custom config file.
+        bool trigger_tilt_motion = false;
+        float trigger_tilt_max_angle_degrees = 25.0f;
+        float trigger_tilt_sensitivity = 1.0f;
+        float trigger_tilt_deadzone = 0.05f;
+        float trigger_tilt_smoothing = 10.0f;
+        bool trigger_tilt_invert = false;
         std::string backend_renderer = "Vulkan";
         int gpu_idx = 0;
 #ifdef __ANDROID__
