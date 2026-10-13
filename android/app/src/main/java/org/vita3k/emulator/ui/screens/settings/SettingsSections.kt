@@ -1475,13 +1475,17 @@ private fun InterfaceSettingsSection(
     ) {
         SettingsSubsectionTitle(title = stringResource(R.string.settings_interface_ui_options))
         val uiLanguageTitle = stringResource(R.string.settings_emulator_ui_language)
+        val systemDefaultLabel = stringResource(R.string.settings_ui_language_system_default)
         val uiLanguageOptions = UiLanguages.options
+        val uiLanguageLabels = uiLanguageOptions.map { option ->
+            if (option.tag.isEmpty()) systemDefaultLabel else option.label
+        }
         val uiLanguageIndex = uiLanguageOptions.indexOfFirst { it.tag == cfg.userLang }.let { index ->
             if (index >= 0) index else 0
         }
         SettingsScrollableChoiceField(
             title = uiLanguageTitle,
-            options = uiLanguageOptions.map { it.label },
+            options = uiLanguageLabels,
             selectedIndex = uiLanguageIndex,
             onSelect = { index -> onUpdate { userLang = uiLanguageOptions[index].tag } },
             help = SettingsHelpEntry(
