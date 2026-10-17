@@ -26,11 +26,14 @@
 #include <renderer/vulkan/surface_cache.h>
 #include <renderer/vulkan/types.h>
 
-#include <chrono>
+#include <mutex>
+#include <unordered_map>
 
 struct Config;
 
 namespace renderer::vulkan {
+
+inline constexpr bool enable_depth_clamp = true; // Warning: also disables near clipping (Vulkan couples them)
 
 enum class LinuxSurfaceType {
     Unknown,
@@ -100,6 +103,31 @@ struct VKState : public renderer::State {
 
     // only used when memory mapping is enabled
     std::map<Address, MappedMemory, std::greater<Address>> mapped_memories;
+
+#ifdef __ANDROID__
+    struct CachedNativeBuffer {
+        MappedMemory mapping;
+        void *mapped_location;
+    };
+    std::unordered_map<uint64_t, CachedNativeBuffer> native_buffer_cache;
+    uint64_t native_buffer_cache_bytes = 0;
+    void release_cached_native_buffer(CachedNativeBuffer &cached);
+    void trim_native_buffer_cache(uint64_t budget);
+#endif
+    struct DormantMapping {
+        MappedMemory mapping;
+        uint64_t stamp; // monotonically increasing; lowest = least recently made dormant (LRU eviction)
+    };
+    std::map<Address, DormantMapping> dormant_mappings;
+    uint64_t dormant_bytes = 0;
+    uint64_t dormant_stamp = 0;
+    bool dormant_trim_requested = false;
+    bool make_dormant(Address address);
+    bool promote_dormant(Address address, uint32_t size);
+    void teardown_dormant(MemState &mem, Address address);
+    Address oldest_dormant() const;
+    std::vector<Address> dormant_overlapping(Address start, Address end) const;
+
     // used with double buffer memory trapping
     BufferTrapping buffer_trapping;
     // modify the behavior of trapping on vertex buffers if there are shader stores
@@ -109,12 +137,15 @@ struct VKState : public renderer::State {
     Queue<WaitThreadRequest> request_queue;
 
     vkutil::Image default_image;
+    vkutil::Image default_raw_image;
     vkutil::Buffer default_buffer;
 
     bool support_fsr = false;
     // support for the VK_KHR_uniform_buffer_standard_layout extension, needed for memory mapping and texture viewport
     bool support_standard_layout = false;
     bool support_rasterized_order_access = false;
+    // bound guest write-backs to the render-target extent the surface was rendered with
+    bool surface_sync_clamp_rt = true;
     LinuxSurfaceType linux_surface_type = LinuxSurfaceType::Unknown;
 
 #ifdef __ANDROID__
@@ -146,6 +177,7 @@ struct VKState : public renderer::State {
     void set_async_compilation(bool enable) override;
 
     bool map_memory(MemState &mem, Ptr<void> address, uint32_t size) override;
+    bool map_memory_page_table_fallback(MemState &mem, Ptr<void> address, uint32_t size);
     void unmap_memory(MemState &mem, Ptr<void> address) override;
     // return the matching buffer and offset for the memory location
     std::tuple<vk::Buffer, uint32_t> get_matching_mapping(const Ptr<void> address);
@@ -160,6 +192,11 @@ struct VKState : public renderer::State {
 
     void precompile_shader(const ShadersHash &hash) override;
     void preclose_action() override;
+    void wait_gpu_idle() override;
+    uint32_t diag_pipelines_created() const override { return pipeline_cache.pipelines_created.load(std::memory_order_relaxed); }
+
+    // dumps the resolved device/driver/feature configuration to the log, once, from late_init
+    void log_gpu_configuration(const Config &cfg);
 
     inline FrameObject &frame() {
         return frames[current_frame_idx];

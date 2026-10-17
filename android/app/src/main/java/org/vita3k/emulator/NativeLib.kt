@@ -18,6 +18,8 @@ object NativeLib {
 
     // --- Initialization ---
     external fun prepareFrontend(): Boolean
+    external fun onTrimMemory(level: Int)
+    external fun logDiagnostics(text: String)
     external fun init(storagePath: String): Boolean
     external fun isInitialized(): Boolean
     external fun isOfficialBuild(): Boolean
@@ -35,6 +37,11 @@ object NativeLib {
     external fun performAppAction(titleId: String, actionBit: Int): Boolean
     /** Returns a bitmask of available actions for the given title (AppActionMask bits). */
     external fun getAppActionAvailabilityMask(titleId: String): Int
+    /**
+     * Clears the shader cache for every title. Returns false when there was nothing to
+     * delete. The per-title equivalent is AppAction.DELETE_SHADER_CACHE.
+     */
+    external fun clearShaderCache(): Boolean
 
     // --- Firmware / Info ---
     external fun getAppVersion(): String

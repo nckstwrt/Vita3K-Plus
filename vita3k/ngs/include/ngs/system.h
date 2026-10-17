@@ -235,6 +235,7 @@ public:
     virtual std::unique_ptr<ModuleRuntimeState> create_runtime_state() const { return nullptr; }
     virtual void on_state_change(const MemState &mem, ModuleData &v, const VoiceState previous) {}
     virtual void on_param_change(const MemState &mem, ModuleData &data) {}
+    virtual void on_key_on(const MemState &mem, ModuleData &data) {}
     virtual void cleanup_voice_state(ModuleData &data) {}
 
     virtual void initialize_voice_data(ModuleData &data) const {
@@ -262,6 +263,9 @@ struct VoiceProduct {
     uint8_t reserved[2];
     uint8_t *data;
 };
+
+inline constexpr bool size_inputs_by_input_mixer_count = true;
+inline constexpr uint32_t input_mixer_module_id = 0x5CE0;
 
 struct VoiceInputManager {
     using PCMInput = std::vector<uint8_t>;
@@ -294,6 +298,8 @@ struct Voice {
 
     std::unique_ptr<std::mutex> voice_mutex;
     VoiceProduct products[MAX_VOICE_OUTPUT];
+
+    float implicit_volume_matrix[2][2] = { { 1.0f, 0.0f }, { 0.0f, 1.0f } };
 
     Ptr<void> finished_callback;
     Ptr<void> finished_callback_user_data;
@@ -345,8 +351,11 @@ struct System : public MempoolObject {
     static uint32_t get_required_memspace_size(SceNgsSystemInitParams *parameters);
 };
 
-bool deliver_data(const MemState &mem, const std::vector<Voice *> &voice_queue, Voice *source, const uint8_t output_port,
-    const VoiceProduct &data_to_deliver);
+bool deliver_data(const MemState &mem, const std::vector<Voice *> &voice_queue, Voice *source, const uint8_t output_port, const VoiceProduct &data_to_deliver);
+bool deliver_data_to_master(const MemState &mem, Voice *master, Voice *source, const VoiceProduct &data_to_deliver);
+
+inline constexpr bool default_patch_volume_is_unity = true;
+inline constexpr bool use_implicit_master_routing = true;
 
 bool init_system(State &ngs, const MemState &mem, SceNgsSystemInitParams *parameters, Ptr<void> memspace, const uint32_t memspace_size);
 void release_system(State &ngs, const MemState &mem, System *system);
