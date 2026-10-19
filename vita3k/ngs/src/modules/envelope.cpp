@@ -24,7 +24,7 @@
 
 namespace ngs {
 
-// Multi-point amplitude automation: games drive music crossfades and dialogue ducking through it.
+// Multi-point amplitude automation
 
 static float point_amplitude(const SceNgsEnvelopeParams *params, const int32_t index) {
     const int32_t count = static_cast<int32_t>(std::min<uint32_t>(params->uNumPoints, SCE_NGS_ENVELOPE_MAX_POINTS));
@@ -35,19 +35,23 @@ static float point_amplitude(const SceNgsEnvelopeParams *params, const int32_t i
     return std::isfinite(amp) ? std::clamp(amp, 0.0f, 16.0f) : 1.0f;
 }
 
-void EnvelopeModule::on_param_change(const MemState &mem, ModuleData &data) {
-    // a rewritten point set (re)starts the envelope - this is how fades are triggered
-    EnvelopeLogicalState *logical = data.get_logical_state<EnvelopeLogicalState>();
+static void restart_envelope(EnvelopeLogicalState *logical) {
     logical->position_in_segment_ms = 0.0;
     logical->total_position_ms = 0.0;
     logical->current_point = 0;
     logical->releasing = false;
 }
 
+void EnvelopeModule::on_param_change(const MemState &mem, ModuleData &data) {
+    if (envelope_write_keeps_position)
+        return;
+    EnvelopeLogicalState *logical = data.get_logical_state<EnvelopeLogicalState>();
+    if (!logical->releasing && data.parent->state != VOICE_STATE_FINALIZING)
+        restart_envelope(logical);
+}
+
 void EnvelopeModule::on_key_on(const MemState &mem, ModuleData &data) {
-    // KZ re-keys pooled gun voices via VoicePlay with NO param rewrite: hardware restarts the envelope
-    // on key-on, ours resumed at completed-zero and every later shot was multiplied to silence.
-    on_param_change(mem, data);
+    restart_envelope(data.get_logical_state<EnvelopeLogicalState>());
 }
 
 bool EnvelopeModule::can_release(const MemState &mem, ModuleData &data) {
@@ -130,14 +134,13 @@ bool EnvelopeModule::process(KernelState &kern, const MemState &mem, const SceUI
     } else {
         logical->position_in_segment_ms += tick_ms;
         logical->total_position_ms += tick_ms;
-        // consume completed segments (0-length segments advance instantly)
+        // consume completed segments (0 length segments advance instantly)
         while (logical->current_point < point_count - 1) {
             const double seg_ms = std::max<double>(params->envelopePoints[logical->current_point].uMsecsToNextPoint, 0.0);
             if (logical->position_in_segment_ms < seg_ms)
                 break;
             logical->position_in_segment_ms -= seg_ms;
             logical->current_point++;
-            // loop while held: after passing nLoopEnd, wrap back to uLoopStart
             const int32_t loop_end = params->nLoopEnd;
             const int32_t loop_start = static_cast<int32_t>(params->uLoopStart);
             if (loop_end >= 0 && loop_end < point_count && loop_start <= loop_end
