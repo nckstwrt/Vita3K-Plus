@@ -184,6 +184,12 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(int, "performance-overlay-position", static_cast<int>(TOP_LEFT), performance_overlay_position) \
     code(int, "screenshot-format", static_cast<int>(JPEG), screenshot_format)                           \
     code(bool, "disable-motion", false, disable_motion)                                                 \
+    code(bool, "trigger-tilt-motion", false, trigger_tilt_motion)                                     \
+    code(float, "trigger-tilt-max-angle-degrees", 25.0f, trigger_tilt_max_angle_degrees)               \
+    code(float, "trigger-tilt-sensitivity", 1.0f, trigger_tilt_sensitivity)                            \
+    code(float, "trigger-tilt-deadzone", 0.05f, trigger_tilt_deadzone)                                 \
+    code(float, "trigger-tilt-smoothing", 10.0f, trigger_tilt_smoothing)                               \
+    code(bool, "trigger-tilt-invert", false, trigger_tilt_invert)                                      \
     code(float, "controller-analog-multiplier", 1.0f, controller_analog_multiplier)                     \
     CONFIG_KEYBOARD(code)                                                                               \
     code(std::string, "user-id", std::string{}, user_id)                                                \

@@ -19,11 +19,14 @@
 #include <motion/functions.h>
 #include <motion/state.h>
 
+#include <config/state.h>
 #include <ctrl/state.h>
 
 #include <util/log.h>
 
 #include <SDL3/SDL_gamepad.h>
+#include <algorithm>
+#include <cmath>
 #include <numbers>
 
 void set_display_rotation(MotionState &state, int rotation) {
@@ -139,6 +142,14 @@ void MotionState::reset_runtime() {
     last_accel_timestamp = 0;
     last_updated_gyro_timestamp = 0;
     last_updated_accel_timestamp = 0;
+    last_virtual_tilt_timestamp = 0;
+    last_virtual_tilt_log_timestamp = 0;
+    virtual_tilt_roll_radians = 0.0f;
+    virtual_tilt_velocity_radians = 0.0f;
+    virtual_tilt_left_trigger = 0.0f;
+    virtual_tilt_right_trigger = 0.0f;
+    virtual_tilt_target_radians = 0.0f;
+    has_virtual_tilt_motion_support = false;
 }
 
 SceFVector3 get_acceleration(const MotionState &state) {
@@ -151,6 +162,9 @@ SceFVector3 get_acceleration(const MotionState &state) {
 }
 
 SceFVector3 get_gyroscope(const MotionState &state) {
+    if (state.has_virtual_tilt_motion_support)
+        return { 0.0f, state.virtual_tilt_velocity_radians, 0.0f };
+
     Util::Vec3f gyroscope = state.motion_data.GetGyroscope() * 2.f * std::numbers::pi_v<float>;
     return {
         gyroscope.x,
@@ -264,19 +278,99 @@ void handle_motion_event(EmuEnvState &emuenv, int32_t sensor_type, const SDL_Gam
     handle_motion_event<SDL_GamepadSensorEvent>(emuenv, sensor_type, sensor);
 }
 
-void refresh_motion(MotionState &state, CtrlState &ctrl_state) {
+static float trigger_axis_to_unit(const Sint16 axis) {
+    return std::clamp(static_cast<float>(axis) / 32767.0f, 0.0f, 1.0f);
+}
+
+static float apply_trigger_deadzone(float tilt, const float deadzone) {
+    const float magnitude = std::abs(tilt);
+    if (magnitude <= deadzone)
+        return 0.0f;
+
+    return std::copysign((magnitude - deadzone) / (1.0f - deadzone), tilt);
+}
+
+static void update_virtual_trigger_tilt(MotionState &state, CtrlState &ctrl_state, const Config &config, const uint64_t timestamp) {
+    const auto &settings = config.current_config;
+    const float deadzone = std::clamp(settings.trigger_tilt_deadzone, 0.0f, 0.95f);
+    const float sensitivity = std::clamp(settings.trigger_tilt_sensitivity, 0.0f, 4.0f);
+    const float max_roll = std::clamp(settings.trigger_tilt_max_angle_degrees, 0.0f, 85.0f) * std::numbers::pi_v<float> / 180.0f;
+    const float smoothing = std::clamp(settings.trigger_tilt_smoothing, 0.0f, 60.0f);
+
+    float left_trigger = 0.0f;
+    float right_trigger = 0.0f;
+    {
+        const std::lock_guard lock(ctrl_state.mutex);
+        const auto &axis_binds = config.controller_axis_binds;
+        if (axis_binds.size() >= 6) {
+            for (const auto &[_, controller] : ctrl_state.controllers) {
+                left_trigger = std::max(left_trigger, trigger_axis_to_unit(SDL_GetGamepadAxis(controller.controller.get(), static_cast<SDL_GamepadAxis>(axis_binds[4]))));
+                right_trigger = std::max(right_trigger, trigger_axis_to_unit(SDL_GetGamepadAxis(controller.controller.get(), static_cast<SDL_GamepadAxis>(axis_binds[5]))));
+            }
+        }
+    }
+
+    const float elapsed_seconds = state.last_virtual_tilt_timestamp == 0
+        ? (1.0f / 60.0f)
+        : std::clamp(static_cast<float>(timestamp - state.last_virtual_tilt_timestamp) / 1'000'000.0f, 0.0f, 0.1f);
+    state.last_virtual_tilt_timestamp = timestamp;
+
+    float tilt = apply_trigger_deadzone((right_trigger - left_trigger) * sensitivity, deadzone);
+    tilt = std::clamp(tilt, -1.0f, 1.0f);
+    if (settings.trigger_tilt_invert)
+        tilt = -tilt;
+
+    state.virtual_tilt_left_trigger = left_trigger;
+    state.virtual_tilt_right_trigger = right_trigger;
+    state.virtual_tilt_target_radians = tilt * max_roll;
+
+    const float smoothing_alpha = smoothing == 0.0f ? 1.0f : 1.0f - std::exp(-smoothing * elapsed_seconds);
+    const float previous_roll = state.virtual_tilt_roll_radians;
+    state.virtual_tilt_roll_radians += (state.virtual_tilt_target_radians - state.virtual_tilt_roll_radians) * smoothing_alpha;
+    state.virtual_tilt_velocity_radians = elapsed_seconds > 0.0f
+        ? (state.virtual_tilt_roll_radians - previous_roll) / elapsed_seconds
+        : 0.0f;
+
+    // Roll is about Vita Y: gravity holds the tilt; gyro is its rate of change.
+    // Use the existing quaternion coordinate conversion in get_orientation().
+    state.motion_data.SetAcceleration({ std::sin(state.virtual_tilt_roll_radians), 0.0f, -std::cos(state.virtual_tilt_roll_radians) });
+    state.motion_data.SetQuaternion({ { 0.0f, 0.0f, -std::cos(state.virtual_tilt_roll_radians / 2.0f) }, -std::sin(state.virtual_tilt_roll_radians / 2.0f) });
+    state.last_updated_accel_timestamp = timestamp;
+    state.last_updated_gyro_timestamp = timestamp;
+}
+
+void refresh_motion(MotionState &state, CtrlState &ctrl_state, const Config &config) {
+    const std::lock_guard lock(state.mutex);
     if (!state.is_sampling)
         return;
 
-    if (!ctrl_state.has_motion_support && !state.has_device_motion_support)
+    const bool has_physical_motion_support = ctrl_state.has_motion_support || state.has_device_motion_support;
+    state.has_virtual_tilt_motion_support = config.current_config.trigger_tilt_motion && !config.disable_motion && !has_physical_motion_support;
+    if (!has_physical_motion_support && !state.has_virtual_tilt_motion_support)
         return;
 
-    state.motion_data.UpdateOrientation(state.last_updated_accel_timestamp - state.last_accel_timestamp);
+    if (state.has_virtual_tilt_motion_support) {
+        const uint64_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        update_virtual_trigger_tilt(state, ctrl_state, config, timestamp);
+    }
+
+    if (!state.has_virtual_tilt_motion_support)
+        state.motion_data.UpdateOrientation(state.last_updated_accel_timestamp - state.last_accel_timestamp);
     state.motion_data.UpdateBasicOrientation();
-    state.motion_data.UpdateRotation(state.last_updated_gyro_timestamp - state.last_gyro_timestamp);
+    if (!state.has_virtual_tilt_motion_support)
+        state.motion_data.UpdateRotation(state.last_updated_gyro_timestamp - state.last_gyro_timestamp);
 
     state.last_accel_timestamp = state.last_updated_accel_timestamp;
     state.last_gyro_timestamp = state.last_updated_gyro_timestamp;
+
+    if (state.has_virtual_tilt_motion_support && (state.last_accel_timestamp - state.last_virtual_tilt_log_timestamp) >= 500'000) {
+        const auto acceleration = state.motion_data.GetAcceleration();
+        const auto gyro_radians = get_gyroscope(state);
+        LOG_INFO("Virtual trigger tilt: LT={:.3f} RT={:.3f} target_roll={:.3f}rad roll={:.3f}rad accel=({:.3f}, {:.3f}, {:.3f}) gyro=({:.3f}, {:.3f}, {:.3f}) rad/s",
+            state.virtual_tilt_left_trigger, state.virtual_tilt_right_trigger, state.virtual_tilt_target_radians, state.virtual_tilt_roll_radians,
+            acceleration.x, acceleration.y, acceleration.z, gyro_radians.x, gyro_radians.y, gyro_radians.z);
+        state.last_virtual_tilt_log_timestamp = state.last_accel_timestamp;
+    }
 
     state.last_counter++;
 }
