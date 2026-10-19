@@ -2140,6 +2140,14 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
                     z = b.createBinOp(spv::OpFMul, f32, z, w);
 
                     b.createStore(z, z_ref);
+
+                    // no gl_ClipDistance here (Mali) so the eye-plane guard below is not emitted. Workaround it.
+                    if (translation_state.is_vulkan && !features.support_clip_distance) {
+                        const spv::Id on_eye_plane = b.createBinOp(spv::OpFOrdEqual, b.makeBoolType(), w, zero);
+                        spv::Builder::If eye_plane_cond(on_eye_plane, spv::SelectionControlMaskNone, b);
+                        b.createStore(b.makeCompositeConstant(v4, { zero, zero, zero, neg_one }), out_var);
+                        eye_plane_cond.makeEndIf();
+                    }
                 }
 
                 cond_builder.makeEndIf();
