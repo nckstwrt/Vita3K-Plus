@@ -46,6 +46,9 @@ struct ThreadParams;
 struct KernelState;
 void note_audio_thread(KernelState &kernel, SceUID thread_id, const char *api);
 void start_preempt_wait(KernelState &kernel, SceUID starter_id, const std::shared_ptr<ThreadState> &started);
+void start_preempt_file_call(const char *export_name);
+int preempt_core_count(SceInt32 affinity);
+std::vector<std::shared_ptr<ThreadState>> preempt_runnable_threads(KernelState &kernel, const ThreadState *caller);
 void core_lock_begin_boot(uint32_t boot);
 bool core_lock_shares_core(SceInt32 a, SceInt32 b);
 void core_lock_release_for_block();
@@ -187,6 +190,9 @@ struct ThreadState {
     bool inside_hle() const { return hle_enters.load(std::memory_order_relaxed) != hle_returns.load(std::memory_order_relaxed); }
     uint64_t hle_calls_entered() const { return hle_enters.load(std::memory_order_relaxed); }
     bool leave_requested() const { return delete_requested || suspend_requested || world_stop_requested; }
+    void release_held_starter(const char *export_name);
+    std::atomic<SceUID> start_held_starter{ 0 };
+    const char *start_hold_release_call = nullptr;
 
 private:
     void push_arguments(const std::vector<uint32_t> &args);

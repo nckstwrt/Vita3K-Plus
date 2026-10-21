@@ -1204,6 +1204,9 @@ std::condition_variable g_gate_cv;
 std::atomic<int64_t> g_gate_last_cap_log_ns{ 0 };
 std::atomic<bool> g_gate_clock_warned{ false };
 constexpr int64_t START_PREEMPT_CAP_NS = 20'000'000;
+constexpr bool START_PREEMPT_FOLLOWS_CORE_RULE = true;
+constexpr bool START_PREEMPT_RELEASED_BY_FILE_CALLS = true;
+constexpr int64_t START_PREEMPT_FILE_WAIT_NS = 2'000'000;
 std::atomic<int64_t> g_start_preempt_last_cap_log_ns{ 0 };
 
 SceInt32 start_user_cores(const SceInt32 affinity) {
@@ -1267,18 +1270,29 @@ void start_preempt_wait(KernelState &kernel, const SceUID starter_id, const Thre
     if (!starter || !started || starter == started || !kernel.preempt_on_wake || started->priority >= starter->priority
         || !(start_user_cores(started->affinity_mask) & start_user_cores(starter->affinity_mask)))
         return;
+    const int cores = preempt_core_count(started->affinity_mask);
+    if (START_PREEMPT_FOLLOWS_CORE_RULE && cores >= 2) {
+        std::vector<ThreadStatePtr> others = preempt_runnable_threads(kernel, starter.get());
+        others.erase(std::remove(others.begin(), others.end(), started), others.end());
+        if (static_cast<int>(others.size()) <= cores - 2)
+            return;
+    }
     guest_sched_release_for_block();
     const int64_t start = gate_now_ns();
     bool capped = false;
     {
         std::unique_lock<std::mutex> lock(started->mutex);
-        while (started->status == ThreadStatus::run && !started->is_delete_requested()) {
+        started->start_hold_release_call = nullptr;
+        started->start_held_starter.store(starter_id, std::memory_order_release);
+        while (started->status == ThreadStatus::run && !started->is_delete_requested() && !started->start_hold_release_call) {
             if (gate_now_ns() - start >= START_PREEMPT_CAP_NS) {
                 capped = true;
                 break;
             }
             started->status_cond.wait_for(lock, std::chrono::microseconds(500));
         }
+        started->start_held_starter.store(0, std::memory_order_release);
+        started->start_hold_release_call = nullptr;
     }
     if (capped) {
         const int64_t now = gate_now_ns();
@@ -1287,6 +1301,32 @@ void start_preempt_wait(KernelState &kernel, const SceUID starter_id, const Thre
             LOG_WARN("[STARTPREEMPT] '{}' ({}) stopped waiting after {} ms for '{}' ({}), the higher-priority thread it started, which has not blocked yet",
                 starter->name, starter_id, START_PREEMPT_CAP_NS / 1'000'000, started->name, started->id);
     }
+}
+
+void start_preempt_file_call(const char *export_name) {
+    ThreadState *const thread = g_tls_guest_thread;
+    if (START_PREEMPT_RELEASED_BY_FILE_CALLS && thread && thread->start_held_starter.load(std::memory_order_acquire))
+        thread->release_held_starter(export_name);
+}
+
+void ThreadState::release_held_starter(const char *export_name) {
+    const ThreadStatePtr starter = kernel.get_thread(start_held_starter.load(std::memory_order_acquire));
+    if (!starter)
+        return;
+    uint64_t returns_before;
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        if (start_held_starter.load(std::memory_order_relaxed) != starter->id || start_hold_release_call)
+            return;
+        returns_before = starter->hle_returns.load(std::memory_order_acquire);
+        start_hold_release_call = export_name;
+    }
+    status_cond.notify_all();
+    guest_sched_release_for_block();
+    const int64_t start = gate_now_ns();
+    while (gate_now_ns() - start < START_PREEMPT_FILE_WAIT_NS && starter->hle_enters.load(std::memory_order_acquire) < returns_before + 2
+        && starter->status == ThreadStatus::run && !starter->is_delete_requested() && !leave_requested() && !exit_requested)
+        std::this_thread::yield();
 }
 
 void ThreadState::capture_host_cpu_clock() {

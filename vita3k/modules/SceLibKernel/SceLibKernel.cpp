@@ -636,6 +636,7 @@ EXPORT(SceUID, sceIoOpen, const char *file, const int flags, const SceMode mode)
         guest_sched_release_for_block();
     std::this_thread::sleep_for(std::chrono::milliseconds(emuenv.cfg.current_config.file_loading_delay));
 
+    start_preempt_file_call(export_name);
     core_lock_release_for_block();
     const SceUID opened_fd = open_file(emuenv.io, file, flags, emuenv.vita_fs_path, export_name);
     LOG_TRACE("Opening file: {} flags=0x{:X} -> {}", file, flags, opened_fd < 0 ? fmt::format("FAILED {}", log_hex(static_cast<uint32_t>(opened_fd))) : fmt::format("fd {}", opened_fd));
@@ -657,6 +658,7 @@ EXPORT(SceSSize, sceIoPread, SceUID fd, Ptr<void> buf, SceSize nbyte, SceOff off
         guest_sched_release_for_block();
         std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
     }
+    start_preempt_file_call(export_name);
     core_lock_release_for_block();
     return read_file_into_guest(emuenv.mem, buf.address(), emuenv.io, fd, nbyte, offset, export_name);
 }
@@ -668,6 +670,7 @@ EXPORT(int, sceIoPreadAsync) {
 
 EXPORT(SceSSize, sceIoPwrite, SceUID fd, const void *buf, SceSize nbyte, SceOff offset) {
     TRACY_FUNC(sceIoPwrite, fd, buf, nbyte, offset);
+    start_preempt_file_call(export_name);
     core_lock_release_for_block();
     return write_file_at(fd, buf, nbyte, offset, emuenv.io, export_name);
 }

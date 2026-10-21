@@ -124,6 +124,7 @@ EXPORT(int, _sceIoOpen, const char *file, const int flags, const SceMode mode) {
     if (file == nullptr) {
         return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
     }
+    start_preempt_file_call(export_name);
     core_lock_release_for_block();
     const auto opened_fd = open_file(emuenv.io, file, flags, emuenv.vita_fs_path, export_name);
     LOG_TRACE("Opening file: {} -> {}", file, opened_fd < 0 ? fmt::format("FAILED {}", log_hex(static_cast<uint32_t>(opened_fd))) : fmt::format("fd {}", opened_fd));
@@ -151,6 +152,7 @@ EXPORT(SceSSize, _sceIoPread, SceUID fd, Ptr<void> buf, SceSize nbyte, SceOff of
                 thread ? thread->log_stack_traceback() : std::string("?"));
         }
     }
+    start_preempt_file_call(export_name);
     core_lock_release_for_block();
     const int pread_result = read_file_into_guest(emuenv.mem, buf.address(), emuenv.io, fd, nbyte, offset, export_name);
     iodiag_log_read_dst("pread", fd, offset, nbyte, pread_result, buf.address(),
@@ -166,6 +168,7 @@ EXPORT(int, _sceIoPreadAsync) {
 
 EXPORT(SceSSize, _sceIoPwrite, SceUID fd, const void *buf, SceSize nbyte, SceOff offset) {
     TRACY_FUNC(_sceIoPwrite, fd, buf, nbyte, offset);
+    start_preempt_file_call(export_name);
     core_lock_release_for_block();
     return write_file_at(fd, buf, nbyte, offset, emuenv.io, export_name);
 }
@@ -307,6 +310,7 @@ EXPORT(int, sceIoRead, const SceUID fd, Ptr<void> data, const SceSize size) {
         guest_sched_release_for_block();
         std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
     }
+    start_preempt_file_call(export_name);
     core_lock_release_for_block();
     const int diag_result = read_file_into_guest(emuenv.mem, data.address(), emuenv.io, fd, size, -1, export_name);
     iodiag_log_read_dst("read", fd, -1, size, diag_result, data.address(),
@@ -357,6 +361,7 @@ EXPORT(int, sceIoSyncByFdAsync) {
 
 EXPORT(int, sceIoWrite, const SceUID fd, const void *data, const SceSize size) {
     TRACY_FUNC(sceIoWrite, fd, data, size);
+    start_preempt_file_call(export_name);
     core_lock_release_for_block();
     return write_file(fd, data, size, emuenv.io, export_name);
 }
