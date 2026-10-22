@@ -1075,6 +1075,7 @@ void new_frame(VKContext &context) {
     context.last_frag_texture_count = ~0;
 
     frame.frame_timestamp = context.frame_timestamp;
+    context.state.texture_cache.current_frame++;
 }
 
 void signal_sync_object(VKState &state, SceGxmSyncObject *sync_object, uint32_t timestamp) {

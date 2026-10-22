@@ -63,16 +63,19 @@ struct VKTextureCache : public TextureCache {
     VKState &state;
 
     uint64_t release_all_cached_textures();
+    uint64_t release_idle_textures();
 
     vk::DeviceSize memory_budget = 0;
     // the budget the memory pressure check grows back to
     vk::DeviceSize default_budget = 0;
     vk::DeviceSize cached_bytes = 0;
+    vk::DeviceSize budget_floor = 0;
     std::chrono::steady_clock::time_point next_memory_check{};
     void release_image(TextureCacheEntry &entry);
     void create_image(const vk::ImageCreateInfo &image_info);
+    void evict_entry(TextureCacheInfo &info, TextureCacheEntry &entry);
     // evicts the least recently used images until the cached bytes plus incoming fit the budget, returns how many and their bytes
-    std::pair<uint32_t, vk::DeviceSize> evict_to_budget(vk::DeviceSize incoming);
+    std::pair<uint32_t, vk::DeviceSize> evict_to_budget(vk::DeviceSize incoming, uint64_t min_age);
     // evict down to three quarters of what is cached lower the budget to it and free what earlier frames released
     void recover_texture_memory();
     // once a second shrink the budget when the system's available memory is under an eighth of its RAM

@@ -1027,6 +1027,9 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         if (supported_mapping_methods_mask > 1)
             allocator_info.flags |= vma::AllocatorCreateFlagBits::eBufferDeviceAddress;
 
+        if (mem_diag::low_memory_device())
+            allocator_info.preferredLargeHeapBlockSize = MiB(64);
+
         allocator = vma::createAllocator(allocator_info);
         vkutil::init(allocator);
     }
@@ -1540,8 +1543,14 @@ void VKState::swap_window() {
     // Android asked us to give memory back!
     const int trim_level = memory_trim_level.exchange(-1, std::memory_order_relaxed);
     if (trim_level >= 0) {
-        device.waitIdle();
-        const uint64_t freed = texture_cache.release_all_cached_textures();
+        constexpr int trim_ui_hidden = 20;
+        uint64_t freed = 0;
+        if (trim_level >= trim_ui_hidden) {
+            device.waitIdle();
+            freed = texture_cache.release_all_cached_textures();
+        } else {
+            freed = texture_cache.release_idle_textures();
+        }
         LOG_WARN("[ANDROID MEMORY] trim level {}: released {} MiB of cached textures", trim_level, freed / (1024 * 1024));
         dormant_trim_requested = true;
         mem_diag::log_memory_snapshot("post-trim");

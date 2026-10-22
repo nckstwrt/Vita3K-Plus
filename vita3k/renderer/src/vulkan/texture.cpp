@@ -63,6 +63,9 @@ static bool is_depth_stencil_compatible_format(SceGxmTextureBaseFormat format, b
     }
 }
 
+static constexpr uint64_t evict_min_age = MAX_FRAMES_RENDERING + 1;
+static constexpr uint64_t evict_min_age_after_idle = 2;
+
 VKTextureCache::VKTextureCache(VKState &state)
     : state(state) {}
 
@@ -106,7 +109,7 @@ void VKTextureCache::create_image(const vk::ImageCreateInfo &image_info) {
     // so make room by evicting the least recently used images
     if (cached_bytes + current_texture->memory_needed > memory_budget) {
         LOG_INFO_ONCE("Texture cache reached its {} MiB budget, evicting the least recently used textures", memory_budget / MiB(1));
-        evict_to_budget(current_texture->memory_needed);
+        evict_to_budget(current_texture->memory_needed, evict_min_age);
     }
 
     vkutil::Image &image = current_texture->texture;
@@ -128,7 +131,20 @@ void VKTextureCache::create_image(const vk::ImageCreateInfo &image_info) {
     cached_bytes += allocation_info.size;
 }
 
-std::pair<uint32_t, vk::DeviceSize> VKTextureCache::evict_to_budget(const vk::DeviceSize incoming) {
+void VKTextureCache::evict_entry(TextureCacheInfo &info, TextureCacheEntry &entry) {
+    forget_content(info);
+    erase_key(info);
+    info.texture_size = 0;
+    info.dirty = false;
+    info.use_hash = false;
+    info.last_hash_scene = 0;
+    entry.texture.destroy();
+    cached_bytes -= entry.image_bytes;
+    entry.image_bytes = 0;
+    entry.memory_needed = 0;
+}
+
+std::pair<uint32_t, vk::DeviceSize> VKTextureCache::evict_to_budget(const vk::DeviceSize incoming, const uint64_t min_age) {
     uint32_t evicted = 0;
     vk::DeviceSize freed = 0;
     for (auto *item = texture_queue.head->prev; cached_bytes + incoming > memory_budget && item != texture_queue.head; item = item->prev) {
@@ -136,28 +152,39 @@ std::pair<uint32_t, vk::DeviceSize> VKTextureCache::evict_to_budget(const vk::De
         TextureCacheEntry &entry = textures[info.index];
         if (&entry == current_texture || !entry.texture.image)
             continue;
+        if (current_frame - info.last_use_frame < min_age)
+            break;
 
-        forget_content(info);
-        erase_key(info);
-        info.texture_size = 0;
-        info.dirty = false;
-        info.use_hash = false;
-        info.last_hash_scene = 0;
         freed += entry.image_bytes;
-        release_image(entry);
-        entry.memory_needed = 0;
+        evict_entry(info, entry);
         evicted++;
     }
     return { evicted, freed };
 }
 
+uint64_t VKTextureCache::release_idle_textures() {
+    uint64_t freed = 0;
+    for (auto *item = texture_queue.head->prev; item != texture_queue.head; item = item->prev) {
+        TextureCacheInfo &info = item->content;
+        TextureCacheEntry &entry = textures[info.index];
+        if (&entry == current_texture || !entry.texture.image)
+            continue;
+        if (current_frame - info.last_use_frame < evict_min_age)
+            break;
+
+        freed += entry.image_bytes;
+        evict_entry(info, entry);
+    }
+    return freed;
+}
+
 void VKTextureCache::recover_texture_memory() {
-    memory_budget = std::max<vk::DeviceSize>(MiB(256), cached_bytes * 3 / 4);
-    evict_to_budget(current_texture->memory_needed);
+    memory_budget = std::max<vk::DeviceSize>(budget_floor, cached_bytes * 3 / 4);
     state.device.waitIdle();
     for (int i = 0; i < MAX_FRAMES_RENDERING; i++)
         if (i != state.current_frame_idx)
             state.frames[i].destroy_queue.destroy_objects();
+    evict_to_budget(current_texture->memory_needed, evict_min_age_after_idle);
     LOG_WARN("Texture budget lowered to {} MiB ({} MiB cached)", memory_budget / MiB(1), cached_bytes / MiB(1));
 }
 
@@ -174,10 +201,11 @@ void VKTextureCache::relieve_memory_pressure() {
     const vk::DeviceSize low = std::clamp<vk::DeviceSize>(total_kib * 1024 / 8, MiB(384), MiB(1536));
     if (available < low) {
         const vk::DeviceSize previous = memory_budget;
-        memory_budget = std::max<vk::DeviceSize>(MiB(256), std::min(memory_budget, cached_bytes) * 3 / 4);
-        const auto [evicted, freed] = evict_to_budget(0);
-        LOG_WARN("[TEXMEM] system memory available {} MiB, below {} MiB: texture budget {} -> {} MiB, evicted {} textures ({} MiB), {} MiB cached",
-            available / MiB(1), low / MiB(1), previous / MiB(1), memory_budget / MiB(1), evicted, freed / MiB(1), cached_bytes / MiB(1));
+        memory_budget = std::max<vk::DeviceSize>(budget_floor, std::min(memory_budget, cached_bytes) * 3 / 4);
+        const auto [evicted, freed] = evict_to_budget(0, evict_min_age);
+        if (memory_budget != previous)
+            LOG_WARN("[TEXMEM] system memory available {} MiB, below {} MiB: texture budget {} -> {} MiB, evicted {} textures ({} MiB), {} MiB cached",
+                available / MiB(1), low / MiB(1), previous / MiB(1), memory_budget / MiB(1), evicted, freed / MiB(1), cached_bytes / MiB(1));
     } else if (memory_budget < default_budget && available > low + MiB(768)) {
         memory_budget = std::min(default_budget, memory_budget + MiB(64));
         LOG_INFO("[TEXMEM] system memory available {} MiB: texture budget back up to {} MiB", available / MiB(1), memory_budget / MiB(1));
@@ -455,9 +483,11 @@ bool VKTextureCache::init(const bool hashless_texture_cache, const fs::path &tex
     vk::DeviceSize heap_size = 0;
     for (uint32_t i = 0; i < state.physical_device_memory.memoryHeapCount; i++)
         heap_size = std::max(heap_size, state.physical_device_memory.memoryHeaps[i].size);
-    memory_budget = std::clamp<vk::DeviceSize>(heap_size / 4, MiB(256), GiB(2));
+    const bool low_memory = mem_diag::low_memory_device();
+    budget_floor = low_memory ? MiB(128) : MiB(256);
+    memory_budget = std::clamp<vk::DeviceSize>(heap_size / (low_memory ? 16 : 4), budget_floor, GiB(2));
     default_budget = memory_budget;
-    LOG_INFO("Texture cache budget: {} MiB (largest memory heap {} MiB)", memory_budget / MiB(1), heap_size / MiB(1));
+    LOG_INFO("Texture cache budget: {} MiB (largest memory heap {} MiB{})", memory_budget / MiB(1), heap_size / MiB(1), low_memory ? ", low-memory device" : "");
 
     return true;
 }

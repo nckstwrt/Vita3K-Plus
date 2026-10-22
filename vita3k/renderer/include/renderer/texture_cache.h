@@ -53,6 +53,7 @@ typedef std::array<uint32_t, 4> TextureGxmDataRepr;
 struct TextureCacheInfo {
     // scene in which this texture's contents were last hashed
     uint64_t last_hash_scene = 0;
+    uint64_t last_use_frame = 0;
     uint64_t hash = 0;
     SceGxmTexture texture;
     int index = 0;
@@ -119,6 +120,7 @@ public:
     bool use_protect = false;
     // Scene the renderer is currently replaying
     uint64_t current_scene = 0;
+    uint64_t current_frame = 0;
     YUVConversionCache yuv_conversion_cache;
     // use a separate sampler cache
     bool use_sampler_cache = false;

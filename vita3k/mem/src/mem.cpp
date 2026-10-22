@@ -231,6 +231,21 @@ bool debug_safe_write_guest(MemState &state, Address addr, const void *src, uint
 #endif
 }
 
+static void zero_shared_host_pages(MemState &state, Address addr, uint32_t size) {
+    if (state.host_page_size <= STANDARD_PAGE_SIZE)
+        return;
+    const uint32_t guests_per_host = state.host_page_size / STANDARD_PAGE_SIZE;
+    const uint64_t end = static_cast<uint64_t>(addr) + size;
+    for (uint64_t host_page = align_down(addr, state.host_page_size); host_page < end; host_page += state.host_page_size) {
+        const uint64_t first = std::max<uint64_t>(host_page, addr);
+        const uint64_t last = std::min<uint64_t>(host_page + state.host_page_size, end);
+        const uint32_t first_guest = static_cast<uint32_t>(host_page / STANDARD_PAGE_SIZE);
+        const uint32_t used = guests_per_host - state.allocator.free_slot_count(first_guest, first_guest + guests_per_host);
+        if (used > (last - first) / STANDARD_PAGE_SIZE)
+            std::memset(&state.memory[first], 0, last - first);
+    }
+}
+
 static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_count, const char *name, const bool force) {
     int page_num;
     if (force) {
@@ -260,7 +275,7 @@ static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_c
     const int ret = mprotect(commit_ptr, commit_size, PROT_READ | PROT_WRITE);
     LOG_CRITICAL_IF(ret == -1, "mprotect failed: {}", get_error_msg());
 #endif
-    std::memset(&state.memory[addr], 0, size);
+    zero_shared_host_pages(state, addr, size);
 
     AllocMemPage &page = state.alloc_table[page_num];
     assert(!page.allocated);

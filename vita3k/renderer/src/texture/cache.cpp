@@ -1052,6 +1052,7 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
     importing_texture = false;
 
     // set the texture as the mru
+    info->last_use_frame = current_frame;
     texture_queue.set_as_mru(info);
 
     // retrieve the appropriate sampler if needed
