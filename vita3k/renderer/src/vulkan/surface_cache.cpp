@@ -34,6 +34,8 @@
 
 static constexpr bool sync_fully_rendered_small_linear = true;
 static constexpr uint32_t SMALL_LINEAR_SURFACE_LIMIT = 512;
+// Double Buffer keeps a GPU-side mirror of guest memory (i.e. a write-back made for a CPU reader must also copy the mirror back)
+static constexpr bool DOUBLE_BUFFER_IMMEDIATE_COPY_BACK = true;
 
 extern "C" {
 #include <libswscale/swscale.h>
@@ -2569,6 +2571,49 @@ bool VKSurfaceCache::has_newer_overlapping_surface(const ColorSurfaceCacheInfo &
     return false;
 }
 
+static BufferSyncRequest mirror_copy_back_request(const VKState &state, const ColorSurfaceCacheInfo &surface) {
+    if (!DOUBLE_BUFFER_IMMEDIATE_COPY_BACK || state.mapping_method != MappingMethod::DoubleBuffer || !surface.need_buffer_sync
+        || surface.post_sync_width == 0 || surface.post_sync_height == 0)
+        return {};
+    const uint32_t bpp = gxm::bits_per_pixel(surface.format) / 8;
+    const uint32_t x0 = static_cast<uint32_t>(surface.post_sync_x0);
+    const uint32_t y0 = static_cast<uint32_t>(surface.post_sync_y0);
+    if (surface.tiling == SurfaceTiling::Tiled) {
+        const uint32_t x1 = x0 + surface.post_sync_width;
+        const uint32_t y1 = y0 + surface.post_sync_height;
+        if ((x0 % 32) != 0 || (y0 % 32) != 0 || ((x1 % 32) != 0 && x1 < surface.original_width) || ((y1 % 32) != 0 && y1 < surface.original_height))
+            return {};
+        const uint32_t tile_bytes = 1024 * bpp;
+        const uint32_t row_stride = (align(static_cast<uint32_t>(surface.original_width), 32) >> 5) * tile_bytes;
+        const uint32_t row_bytes = ((align(x1, 32) - x0) >> 5) * tile_bytes;
+        const uint32_t rows = (align(y1, 32) - y0) >> 5;
+        return { surface.data.address() + (y0 >> 5) * row_stride + (x0 >> 5) * tile_bytes, (rows - 1) * row_stride + row_bytes, row_stride, row_bytes, rows };
+    }
+    const uint32_t row_bytes = surface.post_sync_width * bpp;
+    return { surface.data.address() + y0 * surface.stride_bytes + x0 * bpp, (surface.post_sync_height - 1) * surface.stride_bytes + row_bytes,
+        surface.stride_bytes, row_bytes, surface.post_sync_height };
+}
+
+static const uint8_t *mirror_rows(VKState &state, const BufferSyncRequest &request) {
+    const auto it = state.mapped_memories.lower_bound(request.location);
+    if (it == state.mapped_memories.end() || static_cast<uint64_t>(it->first) + it->second.size < static_cast<uint64_t>(request.location) + request.size)
+        return nullptr;
+    const vkutil::Buffer *const buffer = std::get_if<vkutil::Buffer>(&it->second.buffer_impl);
+    return (buffer && buffer->mapped_data) ? static_cast<const uint8_t *>(buffer->mapped_data) + (request.location - it->first) : nullptr;
+}
+
+static void copy_mirror_to_guest(VKState &state, MemState &mem, const BufferSyncRequest &request) {
+    const uint8_t *const src = mirror_rows(state, request);
+    if (!src) {
+        LOG_ERROR("Buffer Sync request for {}-{} is not fully mapped", log_hex(request.location), log_hex(request.location + request.size));
+        return;
+    }
+    surface_sync_internal_write = true;
+    for (uint32_t row = 0; row < request.row_count; row++)
+        memcpy_to_guest(mem, request.location + row * request.row_stride, src + static_cast<size_t>(row) * request.row_stride, request.row_bytes);
+    surface_sync_internal_write = false;
+}
+
 bool VKSurfaceCache::check_for_surface(MemState &mem, Address source_address, CallbackRequestFunction &callback, Address target_address, uint32_t source_size) {
     if (!state.features.enable_memory_mapping || state.disable_surface_sync)
         return false;
@@ -2598,11 +2643,13 @@ bool VKSurfaceCache::check_for_surface(MemState &mem, Address source_address, Ca
     // a surface rendered frames ago is up to date in memory only if it was written back since or the CPU wrote over it
     const bool stale = surface.last_frame_rendered + MAX_FRAMES_RENDERING <= context.frame_timestamp;
     const bool sync_stale = stale && surface.written_back_scene < surface.last_scene_rendered && !*surface.dirty && !has_newer_overlapping_surface(surface);
+    const bool double_buffer_copy_back = DOUBLE_BUFFER_IMMEDIATE_COPY_BACK && state.mapping_method == MappingMethod::DoubleBuffer;
+    const bool mirror_only = double_buffer_copy_back && surface.gpu_read_sync_only;
     if (stale && !sync_stale)
         return false;
 
     // we found something
-    if (!*surface.need_surface_sync || sync_stale) {
+    if (!*surface.need_surface_sync || sync_stale || mirror_only) {
         // first send the command to sync the surface with the GPU
         *surface.need_surface_sync = true;
 
@@ -2622,7 +2669,12 @@ bool VKSurfaceCache::check_for_surface(MemState &mem, Address source_address, Ca
             // this can run mid-scene so the scene's own surface must survive the sync
             ColorSurfaceCacheInfo *const prev_last_written = last_written_surface;
             last_written_surface = &surface;
+            // this write-back is for a CPU reader so it has to reach guest memory
+            const bool gpu_read_sync_only = surface.gpu_read_sync_only;
+            if (double_buffer_copy_back)
+                surface.gpu_read_sync_only = false;
             returned_info = perform_surface_sync();
+            surface.gpu_read_sync_only = gpu_read_sync_only;
             last_written_surface = (prev_last_written == &surface) ? nullptr : prev_last_written;
             context.render_cmd = prev_cmd;
 
@@ -2648,8 +2700,12 @@ bool VKSurfaceCache::check_for_surface(MemState &mem, Address source_address, Ca
         };
         state.request_queue.push(CallbackRequest{ new CallbackRequestFunction(std::move(vk_callback)) });
 
-        if (returned_info)
+        if (returned_info) {
+            const BufferSyncRequest copy_back = mirror_copy_back_request(state, *returned_info);
+            if (copy_back.size)
+                state.request_queue.push(copy_back);
             state.request_queue.push(PostSurfaceSyncRequest{ *returned_info });
+        }
     }
 
     // now push the callback
@@ -2683,7 +2739,12 @@ void VKSurfaceCache::submit_immediate_surface_sync(ColorSurfaceCacheInfo &surfac
 
         context.render_cmd = surface_cmd;
         last_written_surface = &surface;
+        // a CPU reader needs the write-back to reach guest memory
+        const bool gpu_read_sync_only = surface.gpu_read_sync_only;
+        if (DOUBLE_BUFFER_IMMEDIATE_COPY_BACK && mem != nullptr && state.mapping_method == MappingMethod::DoubleBuffer)
+            surface.gpu_read_sync_only = false;
         returned_info = perform_surface_sync();
+        surface.gpu_read_sync_only = gpu_read_sync_only;
         context.render_cmd = prev_cmd;
         last_written_surface = (prev_last_written == &surface) ? nullptr : prev_last_written;
 
@@ -2708,6 +2769,9 @@ void VKSurfaceCache::submit_immediate_surface_sync(ColorSurfaceCacheInfo &surfac
         }
 
         if (returned_info) {
+            const BufferSyncRequest copy_back = mirror_copy_back_request(state, *returned_info);
+            if (copy_back.size)
+                copy_mirror_to_guest(state, *mem, copy_back);
             surface_sync_internal_write = true;
             perform_post_surface_sync(*mem, PostSurfaceSyncRequest{ *returned_info });
             surface_sync_internal_write = false;
@@ -2731,6 +2795,9 @@ void VKSurfaceCache::submit_immediate_surface_sync(ColorSurfaceCacheInfo &surfac
     state.request_queue.push(CallbackRequest{ new CallbackRequestFunction(std::move(vk_callback)) });
 
     if (returned_info) {
+        const BufferSyncRequest copy_back = mirror_copy_back_request(state, *returned_info);
+        if (copy_back.size)
+            state.request_queue.push(copy_back);
         state.request_queue.push(PostSurfaceSyncRequest{ *returned_info });
     }
 }
