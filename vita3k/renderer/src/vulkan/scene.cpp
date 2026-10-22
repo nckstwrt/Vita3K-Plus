@@ -25,6 +25,7 @@
 #include <gxm/functions.h>
 #include <renderer/functions.h>
 #include <renderer/vulkan/gxm_to_vulkan.h>
+#include <shader/spirv_recompiler.h>
 
 #include <config/state.h>
 #include <spdlog/fmt/bin_to_hex.h>
@@ -560,6 +561,8 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         context.is_in_query = true;
     }
 
+    const bool vertex_stores = shader::emulates_vertex_stores(*context.record.vertex_program_binding->program(), context.state.features);
+
     // do we need to check for a pipeline change?
     if (context.refresh_pipeline || type != context.last_primitive) {
         context.refresh_pipeline = false;
@@ -569,6 +572,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         // to be able to see anything
         bool can_be_whole_quad = instance_count == 1 && count <= 6;
         vk::Pipeline new_pipeline = context.state.pipeline_cache.retrieve_pipeline(context, type, !can_be_whole_quad, mem);
+        context.vertex_store_pipeline = vertex_stores ? context.state.pipeline_cache.retrieve_pipeline(context, type, false, mem, true) : vk::Pipeline{};
         context.pipeline_stops_lrz_write = fetch_draw_stops_lrz_write(context.state, context.record, fragment_program_gxp);
 
         if (new_pipeline != context.current_pipeline) {
@@ -748,6 +752,19 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     context.last_draw_pipeline = context.current_pipeline;
 
     context.render_cmd.drawIndexed(count, instance_count, 0, 0, 0);
+
+    if (vertex_stores && context.vertex_store_pipeline) {
+        const vk::Rect2D area = context.curr_renderpass_info.renderArea;
+        const float grid = (area.extent.width >= 32 && area.extent.height >= 32) ? 32.0f : 1.0f;
+        context.render_cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, context.vertex_store_pipeline);
+        context.render_cmd.setViewport(0, vk::Viewport{ static_cast<float>(area.offset.x), static_cast<float>(area.offset.y), grid, grid, 0.0f, 1.0f });
+        context.render_cmd.setScissor(0, area);
+        context.render_cmd.drawIndexed(count, instance_count, 0, 0, 0);
+        context.render_cmd.setViewport(0, context.viewport);
+        context.render_cmd.setScissor(0, context.scissor);
+        context.render_cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, context.current_pipeline);
+        context.vertex_store_draws++;
+    }
 
     context.vertex_uniform_storage_allocated = false;
     context.fragment_uniform_storage_allocated = false;

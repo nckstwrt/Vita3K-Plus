@@ -597,6 +597,15 @@ void VKContext::stop_render_pass() {
 
     in_renderpass = false;
 
+    if (vertex_store_draws > 0) {
+        const vk::MemoryBarrier barrier{
+            .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+            .dstAccessMask = vk::AccessFlagBits::eVertexAttributeRead | vk::AccessFlagBits::eIndexRead | vk::AccessFlagBits::eUniformRead | vk::AccessFlagBits::eShaderRead
+        };
+        render_cmd.pipelineBarrier(vk::PipelineStageFlagBits::eFragmentShader, vk::PipelineStageFlagBits::eVertexInput | vk::PipelineStageFlagBits::eVertexShader | vk::PipelineStageFlagBits::eFragmentShader, {}, barrier, {}, {});
+        vertex_store_draws = 0;
+    }
+
     fill_half_pixel_strips();
 }
 

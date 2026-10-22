@@ -1009,7 +1009,9 @@ void USSERecompiler::compile_loop_node(const usse::USSELoopNode &loop) {
 
     // If true
     const usse::USSEBlockNode &content_block = *(loop.content_block());
+    visitor.m_util_funcs.loop_depth++;
     compile_block(content_block);
+    visitor.m_util_funcs.loop_depth--;
 
     b.createBranch(true, &loops.continue_target);
 

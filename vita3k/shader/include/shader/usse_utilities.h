@@ -40,6 +40,13 @@ struct SpirvUtilFunctions {
     // this is technically not a function but is the best place to put it
     // buffer_address_vec[0] is for a packed float[] array
     spv::Id buffer_address_vec[5][2] = {};
+
+    spv::Id vertex_stores = spv::NoResult;
+    int vertex_store_capacity = 0;
+    int vertex_store_count = 0;
+    int loop_depth = 0;
+    bool vertex_store_in_loop = false;
+    bool drop_buffer_stores = false;
 };
 
 spv::Id finalize(spv::Builder &b, spv::Id first, spv::Id second, const Swizzle4 swizz, spv::Id offset, const Imm4 dest_mask);

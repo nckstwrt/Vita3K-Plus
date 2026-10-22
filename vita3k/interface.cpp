@@ -528,10 +528,11 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
     // preempt-on-wake goes with accurate thread scheduling on every platform
     emuenv.kernel.preempt_on_wake = emuenv.cfg.current_config.accurate_thread_scheduling;
     emuenv.kernel.preempt_on_wake_us = emuenv.cfg.current_config.preempt_on_wake_us;
-    LOG_INFO("CONFIG (applied): memory_mapping={} accurate_thread_scheduling={} preempt_on_wake={} high_accuracy={} res_multiplier={} guest_cores={}",
+    LOG_INFO("CONFIG (applied): memory_mapping={} accurate_thread_scheduling={} preempt_on_wake={} high_accuracy={} res_multiplier={} guest_cores={} disable_surface_sync={}",
         emuenv.cfg.current_config.memory_mapping, emuenv.cfg.current_config.accurate_thread_scheduling,
         emuenv.kernel.preempt_on_wake,
-        emuenv.cfg.current_config.high_accuracy, emuenv.cfg.current_config.resolution_multiplier, emuenv.cfg.current_config.guest_cores);
+        emuenv.cfg.current_config.high_accuracy, emuenv.cfg.current_config.resolution_multiplier, emuenv.cfg.current_config.guest_cores,
+        emuenv.cfg.current_config.disable_surface_sync);
     guest_sched_set_cores(emuenv.cfg.current_config.guest_cores);
     if (emuenv.kernel.accurate_thread_scheduling)
         LOG_INFO("Accurate thread scheduling enabled: default-affinity guest threads run one at a time, by priority");

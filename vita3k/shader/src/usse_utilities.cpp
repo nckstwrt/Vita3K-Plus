@@ -685,7 +685,27 @@ static spv::Id make_or_get_buffer_ptr(spv::Builder &b, shader::usse::utils::Spir
     return utils.buffer_address_vec[buffer_utils_idx][is_write];
 }
 
+static void record_vertex_stores(spv::Builder &b, SpirvUtilFunctions &utils, spv::Id address, uint32_t offset, spv::Id data) {
+    const spv::Id u32 = b.makeUintType(32);
+    const spv::Id scalar_type = b.getScalarTypeId(b.getTypeId(data));
+    const int count = static_cast<int>(b.getNumComponents(data));
+    for (int i = 0; i < count; i++, utils.vertex_store_count++) {
+        if (utils.vertex_store_count >= utils.vertex_store_capacity)
+            continue;
+        spv::Id value = (count == 1) ? data : b.createCompositeExtract(data, scalar_type, i);
+        if (scalar_type != u32)
+            value = b.createUnaryOp(spv::OpBitcast, u32, value);
+        const spv::Id target = add_uvec2_uint(b, address, b.makeUintConstant(offset + i * 4));
+        const spv::Id slot = b.createCompositeConstruct(b.makeVectorType(u32, 4), { b.createCompositeExtract(target, u32, 0), b.createCompositeExtract(target, u32, 1), value, b.makeUintConstant(1) });
+        b.createStore(slot, create_access_chain(b, spv::StorageClassOutput, utils.vertex_stores, { b.makeIntConstant(utils.vertex_store_count) }));
+    }
+    if (utils.loop_depth > 0)
+        utils.vertex_store_in_loop = true;
+}
+
 void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFunctions &utils, const FeatureState &features, Operand dest, int dest_offset, spv::Id addr, uint32_t component_size, uint32_t nb_components, int buffer_idx, bool is_buffer_store) {
+    if (is_buffer_store && utils.drop_buffer_stores)
+        return;
     const spv::Id i32 = b.makeIntType(32);
     const spv::Id u32 = b.makeUintType(32);
     const spv::Id zero = b.makeIntConstant(0);
@@ -738,7 +758,10 @@ void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params,
 
                 if (is_buffer_store) {
                     spv::Id data = load(b, params, utils, features, dest, 0b1111, dest_offset);
-                    b.createStore(data, accessed, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
+                    if (utils.vertex_stores != spv::NoResult)
+                        record_vertex_stores(b, utils, buffer_address, buffer_idx_vec4 * 16, data);
+                    else
+                        b.createStore(data, accessed, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
                 } else {
                     accessed = b.createLoad(accessed, spv::NoPrecision, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
                     store(b, params, utils, features, dest, accessed, 0b1111, dest_offset);
@@ -760,7 +783,10 @@ void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params,
 
             if (is_buffer_store) {
                 spv::Id data = load(b, params, utils, features, dest, (1 << nb_components) - 1, dest_offset);
-                b.createStore(data, accessed, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
+                if (utils.vertex_stores != spv::NoResult)
+                    record_vertex_stores(b, utils, buffer_address, buffer_idx_vec4 * 16, data);
+                else
+                    b.createStore(data, accessed, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
             } else {
                 accessed = b.createLoad(accessed, spv::NoPrecision, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
                 store(b, params, utils, features, dest, accessed, (1 << nb_components) - 1, dest_offset);

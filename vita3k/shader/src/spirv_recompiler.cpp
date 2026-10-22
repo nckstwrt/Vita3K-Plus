@@ -119,6 +119,7 @@ struct TranslationState {
     bool is_vulkan = false;
     spv::ImageFormat image_storage_format = spv::ImageFormat::ImageFormatUnknown;
     const Hints *hints = nullptr;
+    spv::Id vertex_index_id = spv::NoResult;
 };
 
 struct VertexProgramOutputProperties {
@@ -1506,9 +1507,10 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
 
         switch (semantic) {
         case SCE_GXM_PARAMETER_SEMANTIC_INDEX:
-            if (translation_state.is_vulkan)
+            if (translation_state.is_vulkan) {
                 b.addDecoration(var, spv::DecorationBuiltIn, spv::BuiltInVertexIndex);
-            else
+                translation_state.vertex_index_id = var;
+            } else
                 b.addDecoration(var, spv::DecorationBuiltIn, spv::BuiltInVertexId);
             break;
 
@@ -2198,6 +2200,44 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
     return vert_fin_func;
 }
 
+static spv::Function *make_vert_store_finalize_function(spv::Builder &b, TranslationState &translation_state) {
+    std::vector<std::vector<spv::Decoration>> decorations;
+    spv::Block *block;
+    spv::Block *last_build_point = b.getBuildPoint();
+    spv::Function *func = b.makeFunctionEntry(spv::NoPrecision, b.makeVoidType(), "vert_store_finalize", {}, {}, decorations, &block);
+    const spv::Id f32 = b.makeFloatType(32);
+    const spv::Id u32 = b.makeUintType(32);
+    const spv::Id position = b.createVariable(spv::NoPrecision, spv::StorageClassOutput, b.makeVectorType(f32, 4), "v_Position");
+    b.addDecoration(position, spv::DecorationBuiltIn, spv::BuiltInPosition);
+    const spv::Id point_size = b.createVariable(spv::NoPrecision, spv::StorageClassOutput, f32, "v_Psize");
+    b.addDecoration(point_size, spv::DecorationBuiltIn, spv::BuiltInPointSize);
+    translation_state.interfaces.push_back(position);
+    translation_state.interfaces.push_back(point_size);
+    spv::Id index_var = translation_state.vertex_index_id;
+    if (index_var == spv::NoResult) {
+        index_var = b.createVariable(spv::NoPrecision, spv::StorageClassInput, b.makeIntType(32), "vertex_index");
+        b.addDecoration(index_var, spv::DecorationBuiltIn, spv::BuiltInVertexIndex);
+        translation_state.interfaces.push_back(index_var);
+    }
+    spv::Id index = b.createLoad(index_var, spv::NoPrecision);
+    if (b.getNumComponents(index) > 1)
+        index = b.createCompositeExtract(index, b.getScalarTypeId(b.getTypeId(index)), 0);
+    if (b.getTypeId(index) != u32)
+        index = b.createUnaryOp(spv::OpBitcast, u32, index);
+    const spv::Id one = b.makeFloatConstant(1.0f);
+    const auto grid_cell = [&](spv::Id bits) {
+        const spv::Id cell = b.createUnaryOp(spv::OpConvertUToF, f32, b.createBinOp(spv::OpBitwiseAnd, u32, bits, b.makeUintConstant(31)));
+        return b.createBinOp(spv::OpFSub, f32, b.createBinOp(spv::OpFMul, f32, b.createBinOp(spv::OpFAdd, f32, cell, b.makeFloatConstant(0.5f)), b.makeFloatConstant(1.0f / 16.0f)), one);
+    };
+    const spv::Id x = grid_cell(index);
+    const spv::Id y = grid_cell(b.createBinOp(spv::OpShiftRightLogical, u32, index, b.makeUintConstant(5)));
+    b.createStore(b.createCompositeConstruct(b.makeVectorType(f32, 4), { x, y, b.makeFloatConstant(0.5f), one }), position);
+    b.createStore(one, point_size);
+    b.makeReturn(false);
+    b.setBuildPoint(last_build_point);
+    return func;
+}
+
 static spv::Function *make_frag_initialize_function(spv::Builder &b, TranslationState &translate_state) {
     std::vector<std::vector<spv::Decoration>> decorations;
 
@@ -2394,7 +2434,14 @@ static SpirvCode convert_gxp_to_spirv_impl(const SceGxmProgram &program, const s
                 begin_hook_func = make_frag_initialize_function(b, translation_state);
 
             end_hook_func = make_frag_finalize_function(b, parameters, program, utils, features, translation_state);
+        } else if (translation_state.is_vulkan && emulates_vertex_stores(program, features) && translation_state.hints->vertex_store_pass) {
+            utils.vertex_stores = b.createVariable(spv::NoPrecision, spv::StorageClassOutput, b.makeArrayType(b.makeVectorType(b.makeUintType(32), 4), b.makeUintConstant(features.vertex_store_slots), 0), "vertex_stores");
+            b.addDecoration(utils.vertex_stores, spv::DecorationLocation, 0);
+            translation_state.interfaces.push_back(utils.vertex_stores);
+            utils.vertex_store_capacity = features.vertex_store_slots;
+            end_hook_func = make_vert_store_finalize_function(b, translation_state);
         } else {
+            utils.drop_buffer_stores = translation_state.is_vulkan && emulates_vertex_stores(program, features);
             end_hook_func = make_vert_finalize_function(b, parameters, program, utils, features, translation_state);
         }
 
@@ -2426,9 +2473,15 @@ static SpirvCode convert_gxp_to_spirv_impl(const SceGxmProgram &program, const s
         // with one store of the whole array: zeroing it in a loop crashes the stock Adreno shader compiler
         if (program.is_vertex())
             b.createStore(b.makeNullConstant(b.getContainedTypeId(b.getTypeId(parameters.outs))), parameters.outs);
+        if (utils.vertex_stores != spv::NoResult)
+            b.createStore(b.makeNullConstant(b.getContainedTypeId(b.getTypeId(utils.vertex_stores))), utils.vertex_stores);
 
         log_pn_predicates(program, translation_state.hash);
         generate_shader_body(b, parameters, program, features, utils, begin_hook_func, end_hook_func, texture_queries, translation_state.render_info_id, spv_func_main, translation_state.interfaces);
+        if (utils.vertex_store_count > utils.vertex_store_capacity)
+            LOG_WARN("Vertex shader {} writes memory {} times, more than the {} emulated vertex stores can carry: the extra writes are not supported and get lost", shader_hash, utils.vertex_store_count, utils.vertex_store_capacity);
+        else if (utils.vertex_store_in_loop)
+            LOG_WARN("Vertex shader {} writes memory inside a loop: not supported by emulated vertex stores, only the last pass of the loop lands", shader_hash);
     } else {
         generate_update_mask_body(b, translation_state);
     }
@@ -2617,6 +2670,44 @@ GeneratedShader convert_gxp(const SceGxmProgram &program, const std::string &sha
     }
 
     return shader;
+}
+
+usse::SpirvCode generate_vertex_store_fragment_shader(const int slots) {
+    spv::SpvBuildLogger spv_logger;
+    spv::Builder b(spv::Spv_1_0, 0x1337 << 12, &spv_logger);
+    b.setMemoryModel(spv::AddressingModelPhysicalStorageBuffer64, spv::MemoryModelGLSL450);
+    b.addCapability(spv::CapabilityShader);
+    b.addExtension("SPV_KHR_physical_storage_buffer");
+    b.addCapability(spv::CapabilityPhysicalStorageBufferAddresses);
+    spv::Function *main = b.makeEntryPoint("main_fs");
+    b.addExecutionMode(main, spv::ExecutionModeOriginUpperLeft);
+    const spv::Id u32 = b.makeUintType(32);
+    const spv::Id stores = b.createVariable(spv::NoPrecision, spv::StorageClassInput, b.makeArrayType(b.makeVectorType(u32, 4), b.makeUintConstant(slots), 0), "vertex_stores");
+    b.addDecoration(stores, spv::DecorationLocation, 0);
+    b.addDecoration(stores, spv::DecorationFlat);
+    const spv::Id words = b.makeRuntimeArray(u32);
+    b.addDecoration(words, spv::DecorationArrayStride, 4);
+    const spv::Id target_block = b.makeStructType({ words }, "vertex_store_target");
+    b.addDecoration(target_block, spv::DecorationBlock);
+    b.addMemberDecoration(target_block, 0, spv::DecorationOffset, 0);
+    const spv::Id target_ptr = b.makePointer(spv::StorageClassPhysicalStorageBuffer, target_block);
+    const spv::Id zero = b.makeIntConstant(0);
+    for (int i = 0; i < slots; i++) {
+        const spv::Id slot = b.createLoad(utils::create_access_chain(b, spv::StorageClassInput, stores, { b.makeIntConstant(i) }), spv::NoPrecision);
+        spv::Builder::If written(b.createBinOp(spv::OpINotEqual, b.makeBoolType(), b.createCompositeExtract(slot, u32, 3), b.makeUintConstant(0)), spv::SelectionControlMaskNone, b);
+        const spv::Id address = b.createCompositeConstruct(b.makeVectorType(u32, 2), { b.createCompositeExtract(slot, u32, 0), b.createCompositeExtract(slot, u32, 1) });
+        const spv::Id target = b.createUnaryOp(spv::OpBitcast, target_ptr, address);
+        b.createStore(b.createCompositeExtract(slot, u32, 2), utils::create_access_chain(b, spv::StorageClassPhysicalStorageBuffer, target, { zero, zero }), spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
+        written.makeEndIf();
+    }
+    b.leaveFunction();
+    b.addEntryPoint(spv::ExecutionModelFragment, main, "main_fs")->addIdOperand(stores);
+    const auto spirv_log = spv_logger.getAllMessages();
+    if (!spirv_log.empty())
+        LOG_ERROR("SPIR-V Error:\n{}", spirv_log);
+    usse::SpirvCode spirv;
+    b.dump(spirv);
+    return spirv;
 }
 
 void convert_gxp_to_glsl_from_filepath(const std::string &shader_filepath_utf8) {

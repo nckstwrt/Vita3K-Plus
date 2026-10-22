@@ -142,6 +142,11 @@ void PipelineCache::init(bool support_rasterized_order_access) {
     vk::PipelineCacheCreateInfo pipeline_info{};
     pipeline_cache = state.device.createPipelineCache(pipeline_info);
 
+    if (state.features.vertex_store_slots > 0) {
+        const shader::usse::SpirvCode code = shader::generate_vertex_store_fragment_shader(state.features.vertex_store_slots);
+        vertex_store_fragment_module = state.device.createShaderModule(vk::ShaderModuleCreateInfo{ .codeSize = code.size() * sizeof(uint32_t), .pCode = code.data() });
+    }
+
     // the layout for uniforms buffer can be made here as it will always be the same
     {
         std::array<vk::DescriptorSetLayoutBinding, 4> layout_bindings;
@@ -576,6 +581,8 @@ void PipelineCache::cleanup() {
             pipeline_layouts[i][j] = nullptr;
         }
 
+    state.device.destroy(vertex_store_fragment_module);
+    vertex_store_fragment_module = nullptr;
     state.device.destroy(uniforms_layout);
     uniforms_layout = nullptr;
     state.device.destroy(attachments_layout);
@@ -621,7 +628,7 @@ static const vk::SpecializationInfo frag_spec_infos[4] = {
     { .mapEntryCount = 2, .pMapEntries = frag_spec_entries, .dataSize = sizeof(frag_spec_data[3]), .pData = frag_spec_data[3] },
 };
 
-static Sha256Hash shader_cache_key(const SceGxmProgram *program, const Sha256Hash &base_hash, bool is_vertex, const shader::Hints &hints, std::string &version_suffix) {
+static Sha256Hash shader_cache_key(const SceGxmProgram *program, const Sha256Hash &base_hash, bool is_vertex, const shader::Hints &hints, const FeatureState &features, std::string &version_suffix) {
     // A one-channel surface moves a different component into the stored channel, so it needs its own cache entry
     const int one_channel_source = is_vertex ? -1 : gxm::one_channel_source_component(hints.color_format);
     Sha256Hash hash = base_hash;
@@ -643,6 +650,10 @@ static Sha256Hash shader_cache_key(const SceGxmProgram *program, const Sha256Has
         hash[6] ^= 0x75;
         version_suffix += "u";
     }
+    if (is_vertex && shader::emulates_vertex_stores(*program, features)) {
+        hash[7] ^= hints.vertex_store_pass ? 0x5E : 0x4E;
+        version_suffix += hints.vertex_store_pass ? fmt::format("w{}", features.vertex_store_slots) : std::string("n");
+    }
     return hash;
 }
 
@@ -651,7 +662,7 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
         LOG_WARN_ONCE("Mask not implemented in the vulkan renderer!");
 
     std::string version_suffix;
-    const Sha256Hash hash = shader_cache_key(program, base_hash, is_vertex, hints, version_suffix);
+    const Sha256Hash hash = shader_cache_key(program, base_hash, is_vertex, hints, state.features, version_suffix);
 
     const vk::ShaderModule shader_compiling = std::bit_cast<vk::ShaderModule>(~0ULL);
 
@@ -1385,26 +1396,29 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     shader::Hints fragment_hints = hints;
     fragment_hints.raw_color_attachment_input = with_raw_attachment && state.features.direct_fragcolor && gxm_fragment_shader->is_frag_color_used();
 
+    const bool vertex_stores = hints.vertex_store_pass && shader::emulates_vertex_stores(*vertex_program_binding.program(), state.features);
     const vk::PipelineShaderStageCreateInfo vertex_shader = retrieve_shader(vertex_program_binding.program(), vertex_program.hash, true, fragment_program_binding.is_maskupdate, mem, hints, false, false, cache_only);
-    const vk::PipelineShaderStageCreateInfo fragment_shader = retrieve_shader(gxm_fragment_shader, fragment_program.hash, false, fragment_program_binding.is_maskupdate, mem, fragment_hints, record.is_gamma_corrected, has_casts, cache_only);
+    const vk::PipelineShaderStageCreateInfo fragment_shader = vertex_stores
+        ? vk::PipelineShaderStageCreateInfo{ .stage = vk::ShaderStageFlagBits::eFragment, .module = vertex_store_fragment_module, .pName = "main_fs" }
+        : retrieve_shader(gxm_fragment_shader, fragment_program.hash, false, fragment_program_binding.is_maskupdate, mem, fragment_hints, record.is_gamma_corrected, has_casts, cache_only);
     if (cache_only && (!vertex_shader.module || !fragment_shader.module))
         // a cache-only request never translates a shader on the calling thread
         return nullptr;
     const vk::PipelineShaderStageCreateInfo shader_stages[] = { vertex_shader, fragment_shader };
     // disable the fragment shader if gxm asks us to
-    const bool is_fragment_disabled = record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED || gxm_fragment_shader->has_no_effect();
+    const bool is_fragment_disabled = !vertex_stores && (record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED || gxm_fragment_shader->has_no_effect());
     const uint32_t shader_stage_count = is_fragment_disabled ? 1U : 2U;
 
     const vk::PipelineInputAssemblyStateCreateInfo input_assembly{
-        .topology = translate_primitive(type)
+        .topology = vertex_stores ? vk::PrimitiveTopology::ePointList : translate_primitive(type)
     };
 
     const bool two_sided = (record.two_sided == SCE_GXM_TWO_SIDED_ENABLED);
 
     const vk::PipelineRasterizationStateCreateInfo rasterizer{
         .depthClampEnable = (enable_depth_clamp && state.physical_device_features.depthClamp) ? VK_TRUE : VK_FALSE,
-        .polygonMode = translate_polygon_mode(record.front_polygon_mode),
-        .cullMode = translate_cull_mode(record.cull_mode),
+        .polygonMode = vertex_stores ? vk::PolygonMode::eFill : translate_polygon_mode(record.front_polygon_mode),
+        .cullMode = vertex_stores ? vk::CullModeFlags() : translate_cull_mode(record.cull_mode),
         // front face is always counter clockwise
         .frontFace = vk::FrontFace::eCounterClockwise,
         .depthBiasEnable = VK_TRUE,
@@ -1428,6 +1442,8 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         ds_info.front.compareOp = vk::CompareOp::eEqual;
         ds_info.front.failOp = vk::StencilOp::eKeep;
     }
+    if (vertex_stores)
+        ds_info = vk::PipelineDepthStencilStateCreateInfo{};
 
     vk::PipelineColorBlendStateCreateInfo color_blending{};
     if (support_coherent_framebuffer_fetch)
@@ -1439,7 +1455,7 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         .blendEnable = VK_FALSE,
         .colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG | vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA
     };
-    if (is_fragment_disabled || frag_has_no_output || use_shader_interlock) {
+    if (is_fragment_disabled || frag_has_no_output || use_shader_interlock || vertex_stores) {
         // The write mask must be empty as the lack of a fragment shader results in undefined values
         blend_attachments[0] = vk::PipelineColorBlendAttachmentState{
             .blendEnable = VK_FALSE,
@@ -1718,7 +1734,7 @@ void PipelineCache::bisect_pipeline_failure(const vk::GraphicsPipelineCreateInfo
     LOG_CRITICAL("=== END KNOCKOUT BISECT ===");
 }
 
-vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem) {
+vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem, bool vertex_store_pass) {
     const GxmRecordState &record = context.record;
     uint64_t key = hash_pipeline_record(record);
     uint64_t raw_key = XXH3_64bits(&record, record_pipeline_len);
@@ -1748,6 +1764,10 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
         variant_bits |= static_cast<uint64_t>(key_one_channel) << 48;
     key ^= variant_bits;
     raw_key ^= variant_bits;
+    if (vertex_store_pass) {
+        key ^= 0x9E3779B97F4A7C15ull;
+        raw_key ^= 0x9E3779B97F4A7C15ull;
+    }
 
     const uint32_t cast_units = context.curr_frag_ublock.cast_sampler_bits | context.curr_frag_ublock.cast_phase_bits | context.curr_frag_ublock.raw_cast_bits;
     const bool has_casts = (cast_units & fragment_program_binding->fragment_program->textures_used.to_ulong()) != 0;
@@ -1810,6 +1830,7 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     // update the shader hints
     context.shader_hints.color_format = record.color_surface.colorFormat;
     context.shader_hints.attributes = &vertex_program_binding->attributes;
+    context.shader_hints.vertex_store_pass = vertex_store_pass;
     context.shader_hints.output_register_format = fragment_program_binding->fragment_program
         ? fragment_program_binding->fragment_program->output_register_format
         : SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED;
@@ -2026,7 +2047,7 @@ bool PipelineCache::codegen_ignores_draw_hints(const SceGxmProgram &program, boo
 
 bool PipelineCache::shader_available(const SceGxmProgram &program, const Sha256Hash &base_hash, bool is_vertex, const shader::Hints &hints) {
     std::string version_suffix;
-    const Sha256Hash hash = shader_cache_key(&program, base_hash, is_vertex, hints, version_suffix);
+    const Sha256Hash hash = shader_cache_key(&program, base_hash, is_vertex, hints, state.features, version_suffix);
     {
         std::lock_guard<std::mutex> guard(shaders_mutex);
         const auto found = shaders.find(hash);

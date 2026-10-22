@@ -98,6 +98,7 @@ private:
     static constexpr int pipeline_cache_save_delay = 15;
 
     vk::PipelineCache pipeline_cache;
+    vk::ShaderModule vertex_store_fragment_module;
 
     // first index: 0 if color is backed by memory, 1 otherwise
     // second index: 1 if the depth aspect is loaded at scene start, 0 if cleared
@@ -240,7 +241,7 @@ public:
     void warm_program_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment);
 
     vk::RenderPass retrieve_render_pass(vk::Format format, bool depth_load, bool stencil_load, bool force_store, bool is_color_transient, bool no_color = false, bool has_raw_attachment = false);
-    vk::Pipeline retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem);
+    vk::Pipeline retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem, bool vertex_store_pass = false);
 
     vk::ShaderModule precompile_shader(const Sha256Hash &hash, bool search_first = true);
 
