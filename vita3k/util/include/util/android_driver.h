@@ -16,5 +16,6 @@ bool is_custom_driver_loaded(const std::string &driver_name, uint32_t vendor_id,
 PFN_vkGetInstanceProcAddr resolve_vk_get_instance_proc_addr(const std::string &driver_name);
 std::string device_summary();
 void log_device_identity();
+bool is_adreno_6xx();
 
 } // namespace android_driver

@@ -19,6 +19,7 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <mutex>
@@ -632,6 +633,24 @@ void log_device_identity() {
     else
         LOG_INFO("[DEVICE] KGSL ioctl: device info {} (chip_id 0x{:08X} gpu_id {} gmem {} KiB) | gpu_model {}", id.ioctl_device_info ? "ok" : "failed",
             id.ioctl_chip_id, id.ioctl_gpu_id, id.ioctl_gmem_bytes / 1024, or_dash(id.ioctl_gpu_model));
+}
+
+bool is_adreno_6xx() {
+    const DeviceIdentity &id = device_identity();
+    if (id.ioctl_device_info && (id.ioctl_chip_id >> 24) == 6)
+        return true;
+    for (const std::string *model : { &id.sysfs_gpu_model, &id.ioctl_gpu_model }) {
+        const size_t at = model->find("Adreno");
+        if (at == std::string::npos)
+            continue;
+        size_t i = at + 6;
+        while (i < model->size() && !std::isdigit(static_cast<unsigned char>((*model)[i])))
+            i++;
+        if (i + 2 < model->size() && (*model)[i] == '6' && std::isdigit(static_cast<unsigned char>((*model)[i + 1]))
+            && std::isdigit(static_cast<unsigned char>((*model)[i + 2])))
+            return true;
+    }
+    return false;
 }
 
 } // namespace android_driver
