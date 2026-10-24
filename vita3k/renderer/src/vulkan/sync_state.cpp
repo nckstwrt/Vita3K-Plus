@@ -70,6 +70,16 @@ void sync_clipping(VKContext &context) {
         context.scissor.offset.y = 0;
     }
 
+    if (context.macrotile_replay.active) {
+        const int32_t tile_x0 = static_cast<int32_t>(context.macrotile_replay.pass_x) * context.render_target->macroblock_width;
+        const int32_t tile_y0 = static_cast<int32_t>(context.macrotile_replay.pass_y) * context.render_target->macroblock_height;
+        const int32_t x0 = std::max(context.scissor.offset.x, tile_x0);
+        const int32_t y0 = std::max(context.scissor.offset.y, tile_y0);
+        const int32_t x1 = std::min(context.scissor.offset.x + static_cast<int32_t>(context.scissor.extent.width), tile_x0 + static_cast<int32_t>(context.render_target->macroblock_width));
+        const int32_t y1 = std::min(context.scissor.offset.y + static_cast<int32_t>(context.scissor.extent.height), tile_y0 + static_cast<int32_t>(context.render_target->macroblock_height));
+        context.scissor = vk::Rect2D{ { x0, y0 }, { static_cast<uint32_t>(std::max(x1 - x0, 0)), static_cast<uint32_t>(std::max(y1 - y0, 0)) } };
+    }
+
     if (!context.is_recording)
         return;
 

@@ -355,6 +355,13 @@ void VKSurfaceCache::refresh_casts_drawn_over(const uint64_t scene_timestamp, co
     }
 }
 
+void VKSurfaceCache::reset_current_target_casts() {
+    if (!last_written_surface)
+        return;
+    for (CastedTexture &casted : last_written_surface->casted_textures)
+        casted.scene_timestamp = 0;
+}
+
 void VKSurfaceCache::perform_pending_casts(VKContext &context, uint16_t vert_texture_count, uint16_t frag_texture_count) {
     if (pending_casts.empty())
         return;
@@ -465,6 +472,17 @@ void VKSurfaceCache::destroy_surface(DepthStencilSurfaceCacheInfo &info) {
         destroy_queue.add_image(*info.sample_rate_copy);
         info.sample_rate_copy.reset();
     }
+
+    if (info.stored_copy) {
+        destroy_queue.add(info.stored_depth_view);
+        destroy_queue.add(info.stored_stencil_view);
+        destroy_queue.add_image(*info.stored_copy);
+        info.stored_copy.reset();
+    }
+    info.stored_depth_view = nullptr;
+    info.stored_stencil_view = nullptr;
+    info.stored_copy_current = false;
+    info.texture_reads = 0;
 }
 
 VKSurfaceCache::VKSurfaceCache(VKState &state)
@@ -535,6 +553,14 @@ void VKSurfaceCache::cleanup() {
         if (info.stencil_view) {
             state.device.destroy(info.stencil_view);
             info.stencil_view = nullptr;
+        }
+        if (info.stored_copy) {
+            if (info.stored_depth_view)
+                state.device.destroy(info.stored_depth_view);
+            if (info.stored_stencil_view)
+                state.device.destroy(info.stored_stencil_view);
+            info.stored_copy->destroy();
+            info.stored_copy.reset();
         }
 
         info.texture.destroy();
@@ -1096,8 +1122,12 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
     // We should be able to use this texture, so set it as mru
     color_surface_queue.set_as_mru(&info);
 
-    const vk::ImageView color_handle_view = reinterpret_cast<VKContext *>(state.context)->current_color_view;
+    VKContext *const replay_context = reinterpret_cast<VKContext *>(state.context);
+    const vk::ImageView color_handle_view = replay_context->current_color_view;
     const bool is_same_image = (color_handle_view == info.texture.view) || (color_handle_view == info.alternate_view);
+    bool replay_pre_scene = is_same_image
+        && replay_context->macrotile_replay_reads_pre_scene(start_x * bytes_per_pixel_requested / bytes_per_pixel_in_store, start_sourced_line,
+            (width * bytes_per_pixel_requested + bytes_per_pixel_in_store - 1) / bytes_per_pixel_in_store, height);
 
     if (state.features.use_texture_viewport && base_format == info.format && !raw_bits_cast) {
         // use a texture viewport
@@ -1111,7 +1141,14 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         // if everything matches
         if (vk_format == info.texture.format && swizzle == info.swizzle)
             return TextureLookupResult{
-                info.texture.view,
+                replay_pre_scene ? replay_context->macrotile_replay.pre_scene.view : info.texture.view,
+                info.texture.layout,
+                info.texture.format
+            };
+
+        if (replay_pre_scene)
+            return TextureLookupResult{
+                replay_context->macrotile_pre_scene_view(vk_format, vkutil::color_to_texture_swizzle(info.swizzle, swizzle)),
                 info.texture.layout,
                 info.texture.format
             };
@@ -1287,10 +1324,19 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         const size_t casted_index = static_cast<size_t>(casted - casted_vec.data());
         ColorSurfaceCacheInfo *info_ptr = &info;
 
+        if (replay_pre_scene && use_compute_deinterleave)
+            replay_pre_scene = false;
+        if (replay_pre_scene && info.raw_image && !replay_context->macrotile_replay.pre_scene_raw_valid)
+            replay_pre_scene = false;
+        const vk::Image pre_scene_image = replay_pre_scene ? replay_context->macrotile_replay.pre_scene.image : vk::Image();
+        const vk::Image pre_scene_raw_image = (replay_pre_scene && info.raw_image) ? replay_context->macrotile_replay.pre_scene_raw.image : vk::Image();
+
         auto record_cast = [this, info_ptr, casted_index, casted_is_new, use_compute_deinterleave,
                                bytes_per_pixel_requested, bytes_per_pixel_in_store, width, height,
-                               start_x, start_sourced_line, data_delta, stride_bytes](vk::CommandBuffer cmd_buffer) {
+                               start_x, start_sourced_line, data_delta, stride_bytes, pre_scene_image, pre_scene_raw_image](vk::CommandBuffer cmd_buffer) {
             ColorSurfaceCacheInfo &info = *info_ptr;
+            const vk::Image store_image = pre_scene_image ? pre_scene_image : info.texture.image;
+            const vk::Image store_raw_image = pre_scene_raw_image ? pre_scene_raw_image : (info.raw_image ? info.raw_image->image : vk::Image());
             CastedTexture *casted = &info.casted_textures[casted_index];
             if (casted_is_new)
                 casted->texture.transition_to(cmd_buffer, use_compute_deinterleave ? vkutil::ImageLayout::StorageImage : vkutil::ImageLayout::TransferDst);
@@ -1340,7 +1386,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
 
                 const bool cast_use_raw = bit_copy && info.raw_image && !info.content_is_blended
                     && vk::blockSize(info.raw_image->format) == vk::blockSize(casted->texture.format);
-                const vk::Image cast_src_image = cast_use_raw ? info.raw_image->image : info.texture.image;
+                const vk::Image cast_src_image = cast_use_raw ? store_raw_image : store_image;
 
                 vk::ImageMemoryBarrier src_barrier{
                     .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eShaderWrite,
@@ -1374,7 +1420,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                         LOG_WARN_ONCE("Reinterpreting a surface as a different format while rescaling it "
                                       "({}x{} -> {}x{}); the bytes cannot be preserved through the resize",
                             src_w, src_h, dst_w, dst_h);
-                    cmd_buffer.blitImage(info.texture.image, vk::ImageLayout::eGeneral, casted->texture.image, vk::ImageLayout::eTransferDstOptimal, blit, filter);
+                    cmd_buffer.blitImage(store_image, vk::ImageLayout::eGeneral, casted->texture.image, vk::ImageLayout::eTransferDstOptimal, blit, filter);
                 }
             } else {
                 LOG_INFO_ONCE("Game is doing typeless copies");
@@ -1484,7 +1530,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                         .imageExtent = { info.width, height, 1 }
                     };
                     const bool byte_use_raw = info.raw_image && !info.content_is_blended;
-                    const vk::Image byte_src = byte_use_raw ? info.raw_image->image : info.texture.image;
+                    const vk::Image byte_src = byte_use_raw ? store_raw_image : store_image;
                     vk::ImageMemoryBarrier img_barrier{
                         .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eShaderWrite,
                         .dstAccessMask = vk::AccessFlagBits::eTransferRead,
@@ -1730,6 +1776,46 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surfaces_as_cu
     };
 }
 
+static constexpr bool depth_texture_reads_stored_content = true;
+
+bool VKSurfaceCache::serves_stored_depth(const DepthStencilSurfaceCacheInfo &info) const {
+    return depth_texture_reads_stored_content && info.stored_copy_current && !info.depth_content_stored && info.stored_copy
+        && info.stored_copy->width == info.texture.width && info.stored_copy->height == info.texture.height;
+}
+
+void VKSurfaceCache::snapshot_stored_depth(DepthStencilSurfaceCacheInfo &info) {
+    vkutil::Image &live = info.texture;
+    if (!info.stored_copy || info.stored_copy->width != live.width || info.stored_copy->height != live.height || info.stored_copy->format != live.format) {
+        vkutil::DestroyQueue &destroy_queue = state.frame().destroy_queue;
+        if (info.stored_copy) {
+            destroy_queue.add(info.stored_depth_view);
+            destroy_queue.add(info.stored_stencil_view);
+            destroy_queue.add_image(*info.stored_copy);
+        }
+        info.stored_depth_view = nullptr;
+        info.stored_stencil_view = nullptr;
+        info.stored_copy = std::make_unique<vkutil::Image>(live.width, live.height, live.format);
+        info.stored_copy->init_image(vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eSampled);
+    }
+
+    vk::CommandBuffer cmd_buffer = reinterpret_cast<VKContext *>(state.context)->prerender_cmd;
+    live.transition_to(cmd_buffer, vkutil::ImageLayout::TransferSrc, vkutil::ds_subresource_range);
+    info.stored_copy->transition_to_discard(cmd_buffer, vkutil::ImageLayout::TransferDst, vkutil::ds_subresource_range);
+    vk::ImageSubresourceLayers layers = vkutil::color_subresource_layer;
+    layers.aspectMask = vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil;
+    const vk::ImageCopy image_copy{
+        .srcSubresource = layers,
+        .srcOffset = { 0, 0, 0 },
+        .dstSubresource = layers,
+        .dstOffset = { 0, 0, 0 },
+        .extent = { live.width, live.height, 1U }
+    };
+    cmd_buffer.copyImage(live.image, vk::ImageLayout::eTransferSrcOptimal, info.stored_copy->image, vk::ImageLayout::eTransferDstOptimal, image_copy);
+    live.transition_to(cmd_buffer, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
+    info.stored_copy->transition_to(cmd_buffer, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
+    info.stored_copy_current = true;
+}
+
 bool VKSurfaceCache::begin_ds_scene_depth_check(const SceGxmDepthStencilSurface &depth_stencil, bool this_scene_stores, Address scene_color_addr) {
     DepthStencilSurfaceCacheInfo *cached_info = nullptr;
     if (depth_stencil.depth_data) {
@@ -1748,6 +1834,9 @@ bool VKSurfaceCache::begin_ds_scene_depth_check(const SceGxmDepthStencilSurface 
     if (cached_info == nullptr)
         // surface not created yet: it will be created cleared, loading that is fine
         return true;
+
+    if (depth_texture_reads_stored_content && !this_scene_stores && cached_info->depth_content_stored && cached_info->texture_reads > 0 && cached_info->texture.image)
+        snapshot_stored_depth(*cached_info);
 
     const bool is_continuation = cached_info->last_scene_color_addr == scene_color_addr;
     cached_info->last_scene_color_addr = scene_color_addr;
@@ -1811,6 +1900,7 @@ bool VKSurfaceCache::try_transfer_depth_gpu(Address src_address, Address dst_add
     state.general_queue.submit(submit_info, fence);
 
     dst_info->depth_content_stored = true;
+    dst_info->stored_copy_current = false;
 
     CallbackRequestFunction vk_callback = [&state = this->state, fence, transfer_cmd]() {
         const auto result = state.device.waitForFences(fence, vk::True, std::numeric_limits<uint64_t>::max());
@@ -1832,6 +1922,8 @@ bool VKSurfaceCache::try_transfer_depth_gpu(Address src_address, Address dst_add
 void VKSurfaceCache::resolve_ds_scene_end(bool scene_wrote_depth) {
     if (pending_ds_scene != nullptr && scene_wrote_depth)
         pending_ds_scene->depth_content_stored = pending_ds_scene_stores;
+    if (pending_ds_scene != nullptr && scene_wrote_depth && pending_ds_scene_stores)
+        pending_ds_scene->stored_copy_current = false;
     pending_ds_scene = nullptr;
 }
 
@@ -2125,6 +2217,8 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
         return std::nullopt;
 
     DepthStencilSurfaceCacheInfo &cached_info = *found_info;
+    cached_info.texture_reads++;
+    const bool from_stored = serves_stored_depth(cached_info);
     if (rgba_alias)
         return retrieve_depth_as_rgba_alias(texture, texture_viewport, cached_info, address - surface_address, tiling, stride_samples, width, height);
 
@@ -2154,12 +2248,12 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
         // we can just sample from the surface itself
 
         // we must create a new read-only view if it is not already present
-        vk::ImageView &img_view = is_stencil ? cached_info.stencil_view : cached_info.depth_view;
+        vk::ImageView &img_view = from_stored ? (is_stencil ? cached_info.stored_stencil_view : cached_info.stored_depth_view) : (is_stencil ? cached_info.stencil_view : cached_info.depth_view);
         if (!img_view) {
             vk::ImageSubresourceRange range = vkutil::ds_subresource_range;
             range.aspectMask = is_stencil ? vk::ImageAspectFlagBits::eStencil : vk::ImageAspectFlagBits::eDepth;
             vk::ImageViewCreateInfo view_info{
-                .image = cached_info.texture.image,
+                .image = from_stored ? cached_info.stored_copy->image : cached_info.texture.image,
                 .viewType = vk::ImageViewType::e2D,
                 .format = state.deep_stencil_use,
                 .components = {},
@@ -2258,7 +2352,8 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
 
     read_only.depth_view.transition_to_discard(cmd_buffer, vkutil::ImageLayout::TransferDst, vkutil::ds_subresource_range);
 
-    cached_info.texture.transition_to(cmd_buffer, vkutil::ImageLayout::TransferSrc, vkutil::ds_subresource_range);
+    vkutil::Image &source = from_stored ? *cached_info.stored_copy : cached_info.texture;
+    source.transition_to(cmd_buffer, vkutil::ImageLayout::TransferSrc, vkutil::ds_subresource_range);
     vk::ImageSubresourceLayers layers = vkutil::color_subresource_layer;
     layers.aspectMask = vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil;
 
@@ -2286,7 +2381,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
             region_for(vk::ImageAspectFlagBits::eStencil)
         };
         // a depth/stencil blit must use nearest filtering
-        cmd_buffer.blitImage(cached_info.texture.image, vk::ImageLayout::eTransferSrcOptimal, read_only.depth_view.image, vk::ImageLayout::eTransferDstOptimal, blit_regions, vk::Filter::eNearest);
+        cmd_buffer.blitImage(source.image, vk::ImageLayout::eTransferSrcOptimal, read_only.depth_view.image, vk::ImageLayout::eTransferDstOptimal, blit_regions, vk::Filter::eNearest);
     } else {
         vk::ImageCopy image_copy{
             .srcSubresource = layers,
@@ -2295,11 +2390,11 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
             .dstOffset = { 0, 0, 0 },
             .extent = { std::min(width, src_width), std::min(height, src_height), 1U }
         };
-        cmd_buffer.copyImage(cached_info.texture.image, vk::ImageLayout::eTransferSrcOptimal, read_only.depth_view.image, vk::ImageLayout::eTransferDstOptimal, image_copy);
+        cmd_buffer.copyImage(source.image, vk::ImageLayout::eTransferSrcOptimal, read_only.depth_view.image, vk::ImageLayout::eTransferDstOptimal, image_copy);
     }
 
     // transition back
-    cached_info.texture.transition_to(cmd_buffer, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
+    source.transition_to(cmd_buffer, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
     read_only.depth_view.transition_to(cmd_buffer, vkutil::ImageLayout::SampledImage, vkutil::ds_subresource_range);
 
     return TextureLookupResult{
@@ -2370,8 +2465,9 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_as_rgba_alias(
 
     if (alias->scene_timestamp != context->scene_timestamp) {
         vk::CommandBuffer cmd_buffer = context->prerender_cmd;
+        vkutil::Image &source = serves_stored_depth(cached_info) ? *cached_info.stored_copy : cached_info.texture;
 
-        cached_info.texture.transition_to(cmd_buffer, vkutil::ImageLayout::TransferSrc, vkutil::ds_subresource_range);
+        source.transition_to(cmd_buffer, vkutil::ImageLayout::TransferSrc, vkutil::ds_subresource_range);
         alias->depth_view.transition_to_discard(cmd_buffer, vkutil::ImageLayout::TransferDst);
         cmd_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, depth_alias_pipeline);
         cmd_buffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, depth_alias_pipeline_layout, 0, depth_alias_desc_set, {});
@@ -2403,7 +2499,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_as_rgba_alias(
                     .imageOffset = { static_cast<int32_t>(source_x), static_cast<int32_t>(source_y + y), 0 },
                     .imageExtent = { width, rows, 1 } }
             };
-            cmd_buffer.copyImageToBuffer(cached_info.texture.image, vk::ImageLayout::eTransferSrcOptimal, depth_alias_scratch.buffer, to_buffer);
+            cmd_buffer.copyImageToBuffer(source.image, vk::ImageLayout::eTransferSrcOptimal, depth_alias_scratch.buffer, to_buffer);
 
             barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
             barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
@@ -2426,7 +2522,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_as_rgba_alias(
             cmd_buffer.copyBufferToImage(depth_alias_scratch.buffer, alias->depth_view.image, vk::ImageLayout::eTransferDstOptimal, to_image);
         }
 
-        cached_info.texture.transition_to(cmd_buffer, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
+        source.transition_to(cmd_buffer, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
         alias->depth_view.transition_to(cmd_buffer, vkutil::ImageLayout::SampledImage);
         alias->scene_timestamp = context->scene_timestamp;
     }

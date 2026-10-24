@@ -2070,6 +2070,12 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
 
                 const spv::Id viewport_flag = utils::create_access_chain(b, spv::StorageClassUniform, translation_state.render_info_id, { b.makeIntConstant(VERT_UNIFORM_viewport_flag) });
                 const spv::Id pred = b.createOp(spv::OpFOrdLessThan, b.makeBoolType(), { b.createLoad(viewport_flag, spv::NoPrecision), half });
+                constexpr bool clip_at_near_plane = true;
+                spv::Id near_distance_var = spv::NoResult;
+                if (emit_eye_clip && clip_at_near_plane) {
+                    near_distance_var = b.createVariable(spv::NoPrecision, spv::StorageClassPrivate, f32, "near_distance");
+                    b.createStore(one, near_distance_var);
+                }
                 spv::Builder::If cond_builder(pred, spv::SelectionControlMaskNone, b);
 
                 spv::Id screen_width = utils::create_access_chain(b, spv::StorageClassUniform, translation_state.render_info_id, { b.makeIntConstant(VERT_UNIFORM_screen_width) });
@@ -2107,6 +2113,8 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
                     o_val = b.createBinOp(spv::OpFMul, out_type, o_val, flip_vec_id);
                 }
                 b.createStore(o_val, out_var);
+                if (near_distance_var != spv::NoResult)
+                    b.createStore(b.createBinOp(spv::OpFAdd, f32, b.createCompositeExtract(o_val, f32, 2), b.createCompositeExtract(o_val, f32, 3)), near_distance_var);
 
                 // scale the depth and w coordinate
                 if (translation_state.render_info_id != spv::NoResult) {
@@ -2155,8 +2163,8 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
                 cond_builder.makeEndIf();
 
                 // depth clamp disables z-clipping, so clip eye-plane-crossing primitives ourselves:
-                // [0] w <= 0 is behind the eye; [1] z/w < -1 kills the near-infinity wedge that
-                // survives an exact w=0 clip (clamped-z geometry like KZ sits at z/w ~ -0.001)
+                // [0] w <= 0 is behind the eye; [1] clip-space z < -w is in front of the near plane
+                // (GXM frustum clipping, which is off while the viewport transform is off)
                 // [2] z/w beyond the far plane (only for draws whose depth test would fail on real hardware)
                 if (emit_eye_clip) {
                     const spv::Id clip_z_ref = utils::create_access_chain(b, spv::StorageClassOutput, out_var, { b.makeIntConstant(2) });
@@ -2168,7 +2176,8 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
                     const spv::Id bool_type = b.makeBoolType();
                     const spv::Id on_eye_plane = b.createBinOp(spv::OpLogicalAnd, bool_type, b.createBinOp(spv::OpFOrdEqual, bool_type, clip_w, zero), b.createUnaryOp(spv::OpLogicalNot, bool_type, pred));
                     b.createStore(b.createTriOp(spv::OpSelect, f32, on_eye_plane, b.makeFloatConstant(-std::numeric_limits<float>::min()), clip_w), clip_dist0_ref);
-                    b.createStore(b.createBinOp(spv::OpFAdd, f32, clip_z, clip_w), clip_dist1_ref);
+                    const spv::Id near_distance = near_distance_var != spv::NoResult ? b.createLoad(near_distance_var, spv::NoPrecision) : b.createBinOp(spv::OpFAdd, f32, clip_z, clip_w);
+                    b.createStore(near_distance, clip_dist1_ref);
 
                     // host float rounding can push geometry placed exactly on the far plane a ULP or two past it
                     constexpr float far_plane_tolerance = 1e-5f;

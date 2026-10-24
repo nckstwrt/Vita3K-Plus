@@ -361,8 +361,8 @@ bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProg
 
     fp->output_register_format = output_format;
     fp->multisample_mode = multisample_mode;
-    fp->color_write_mask = 0xF;
-    if (blend) {
+    fp->color_write_mask = program.has_no_color_output() ? 0 : 0xF;
+    if (blend && fp->color_write_mask && !program.is_native_color()) {
         fp->color_write_mask = ((blend->colorMask & SCE_GXM_COLOR_MASK_R) ? 1 : 0) | ((blend->colorMask & SCE_GXM_COLOR_MASK_G) ? 2 : 0)
             | ((blend->colorMask & SCE_GXM_COLOR_MASK_B) ? 4 : 0) | ((blend->colorMask & SCE_GXM_COLOR_MASK_A) ? 8 : 0);
     }

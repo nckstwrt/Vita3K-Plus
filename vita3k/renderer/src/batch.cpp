@@ -78,6 +78,67 @@ static renderer::SyncWaitResult wait_cmd(MemState &mem, CommandList &command_lis
     return renderer::wishlist(sync, timestamp, 500);
 }
 
+static constexpr bool macrotile_scene_replay = true;
+
+template <typename HandlerTable>
+static Command *replay_macrotile_scene(renderer::State &state, const FeatureState &features, MemState &mem, Config &config, CommandList &command_list, Command *set_context, const HandlerTable &handler_table) {
+    vulkan::VKContext &context = *reinterpret_cast<vulkan::VKContext *>(command_list.context);
+    if (!context.render_target || !context.render_target->has_macroblock_sync)
+        return nullptr;
+
+    int reason = -1;
+    Command *end = nullptr;
+    for (Command *scan = set_context->next; scan; scan = scan->next) {
+        if (scan->magic != Command::MAGIC_LIVE) {
+            reason = vulkan::MACROTILE_FALLBACK_STALE;
+            break;
+        }
+        if (scan->opcode == CommandOpcode::SyncSurfaceData) {
+            end = scan;
+            break;
+        }
+        if (scan->opcode == CommandOpcode::SetState) {
+            CommandHelper peek(scan);
+            const GXMState gxm_state = peek.pop<GXMState>();
+            if (gxm_state == GXMState::VisibilityBuffer || gxm_state == GXMState::VisibilityIndex) {
+                reason = vulkan::MACROTILE_FALLBACK_VISIBILITY;
+                break;
+            }
+        } else if (scan->opcode != CommandOpcode::Draw) {
+            reason = vulkan::MACROTILE_FALLBACK_OPCODE;
+            break;
+        }
+        if (scan == command_list.last)
+            break;
+    }
+    if (reason < 0 && !end)
+        reason = vulkan::MACROTILE_FALLBACK_SPLIT;
+
+    uint16_t grid_x = 0;
+    uint16_t grid_y = 0;
+    if (reason < 0)
+        reason = context.macrotile_replay_check(grid_x, grid_y);
+    if (reason >= 0)
+        return nullptr;
+
+    context.macrotile_replay_begin(grid_x, grid_y);
+    const uint32_t passes = static_cast<uint32_t>(grid_x) * grid_y;
+    for (uint32_t pass = 0; pass + 1 < passes; pass++) {
+        context.macrotile_replay_pass(pass);
+        for (Command *replayed = set_context->next; replayed != end; replayed = replayed->next) {
+            const uint8_t flags = replayed->flags;
+            replayed->flags |= Command::FLAG_NO_FREE;
+            CommandHelper helper(replayed);
+            state.last_cmd_opcode.store(static_cast<int>(replayed->opcode), std::memory_order_relaxed);
+            handler_table[static_cast<size_t>(replayed->opcode)](state, mem, config, helper, features, command_list.context);
+            replayed->flags = flags;
+        }
+        context.macrotile_replay_pass_end();
+    }
+    context.macrotile_replay_pass(passes - 1);
+    return end;
+}
+
 static void process_batch(renderer::State &state, const FeatureState &features, MemState &mem, Config &config, CommandList &command_list) {
     using CommandHandlerFunc = decltype(cmd_handle_set_context);
 
@@ -111,6 +172,7 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
 
     Command *cmd = command_list.first;
     uint32_t executed_in_list = 0;
+    Command *macrotile_scene_end = nullptr;
 
     // Take a batch, and execute it. Hope it's not too large
     do {
@@ -147,6 +209,11 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
             break;
         }
 
+        if (cmd == macrotile_scene_end) {
+            reinterpret_cast<vulkan::VKContext *>(command_list.context)->macrotile_replay_end();
+            macrotile_scene_end = nullptr;
+        }
+
         const size_t op_index = static_cast<size_t>(cmd->opcode);
         CommandHandlerFunc *handler_fn = op_index < handler_table.size() ? handler_table[op_index] : nullptr;
         if (!handler_fn) {
@@ -156,6 +223,8 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
             state.last_cmd_opcode.store(static_cast<int>(cmd->opcode), std::memory_order_relaxed); // seq-249
             state.last_cmd_epoch_ms.store(coarse_now_ms(), std::memory_order_relaxed);
             handler_fn(state, mem, config, helper, features, command_list.context);
+            if (macrotile_scene_replay && cmd->opcode == CommandOpcode::SetContext && state.current_backend == Backend::Vulkan && command_list.context)
+                macrotile_scene_end = replay_macrotile_scene(state, features, mem, config, command_list, cmd, handler_table);
         }
 
         state.progress_counter.fetch_add(1, std::memory_order_relaxed);
@@ -173,6 +242,9 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
             generic_command_free(last_cmd);
         }
     } while (true);
+
+    if (macrotile_scene_end)
+        reinterpret_cast<vulkan::VKContext *>(command_list.context)->macrotile_replay_end();
 }
 
 void process_batches(renderer::State &state, const FeatureState &features, MemState &mem, Config &config, int64_t max_wait_ms) {

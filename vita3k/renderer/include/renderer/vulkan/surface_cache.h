@@ -236,6 +236,12 @@ struct DepthStencilSurfaceCacheInfo : public SurfaceCacheInfo {
 
     // Resampled view of this surface for a pass that rasterises at a lower rate than the pass which filled it
     std::unique_ptr<vkutil::Image> sample_rate_copy;
+
+    std::unique_ptr<vkutil::Image> stored_copy;
+    vk::ImageView stored_depth_view = nullptr;
+    vk::ImageView stored_stencil_view = nullptr;
+    bool stored_copy_current = false;
+    uint32_t texture_reads = 0;
 };
 
 // result when looking in the surface cache for a texture
@@ -391,12 +397,15 @@ public:
 
     bool begin_ds_scene_depth_check(const SceGxmDepthStencilSurface &depth_stencil, bool this_scene_stores, Address scene_color_addr);
     void resolve_ds_scene_end(bool scene_wrote_depth);
+    bool serves_stored_depth(const DepthStencilSurfaceCacheInfo &info) const;
+    void snapshot_stored_depth(DepthStencilSurfaceCacheInfo &info);
 
     bool try_transfer_depth_gpu(Address src_address, Address dst_address, uint32_t width, uint32_t height);
 
     void perform_pending_casts(VKContext &context, uint16_t vert_texture_count, uint16_t frag_texture_count);
     void flush_all_pending_casts();
     void refresh_casts_drawn_over(uint64_t scene_timestamp, int32_t x0, int32_t y0, int32_t x1, int32_t y1, bool exact_coordinates);
+    void reset_current_target_casts();
     void note_cpu_write(Address address);
 
     void mark_current_surface_blended() {

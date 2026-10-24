@@ -1363,6 +1363,7 @@ enum SceGxmProgramFlags : uint32_t {
     SCE_GXM_PROGRAM_FLAG_FRAGCOLOR_USED = 1 << 7,
     SCE_GXM_PROGRAM_FLAG_NATIVECOLOR_MSAA2X = 1 << 8,
     SCE_GXM_PROGRAM_FLAG_NATIVECOLOR_MSAA4X = 1 << 9,
+    SCE_GXM_PROGRAM_FLAG_NATIVECOLOR_WRITTEN = 1 << 13,
     // Note, I'm not sure about this one
     SCE_GXM_PROGRAM_FLAG_BUFFER_STORE = 1 << 14,
     SCE_GXM_PROGRAM_FLAG_OUTPUT_UNDEFINED = 1 << 16,
@@ -1497,8 +1498,11 @@ struct SceGxmProgram {
     OFFSET_FUNCTION(SceGxmProgramParameterContainer, container, container_offset)
     // OFFSET_FUNCTION(uint8_t, sampler_query_info, sampler_query_info_offset)
 
+    bool has_no_color_output() const {
+        return is_native_color() ? !(program_flags & SCE_GXM_PROGRAM_FLAG_NATIVECOLOR_WRITTEN) : static_cast<bool>(program_flags & SCE_GXM_PROGRAM_FLAG_OUTPUT_UNDEFINED);
+    }
     bool has_no_effect() const {
-        return (program_flags & SCE_GXM_PROGRAM_FLAG_OUTPUT_UNDEFINED) && !is_discard_used() && !is_depth_replace_used();
+        return has_no_color_output() && !(program_flags & (SCE_GXM_PROGRAM_FLAG_DISCARD_USED | SCE_GXM_PROGRAM_FLAG_DEPTH_USED | SCE_GXM_PROGRAM_FLAG_BUFFER_STORE));
     }
 };
 

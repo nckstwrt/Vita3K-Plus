@@ -420,6 +420,15 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     if (!context.state.features.use_mask_bit && context.record.fragment_program_binding->is_maskupdate)
         return;
 
+    if (context.macrotile_replay.active && (context.scissor.extent.width == 0 || context.scissor.extent.height == 0)
+        && !shader::emulates_vertex_stores(*context.record.vertex_program_binding->program(), context.state.features)) {
+        for (GXMStreamInfo &stream : context.record.vertex_streams) {
+            stream.data = nullptr;
+            stream.size = 0;
+        }
+        return;
+    }
+
     // DOA5 black clothes fix:
     {
         const std::shared_ptr<ProgramBinding> &vertex_binding = context.record.vertex_program_binding;
@@ -497,7 +506,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     // when the render pass restarts within one scene (shader interlock or slow macroblock
     // multi-pass, or a mid-scene interruption such as a casted-texture copy), the re-begin
     // must load the depth-stencil, never re-run the scene-begin clear
-    if (context.is_first_scene_draw && (context.state.features.support_shader_interlock || context.ignore_macroblock || !context.render_target->has_macroblock_sync)) {
+    if (context.is_first_scene_draw && (context.state.features.support_shader_interlock || context.ignore_macroblock || !context.render_target->has_macroblock_sync || context.macrotile_replay.active)) {
         // update the render pass to load and store the depth and stencil
         context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(context.current_color_format, true, true, true, !context.record.color_surface.data, false,
             context.record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16);
@@ -648,13 +657,6 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     {
         const auto &bound_fragment = context.record.fragment_program_binding->fragment_program;
         frag_ublock.color_write_mask = static_cast<float>(bound_fragment->color_write_mask);
-        if (bound_fragment->color_write_mask != 0xF && context.record.fragment_program_binding->program()->is_native_color()) {
-            static std::mutex colormask_mutex;
-            static std::set<std::pair<const void *, int>> colormask_seen;
-            const std::lock_guard<std::mutex> colormask_lock(colormask_mutex);
-            if (colormask_seen.emplace(bound_fragment.get(), bound_fragment->color_write_mask).second)
-                LOG_INFO("[COLORMASK] native-colour fragment program {} drawn with colour write mask 0x{:X} (R=1 G=2 B=4 A=8): its storage-image write now honours it", static_cast<const void *>(bound_fragment.get()), bound_fragment->color_write_mask);
-        }
     }
     frag_ublock.res_multiplier = context.state.res_multiplier;
     frag_ublock.use_raw_image = (context.state.features.preserve_f16_nan_as_u16

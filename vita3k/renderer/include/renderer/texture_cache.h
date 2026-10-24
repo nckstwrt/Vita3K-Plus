@@ -45,7 +45,7 @@ struct YUVConversionCache {
 };
 
 enum class Backend : uint32_t;
-static constexpr size_t TextureCacheSize = 1024;
+static constexpr size_t TextureCacheSize = 4096;
 inline constexpr bool move_duplicate_texture_content = true;
 inline constexpr bool move_into_rewritten_address = true;
 

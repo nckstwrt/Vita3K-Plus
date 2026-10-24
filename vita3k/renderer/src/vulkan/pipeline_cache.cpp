@@ -1449,7 +1449,7 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     if (support_coherent_framebuffer_fetch)
         color_blending.flags = vk::PipelineColorBlendStateCreateFlagBits::eRasterizationOrderAttachmentAccessEXT;
 
-    const bool frag_has_no_output = static_cast<bool>(gxm_fragment_shader->program_flags & SCE_GXM_PROGRAM_FLAG_OUTPUT_UNDEFINED);
+    const bool frag_has_no_output = gxm_fragment_shader->has_no_color_output();
     std::array<vk::PipelineColorBlendAttachmentState, 2> blend_attachments;
     blend_attachments[1] = vk::PipelineColorBlendAttachmentState{
         .blendEnable = VK_FALSE,
