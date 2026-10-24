@@ -2006,6 +2006,7 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
         translation_state.interfaces.push_back(clip_var);
     }
     uint32_t gxm_clip_written = 0;
+    constexpr bool colour_outputs_as_unorm8 = true;
 
     for (const auto vo : vertex_outputs_list) {
         if (vertex_outputs & vo) {
@@ -2195,6 +2196,17 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
             } else if (vo == SCE_GXM_VERTEX_PROGRAM_OUTPUT_PSIZE) {
                 b.addDecoration(out_var, spv::DecorationBuiltIn, spv::BuiltInPointSize);
                 b.createStore(o_val, out_var);
+            } else if (colour_outputs_as_unorm8 && (vo == SCE_GXM_VERTEX_PROGRAM_OUTPUT_COLOR0 || vo == SCE_GXM_VERTEX_PROGRAM_OUTPUT_COLOR1)) {
+                const spv::Id zero = b.makeFloatConstant(0.0f);
+                const spv::Id one = b.makeFloatConstant(1.0f);
+                const spv::Id unorm8_max = b.makeFloatConstant(255.0f);
+                const spv::Id zeros = b.makeCompositeConstant(out_type, { zero, zero, zero, zero });
+                const spv::Id ones = b.makeCompositeConstant(out_type, { one, one, one, one });
+                const spv::Id maxes = b.makeCompositeConstant(out_type, { unorm8_max, unorm8_max, unorm8_max, unorm8_max });
+                spv::Id packed = b.createBuiltinCall(out_type, utils.std_builtins, GLSLstd450NClamp, { o_val, zeros, ones });
+                packed = b.createBuiltinCall(out_type, utils.std_builtins, GLSLstd450RoundEven, { b.createBinOp(spv::OpFMul, out_type, packed, maxes) });
+                packed = b.createBinOp(spv::OpFDiv, out_type, packed, maxes);
+                b.createStore(packed, out_var);
             } else {
                 b.createStore(o_val, out_var);
             }
