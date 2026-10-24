@@ -77,14 +77,14 @@ object NativeLib {
     external fun convertRifToZrif(path: String): String
 
     // --- Settings / Config ---
-    /** Returns the current global EmulatorConfig (all CurrentConfig + global fields). */
-    external fun getGlobalConfig(): EmulatorConfig
+    /** Returns the current global EmulatorConfig (all CurrentConfig + global fields), or null before the core is initialised. */
+    external fun getGlobalConfig(): EmulatorConfig?
     /** Returns the currently active emulated storage folder path. */
     external fun getCurrentEmulatorPath(): String
     /** Updates the active emulated storage folder path without changing the app storage root. */
     external fun setCurrentEmulatorPath(path: String): Boolean
-    /** Returns a fresh EmulatorConfig populated with emulator default values. */
-    external fun getDefaultConfig(): EmulatorConfig
+    /** Returns a fresh EmulatorConfig populated with emulator default values, or null if the config class cannot be resolved. */
+    external fun getDefaultConfig(): EmulatorConfig?
     /** Returns true when a per-app custom config file exists for [titleId]. */
     external fun hasCustomConfig(titleId: String): Boolean
     /** Returns the saved custom config for [titleId], or null when none exists. */

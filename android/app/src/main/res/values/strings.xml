@@ -630,6 +630,7 @@
     <string name="settings_emulator_share_log_desc">Open Android’s share sheet for the current Vita3K log file so it can be sent to Discord or another app.</string>
     <string name="settings_emulator_storage_folder_resolve_failed">Failed to resolve the selected storage folder.</string>
     <string name="settings_emulator_storage_folder_change_failed">Failed to switch the emulator storage folder.</string>
+    <string name="settings_emulator_not_ready">The emulator core could not start, so the settings cannot be loaded. Check the storage folder, then restart the app.</string>
     <string name="settings_emulator_storage_folder_change_success">Switched emulator storage folder to %1$s.</string>
     <string name="settings_emulator_stretch_display">Stretch the Display Area</string>
     <string name="settings_emulator_stretch_display_desc">Stretch the display area to fill the entire window, ignoring the original aspect ratio.</string>

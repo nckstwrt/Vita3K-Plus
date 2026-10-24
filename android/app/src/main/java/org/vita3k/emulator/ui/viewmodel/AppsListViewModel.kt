@@ -297,7 +297,7 @@ class AppsListViewModel(application: Application) : AndroidViewModel(application
             // The compatibility database was fetched from GitHub on every launch regardless of the
             // user's update setting. Honour the same setting the startup update check uses; the
             // locally cached database is still loaded either way, and a manual refresh still syncs.
-            val enabled = runCatching { NativeLib.getGlobalConfig().checkForUpdatesMode != 0 }
+            val enabled = runCatching { (NativeLib.getGlobalConfig()?.checkForUpdatesMode ?: 0) != 0 }
                 .getOrDefault(false)
             if (enabled && syncCompatibilityDatabase()) {
                 loadApps()
@@ -310,7 +310,7 @@ class AppsListViewModel(application: Application) : AndroidViewModel(application
 
         startupUpdateCheckStarted = true
         viewModelScope.launch {
-            val enabled = runCatching { NativeLib.getGlobalConfig().checkForUpdatesMode != 0 }.getOrDefault(false)
+            val enabled = runCatching { (NativeLib.getGlobalConfig()?.checkForUpdatesMode ?: 0) != 0 }.getOrDefault(false)
             if (enabled) {
                 checkForUpdates(manual = false)
             }

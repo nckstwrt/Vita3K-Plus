@@ -53,9 +53,9 @@ internal object SettingsRepository {
     suspend fun load(titleId: String?): SettingsSnapshot = withContext(Dispatchers.IO) {
         val hasCustomConfig = titleId != null && NativeLib.hasCustomConfig(titleId)
         val loadedConfig = when {
-            titleId == null -> NativeLib.getGlobalConfig()
+            titleId == null -> requireConfig(NativeLib.getGlobalConfig())
             hasCustomConfig -> requireNotNull(NativeLib.getCustomConfig(titleId))
-            else -> NativeLib.getGlobalConfig()
+            else -> requireConfig(NativeLib.getGlobalConfig())
         }
         buildSnapshot(loadedConfig, hasCustomConfig)
     }
@@ -69,7 +69,7 @@ internal object SettingsRepository {
     }
 
     suspend fun loadDefaults(): SettingsSnapshot = withContext(Dispatchers.IO) {
-        buildSnapshot(NativeLib.getDefaultConfig(), hasCustomConfig = false)
+        buildSnapshot(requireConfig(NativeLib.getDefaultConfig()), hasCustomConfig = false)
     }
 
     suspend fun setCurrentEmulatorPath(path: String): Boolean = withContext(Dispatchers.IO) {
@@ -79,7 +79,7 @@ internal object SettingsRepository {
     suspend fun deleteCustomConfig(titleId: String): DeleteCustomConfigResult {
         val restartRequiredSettings = RestartRequiredSetting.fromNative(NativeLib.deleteCustomConfig(titleId))
         return DeleteCustomConfigResult(
-            snapshot = buildSnapshot(NativeLib.getGlobalConfig(), hasCustomConfig = false),
+            snapshot = buildSnapshot(requireConfig(NativeLib.getGlobalConfig()), hasCustomConfig = false),
             restartRequiredSettings = restartRequiredSettings
         )
     }
@@ -143,6 +143,9 @@ internal object SettingsRepository {
 
         return supportInfo
     }
+
+    private fun requireConfig(config: EmulatorConfig?): EmulatorConfig =
+        checkNotNull(config) { "the emulator core returned no config" }
 
     private fun buildSnapshot(config: EmulatorConfig, hasCustomConfig: Boolean): SettingsSnapshot {
         val driverSupportInfo = getCustomDriverSupportInfoInternal(config.customDriverName)

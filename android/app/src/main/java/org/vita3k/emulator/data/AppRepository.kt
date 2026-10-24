@@ -1,7 +1,9 @@
 package org.vita3k.emulator.data
 
+import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.vita3k.emulator.NativeLib
 import org.vita3k.emulator.ui.viewmodel.AppAction
@@ -26,8 +28,23 @@ internal object AppRepository {
     private val updateMetadataLineRegex =
         Regex("""^\s*(Corresponding commit:|Vita3K Build:)""", RegexOption.IGNORE_CASE)
 
+    @Volatile
+    private var nativeInitFailed = false
+
     suspend fun initialize(storagePath: String): Boolean = withContext(Dispatchers.IO) {
-        NativeLib.init(storagePath)
+        nativeInitFailed = false
+        NativeLib.init(storagePath).also { nativeInitFailed = !it }
+    }
+
+    suspend fun awaitInitialized(timeoutMs: Long = 60_000): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (!NativeLib.isInitialized()) {
+            if (nativeInitFailed || SystemClock.elapsedRealtime() >= deadline) {
+                return false
+            }
+            delay(50)
+        }
+        return true
     }
 
     suspend fun getAppVersion(): String = withContext(Dispatchers.IO) {

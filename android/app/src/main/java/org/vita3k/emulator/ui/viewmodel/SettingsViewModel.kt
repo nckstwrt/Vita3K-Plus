@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.vita3k.emulator.NativeLib
 import org.vita3k.emulator.R
+import org.vita3k.emulator.data.AppRepository
 import org.vita3k.emulator.data.AppStorage
 import org.vita3k.emulator.data.CustomDriverLoadStatus
 import org.vita3k.emulator.data.CustomDriverSupportInfo
@@ -33,7 +34,7 @@ private const val GLOBAL_SETTINGS_ROUTE_KEY = "__global__"
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun initialConfig(): EmulatorConfig =
-        if (NativeLib.isInitialized()) NativeLib.getDefaultConfig() else EmulatorConfig()
+        if (NativeLib.isInitialized()) NativeLib.getDefaultConfig() ?: EmulatorConfig() else EmulatorConfig()
 
     private fun str(resId: Int, vararg args: Any): String =
         getApplication<Application>().getString(resId, *args)
@@ -122,6 +123,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         loading = true
         loadJob = viewModelScope.launch {
             try {
+                if (!AppRepository.awaitInitialized()) {
+                    if (loadRequestId == requestId) {
+                        operationResult = SettingsOperationResult(str(R.string.settings_emulator_not_ready), true)
+                    }
+                    return@launch
+                }
                 val snapshot = withContext(Dispatchers.IO) {
                     SettingsRepository.load(titleId)
                 }
