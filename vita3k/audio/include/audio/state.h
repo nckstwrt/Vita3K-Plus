@@ -89,7 +89,6 @@ struct AudioState {
     //  the adapter must be before out_ports for the destructors to work correctly
     std::unique_ptr<AudioAdapter> adapter;
     std::mutex mutex;
-    int next_port_id = 1;
     AudioOutPortPtrs out_ports;
     AudioInPort in_port;
     std::string audio_backend;

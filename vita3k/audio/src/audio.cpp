@@ -57,8 +57,6 @@ void AudioState::deinit() {
         in_port.running = false;
         in_port.len_bytes = 0;
     }
-
-    next_port_id = 1;
 }
 
 void AudioState::set_backend(const std::string &adapter_name) {

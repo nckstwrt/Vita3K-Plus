@@ -142,6 +142,19 @@ static bool audio_cfg_traced(std::atomic<uint32_t> &calls, uint32_t &n) {
     return n <= 16 || (n & (n - 1)) == 0;
 }
 
+constexpr int MAIN_PORT_SLOTS = 8;
+
+static int port_key(int port) {
+    const uint32_t value = static_cast<uint32_t>(port);
+    const uint32_t group = (value >> 8) & 0xFF;
+    const int slot = static_cast<int>(value & 0xFF);
+    if (group == SCE_AUDIO_OUT_PORT_TYPE_MAIN)
+        return slot < MAIN_PORT_SLOTS ? slot : -1;
+    if (group == SCE_AUDIO_OUT_PORT_TYPE_BGM || group == SCE_AUDIO_OUT_PORT_TYPE_VOICE)
+        return static_cast<int>(group << 8);
+    return -1;
+}
+
 EXPORT(int, sceAudioOutGetAdopt, SceAudioOutPortType type) {
     TRACY_FUNC(sceAudioOutGetAdopt, type);
     // this is used in case the vita is using voice chat, not useful for us
@@ -151,7 +164,7 @@ EXPORT(int, sceAudioOutGetAdopt, SceAudioOutPortType type) {
 
 EXPORT(int, sceAudioOutGetConfig, int port, SceAudioOutConfigType type) {
     TRACY_FUNC(sceAudioOutGetConfig, port, type);
-    const AudioOutPortPtr prt = lock_and_find(port, emuenv.audio.out_ports, emuenv.audio.mutex);
+    const AudioOutPortPtr prt = lock_and_find(port_key(port), emuenv.audio.out_ports, emuenv.audio.mutex);
     if (!prt)
         return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_PORT);
 
@@ -199,6 +212,18 @@ EXPORT(int, sceAudioOutOpenPort, SceAudioOutPortType type, int len, int freq, Sc
 
     const int channels = (mode == SCE_AUDIO_OUT_MODE_MONO) ? 1 : 2;
 
+    const std::lock_guard<std::mutex> lock(emuenv.audio.mutex);
+    int port_id = -1;
+    if (type == SCE_AUDIO_OUT_PORT_TYPE_MAIN) {
+        for (int slot = MAIN_PORT_SLOTS - 1; slot >= 0 && port_id < 0; --slot)
+            if (!emuenv.audio.out_ports.contains(slot))
+                port_id = slot;
+    } else if (!emuenv.audio.out_ports.contains(static_cast<int>(type) << 8)) {
+        port_id = static_cast<int>(type) << 8;
+    }
+    if (port_id < 0)
+        return RET_ERROR(SCE_AUDIO_OUT_ERROR_PORT_FULL);
+
     AudioOutPortPtr port = emuenv.audio.open_port(channels, freq, len);
     if (!port)
         return RET_ERROR(SCE_AUDIO_OUT_ERROR_NOT_OPENED);
@@ -209,8 +234,6 @@ EXPORT(int, sceAudioOutOpenPort, SceAudioOutPortType type, int len, int freq, Sc
     port->freq = freq;
     port->mode = mode;
 
-    const std::lock_guard<std::mutex> lock(emuenv.audio.mutex);
-    const int port_id = emuenv.audio.next_port_id++;
     emuenv.audio.out_ports.emplace(port_id, port);
 
     return port_id;
@@ -218,7 +241,7 @@ EXPORT(int, sceAudioOutOpenPort, SceAudioOutPortType type, int len, int freq, Sc
 
 EXPORT(int, sceAudioOutOutput, int port, const void *buf) {
     TRACY_FUNC(sceAudioOutOutput, port, buf);
-    const AudioOutPortPtr prt = lock_and_find(port, emuenv.audio.out_ports, emuenv.audio.mutex);
+    const AudioOutPortPtr prt = lock_and_find(port_key(port), emuenv.audio.out_ports, emuenv.audio.mutex);
     if (!prt) {
         return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_PORT);
     }
@@ -244,7 +267,7 @@ EXPORT(int, sceAudioOutOutput, int port, const void *buf) {
 
 EXPORT(int, sceAudioOutGetRestSample, int port) {
     TRACY_FUNC(sceAudioOutGetRestSample, port);
-    const AudioOutPortPtr prt = lock_and_find(port, emuenv.audio.out_ports, emuenv.audio.mutex);
+    const AudioOutPortPtr prt = lock_and_find(port_key(port), emuenv.audio.out_ports, emuenv.audio.mutex);
     if (!prt) {
         return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_PORT);
     }
@@ -269,7 +292,7 @@ EXPORT(int, sceAudioOutOpenExtPort) {
 EXPORT(int, sceAudioOutReleasePort, int port) {
     TRACY_FUNC(sceAudioOutReleasePort, port);
     const std::lock_guard<std::mutex> guard(emuenv.audio.mutex);
-    if (!emuenv.audio.out_ports.erase(port)) {
+    if (!emuenv.audio.out_ports.erase(port_key(port))) {
         return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_PORT);
     }
 
@@ -304,7 +327,7 @@ EXPORT(int, sceAudioOutSetConfig, int port, int len, int freq, int mode) {
     if ((mode >= 0) && (mode != SCE_AUDIO_OUT_MODE_MONO) && (mode != SCE_AUDIO_OUT_MODE_STEREO))
         return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_FORMAT);
 
-    AudioOutPortPtr prt = lock_and_find(port, emuenv.audio.out_ports, emuenv.audio.mutex);
+    AudioOutPortPtr prt = lock_and_find(port_key(port), emuenv.audio.out_ports, emuenv.audio.mutex);
     if (!prt)
         return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_PORT);
 
@@ -356,7 +379,7 @@ EXPORT(int, sceAudioOutSetConfig, int port, int len, int freq, int mode) {
             export_name, thread_id, port, type, old_len, set_len, old_freq, set_freq, old_mode, set_mode, left_volume, right_volume, volume, n);
 
     const std::lock_guard<std::mutex> lock(emuenv.audio.mutex);
-    emuenv.audio.out_ports.emplace(port, prt);
+    emuenv.audio.out_ports.emplace(port_key(port), prt);
 
     return 0;
 }
@@ -376,7 +399,7 @@ EXPORT(int, sceAudioOutSetVolume, int port, SceAudioOutChannelFlag ch, int *vol)
     if (ch == 0) // no channel selected, no changes
         return 0;
 
-    const AudioOutPortPtr prt = lock_and_find(port, emuenv.audio.out_ports, emuenv.audio.mutex);
+    const AudioOutPortPtr prt = lock_and_find(port_key(port), emuenv.audio.out_ports, emuenv.audio.mutex);
 
     if (!prt)
         return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_PORT);

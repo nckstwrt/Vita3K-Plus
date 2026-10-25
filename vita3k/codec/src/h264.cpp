@@ -227,8 +227,9 @@ void H264DecoderState::get_res(uint32_t &width, uint32_t &height) {
 }
 
 void H264DecoderState::get_pts(uint32_t &upper, uint32_t &lower) {
-    upper = pts_out >> 32u;
-    lower = pts_out & 0xFFFFFFFF;
+    const uint64_t pts = pts_out == static_cast<uint64_t>(AV_NOPTS_VALUE) ? ~0ull : pts_out;
+    upper = pts >> 32u;
+    lower = pts & 0xFFFFFFFF;
 }
 
 void H264DecoderState::set_output_format(bool is_yuv_p3) {
