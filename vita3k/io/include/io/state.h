@@ -112,6 +112,7 @@ struct IOState {
     std::string savedata;
     std::string title_id;
     std::string app_path;
+    int title_file_loading_delay = 0;
 
     std::string user_id;
     std::string user_name;

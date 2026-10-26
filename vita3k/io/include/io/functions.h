@@ -63,6 +63,14 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
 int read_file(void *data, IOState &io, SceUID fd, SceSize size, const char *export_name);
 int read_file_at(void *data, IOState &io, SceUID fd, SceSize size, SceOff offset, const char *export_name);
 int read_file_into_guest(MemState &mem, Address dst, IOState &io, SceUID fd, SceSize size, SceOff offset, const char *export_name);
+
+struct TitleFileLoadingDelay {
+    const char *game;
+    int delay;
+};
+TitleFileLoadingDelay find_title_file_loading_delay(const std::string &title_id);
+int effective_file_loading_delay(int configured, const IOState &io);
+
 void iodiag_log_read_dst(const char *kind, SceUID fd, SceOff offset, SceSize nbyte, int result, Address dst, const char *block, const char *thread);
 int write_file_at(SceUID fd, const void *data, SceSize size, SceOff offset, IOState &io, const char *export_name);
 int write_file(SceUID fd, const void *data, SceSize size, const IOState &io, const char *export_name);

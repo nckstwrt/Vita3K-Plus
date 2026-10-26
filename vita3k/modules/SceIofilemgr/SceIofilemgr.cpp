@@ -305,8 +305,9 @@ EXPORT(int, sceIoLseek32, const SceUID fd, const int32_t offset, const SceIoSeek
 
 EXPORT(int, sceIoRead, const SceUID fd, Ptr<void> data, const SceSize size) {
     TRACY_FUNC(sceIoRead, fd, data, size);
-    if (emuenv.cfg.current_config.file_loading_delay > 0) {
-        const uint32_t delay_us = emuenv.cfg.current_config.file_loading_delay * 1000 + size / 20;
+    const int loading_delay = effective_file_loading_delay(emuenv.cfg.current_config.file_loading_delay, emuenv.io);
+    if (loading_delay > 0) {
+        const uint32_t delay_us = loading_delay * 1000 + size / 20;
         guest_sched_release_for_block();
         std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
     }

@@ -463,6 +463,49 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
     return fd;
 }
 
+TitleFileLoadingDelay find_title_file_loading_delay(const std::string &title_id) {
+    struct TitleDelay {
+        const char *title_id;
+        const char *game;
+        int delay;
+    };
+    static constexpr TitleDelay titles[] = {
+        { "PCSB00051", "EA SPORTS FIFA Football", 20 },
+        { "PCSB00052", "EA SPORTS FIFA Football", 20 },
+        { "PCSG00039", "EA SPORTS FIFA Football", 20 },
+        { "PCSB00082", "EA SPORTS FIFA Football Demo", 20 },
+        { "PCSB00083", "EA SPORTS FIFA Football Demo", 20 },
+        { "PCSB00084", "EA SPORTS FIFA Football Demo", 20 },
+        { "PCSB00085", "EA SPORTS FIFA Football Demo", 20 },
+        { "PCSB00086", "EA SPORTS FIFA Football Demo", 20 },
+        { "PCSE00055", "EA SPORTS FIFA Football Demo", 20 },
+        { "PCSE00059", "EA SPORTS FIFA Football Demo", 20 },
+        { "PCSE00060", "EA SPORTS FIFA Football Demo", 20 },
+        { "PCSG90012", "EA SPORTS FIFA Football Demo", 20 },
+        { "PCSB00170", "FIFA 13", 20 },
+        { "PCSB00171", "FIFA 13", 20 },
+        { "PCSB00174", "FIFA 13", 20 },
+        { "PCSE00093", "FIFA 13", 20 },
+        { "PCSE00096", "FIFA 13", 20 },
+        { "PCSG00107", "FIFA 13", 20 },
+        { "PCSE00011", "Silent Hill: Book of Memories", 5 },
+        { "PCSB00115", "Silent Hill: Book of Memories", 5 },
+        { "PCSG00049", "Silent Hill: Book of Memories", 5 },
+        { "PCSE00121", "Silent Hill: Book of Memories Demo", 5 },
+        { "PCSB00193", "Silent Hill: Book of Memories Demo", 5 },
+        { "PCSG90036", "Silent Hill: Book of Memories Demo", 5 },
+    };
+    for (const auto &title : titles) {
+        if (title_id == title.title_id)
+            return { title.game, title.delay };
+    }
+    return { "", 0 };
+}
+
+int effective_file_loading_delay(const int configured, const IOState &io) {
+    return configured > 0 ? configured : io.title_file_loading_delay;
+}
+
 static constexpr bool IODIAG_ENABLED = false; // seq-185 diagnostic; served its purpose (GB3 stale pointer, KZ jump cadence). Off for commit.
 
 void iodiag_log_read_dst(const char *kind, SceUID fd, SceOff offset, SceSize nbyte, int result,

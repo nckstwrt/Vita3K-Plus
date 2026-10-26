@@ -632,9 +632,10 @@ EXPORT(SceUID, sceIoOpen, const char *file, const int flags, const SceMode mode)
         return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
     }
 
-    if (emuenv.cfg.current_config.file_loading_delay > 0)
+    const int loading_delay = effective_file_loading_delay(emuenv.cfg.current_config.file_loading_delay, emuenv.io);
+    if (loading_delay > 0)
         guest_sched_release_for_block();
-    std::this_thread::sleep_for(std::chrono::milliseconds(emuenv.cfg.current_config.file_loading_delay));
+    std::this_thread::sleep_for(std::chrono::milliseconds(loading_delay));
 
     start_preempt_file_call(export_name);
     core_lock_release_for_block();
@@ -653,8 +654,9 @@ EXPORT(SceSSize, sceIoPread, SceUID fd, Ptr<void> buf, SceSize nbyte, SceOff off
     if (offset < 0)
         return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
 
-    if (emuenv.cfg.current_config.file_loading_delay > 0) {
-        const uint32_t delay_us = emuenv.cfg.current_config.file_loading_delay * 1000 + nbyte / 20;
+    const int loading_delay = effective_file_loading_delay(emuenv.cfg.current_config.file_loading_delay, emuenv.io);
+    if (loading_delay > 0) {
+        const uint32_t delay_us = loading_delay * 1000 + nbyte / 20;
         guest_sched_release_for_block();
         std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
     }

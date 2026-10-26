@@ -528,11 +528,11 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
     // preempt-on-wake goes with accurate thread scheduling on every platform
     emuenv.kernel.preempt_on_wake = emuenv.cfg.current_config.accurate_thread_scheduling;
     emuenv.kernel.preempt_on_wake_us = emuenv.cfg.current_config.preempt_on_wake_us;
-    LOG_INFO("CONFIG (applied): memory_mapping={} accurate_thread_scheduling={} preempt_on_wake={} high_accuracy={} res_multiplier={} guest_cores={} disable_surface_sync={}",
+    LOG_INFO("CONFIG (applied): memory_mapping={} accurate_thread_scheduling={} preempt_on_wake={} high_accuracy={} res_multiplier={} guest_cores={} disable_surface_sync={} file_loading_delay={}",
         emuenv.cfg.current_config.memory_mapping, emuenv.cfg.current_config.accurate_thread_scheduling,
         emuenv.kernel.preempt_on_wake,
         emuenv.cfg.current_config.high_accuracy, emuenv.cfg.current_config.resolution_multiplier, emuenv.cfg.current_config.guest_cores,
-        emuenv.cfg.current_config.disable_surface_sync);
+        emuenv.cfg.current_config.disable_surface_sync, emuenv.cfg.current_config.file_loading_delay);
     guest_sched_set_cores(emuenv.cfg.current_config.guest_cores);
     if (emuenv.kernel.accurate_thread_scheduling)
         LOG_INFO("Accurate thread scheduling enabled: default-affinity guest threads run one at a time, by priority");
@@ -582,6 +582,14 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
 
     LOG_INFO("Title: {}", emuenv.current_app_title);
     LOG_INFO("Serial: {}", emuenv.io.title_id);
+    const TitleFileLoadingDelay title_delay = find_title_file_loading_delay(emuenv.io.title_id);
+    emuenv.io.title_file_loading_delay = title_delay.delay;
+    if (title_delay.delay > 0) {
+        if (emuenv.cfg.current_config.file_loading_delay > 0)
+            LOG_INFO("File loading delay: {} ms from settings; the title table's {} ms for {} is not used", emuenv.cfg.current_config.file_loading_delay, title_delay.delay, title_delay.game);
+        else
+            LOG_INFO("File loading delay: {} ms for {} from the title table (the setting is 0)", title_delay.delay, title_delay.game);
+    }
     LOG_INFO("Version: {}", emuenv.app_info.app_version);
     LOG_INFO("Category: {}", emuenv.app_info.app_category);
 
