@@ -67,6 +67,7 @@ void set_level(spdlog::level::level_enum log_level);
 ExitCode add_sink(const fs::path &log_path);
 void flush();
 void set_log_callback(std::function<void(std::string, int)> cb);
+void set_crash_context_provider(std::string (*provider)());
 
 } // namespace logging
 
