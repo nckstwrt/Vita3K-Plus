@@ -733,6 +733,7 @@ void apply_runtime_settings(EmuEnvState &emuenv) {
     emuenv.audio.set_global_volume(cc.audio_volume / 100.f);
     lang::set_locale(cc.sys_lang);
     emuenv.compat.log_compat_warn = emuenv.cfg.log_compat_warn;
+    emuenv.camera.apply_config(emuenv.cfg);
 
     if (!emuenv.renderer)
         return;

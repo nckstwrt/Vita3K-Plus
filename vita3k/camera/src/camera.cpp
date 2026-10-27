@@ -17,12 +17,16 @@
 
 #include "config/state.h"
 
+#include <algorithm>
 #include <array>
 #include <camera/camera.h>
 #include <camera/state.h>
+#include <cmath>
+#include <map>
 #include <rtc/rtc.h>
 #include <stb_image.h>
 #include <util/log.h>
+#include <vector>
 
 #include <SDL3/SDL_camera.h>
 #include <SDL3/SDL_timer.h>
@@ -56,25 +60,72 @@ public:
     SDL_PixelFormat format;
     SDL_Colorspace colorspace;
     std::mutex frame_mutex;
+    std::map<CameraAttributes, int> attributes;
+    std::array<uint8_t, 256> ev_table{};
+    int ev_table_value = 0;
 };
 
 Camera::Camera()
     : pImpl(std::make_unique<CameraImpl>()) {}
 Camera::~Camera() = default;
 
+struct CameraDevice {
+    SDL_CameraID id;
+    std::string name;
+    SDL_CameraPosition position;
+};
+
+static std::vector<CameraDevice> list_cameras() {
+    int num_cameras = 0;
+    SDL_CameraListPtr cameras(SDL_GetCameras(&num_cameras));
+    std::vector<CameraDevice> devices;
+    if (!cameras) {
+        LOG_DEBUG("SDL_GetCameras failed: {}", SDL_GetError());
+        SDL_ClearError();
+        return devices;
+    }
+    std::vector<SDL_CameraID> ids(cameras.get(), cameras.get() + num_cameras);
+    std::sort(ids.begin(), ids.end());
+    std::map<std::string, int> name_count;
+    for (const SDL_CameraID id : ids) {
+        const char *camera_name = SDL_GetCameraName(id);
+        const std::string name = camera_name ? camera_name : "Camera";
+        const int count = ++name_count[name];
+        devices.push_back({ id, count == 1 ? name : fmt::format("{} {}", name, count), SDL_GetCameraPosition(id) });
+    }
+    return devices;
+}
+
+static SDL_CameraSpec choose_native_spec(SDL_CameraID device_id, const SDL_CameraSpec &wanted) {
+    int count = 0;
+    std::unique_ptr<SDL_CameraSpec *[], SDL_Deleter> specs(SDL_GetCameraSupportedFormats(device_id, &count));
+    const auto covers = [&](const SDL_CameraSpec *spec) { return spec->width >= wanted.width && spec->height >= wanted.height; };
+    const auto same_aspect = [&](const SDL_CameraSpec *spec) { return spec->width * wanted.height == spec->height * wanted.width; };
+    const auto better = [&](const SDL_CameraSpec *a, const SDL_CameraSpec *b) {
+        if (covers(a) != covers(b))
+            return covers(a);
+        if (same_aspect(a) != same_aspect(b))
+            return same_aspect(a);
+        const int area_a = a->width * a->height;
+        const int area_b = b->width * b->height;
+        if (area_a != area_b)
+            return covers(a) ? area_a < area_b : area_a > area_b;
+        return static_cast<int64_t>(a->framerate_numerator) * b->framerate_denominator > static_cast<int64_t>(b->framerate_numerator) * a->framerate_denominator;
+    };
+    const SDL_CameraSpec *best = nullptr;
+    for (int i = 0; specs && i < count; i++) {
+        if (specs[i]->format != SDL_PIXELFORMAT_MJPG && !SDL_ISPIXELFORMAT_FLOAT(specs[i]->format) && (!best || better(specs[i], best)))
+            best = specs[i];
+    }
+    return best ? *best : wanted;
+}
+
 static bool init_web_camera(Camera *self) {
     // open web camera via SDL3
-    int num_cameras;
-    SDL_CameraListPtr cameras(SDL_GetCameras(&num_cameras));
-    if (!cameras) {
-        LOG_ERROR("SDL_GetCameras failed. Error: {}", SDL_GetError());
-        return false;
-    }
     self->pImpl->device_id = 0;
-    for (int i = 0; i < num_cameras; i++) {
-        auto camera_name = SDL_GetCameraName(cameras[i]);
-        if (camera_name && self->id == camera_name) {
-            self->pImpl->device_id = cameras[i];
+    for (const auto &camera : list_cameras()) {
+        if (camera.name == self->id) {
+            self->pImpl->device_id = camera.id;
             break;
         }
     }
@@ -100,11 +151,15 @@ static bool init_web_camera(Camera *self) {
         .framerate_numerator = framerate_numerator, /**< Frame rate numerator ((num / denom) == FPS, (denom / num) == duration in seconds) */
         .framerate_denominator = framerate_denominator /**< Frame rate demoninator ((num / denom) == FPS, (denom / num) == duration in seconds) */
     };
-    self->pImpl->sdl_camera.reset(SDL_OpenCamera(self->pImpl->device_id, &camera_spec));
+    const SDL_CameraSpec native_spec = choose_native_spec(self->pImpl->device_id, camera_spec);
+    self->pImpl->sdl_camera.reset(SDL_OpenCamera(self->pImpl->device_id, &native_spec));
     if (!self->pImpl->sdl_camera) {
         LOG_ERROR("Failed to open camera: {}", SDL_GetError());
         return false;
     }
+    LOG_INFO("Camera '{}' opened at {}x{} {} ({}/{} fps); the game asked for {}x{} {}, Vita3K converts each frame", self->id,
+        native_spec.width, native_spec.height, SDL_GetPixelFormatName(native_spec.format), native_spec.framerate_numerator, native_spec.framerate_denominator,
+        camera_spec.width, camera_spec.height, SDL_GetPixelFormatName(camera_spec.format));
     return true;
 }
 
@@ -175,9 +230,39 @@ static bool init_solid_color(Camera *self) {
     return true;
 }
 
-static void refresh_camera_image(Camera *self) {
-    const std::lock_guard lock(self->pImpl->frame_mutex);
+static void build_ev_table(Camera::CameraImpl &impl, int ev) {
+    const double gain = std::exp2(ev / 10.0);
+    for (int i = 0; i < 256; i++) {
+        const double linear = std::min(1.0, std::pow(i / 255.0, 2.2) * gain);
+        impl.ev_table[i] = static_cast<uint8_t>(std::lround(std::pow(linear, 1.0 / 2.2) * 255.0));
+    }
+    impl.ev_table_value = ev;
+}
 
+static SDL_Surface *convert_camera_frame(Camera *self, SDL_Surface *surface) {
+    auto &impl = *self->pImpl;
+    SDL_SurfacePtr rgb(SDL_ConvertSurfaceAndColorspace(surface, SDL_PIXELFORMAT_XRGB8888, nullptr, SDL_COLORSPACE_SRGB, 0));
+    if (rgb && (rgb->w != self->info.width || rgb->h != self->info.height))
+        rgb.reset(SDL_ScaleSurface(rgb.get(), self->info.width, self->info.height, SDL_SCALEMODE_LINEAR));
+    if (!rgb) {
+        LOG_ERROR_ONCE("Failed to convert a {}x{} {} camera frame: {}", surface->w, surface->h, SDL_GetPixelFormatName(surface->format), SDL_GetError());
+        return nullptr;
+    }
+    const auto ev_it = impl.attributes.find(CameraAttributes::EV);
+    const int ev = ev_it != impl.attributes.end() ? ev_it->second : 0;
+    if (ev != 0) {
+        if (ev != impl.ev_table_value)
+            build_ev_table(impl, ev);
+        for (int y = 0; y < rgb->h; y++) {
+            uint32_t *row = reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(rgb->pixels) + y * rgb->pitch);
+            for (int x = 0; x < rgb->w; x++)
+                row[x] = (row[x] & 0xFF000000) | (static_cast<uint32_t>(impl.ev_table[(row[x] >> 16) & 0xFF]) << 16) | (static_cast<uint32_t>(impl.ev_table[(row[x] >> 8) & 0xFF]) << 8) | impl.ev_table[row[x] & 0xFF];
+        }
+    }
+    return SDL_ConvertSurfaceAndColorspace(rgb.get(), impl.format, nullptr, impl.colorspace, 0);
+}
+
+static void refresh_camera_image(Camera *self) {
     self->pImpl->sdl_camera.reset();
     self->pImpl->frame.reset();
     if (self->type == CameraType::WebCamera) {
@@ -192,9 +277,21 @@ static void refresh_camera_image(Camera *self) {
         if (!init_solid_color(self))
             self->pImpl->frame.reset();
     }
+    if (self->type == CameraType::WebCamera)
+        LOG_INFO("Camera source: device '{}'", self->id);
+    else if (self->type == CameraType::Image)
+        LOG_INFO("Camera source: image {}", self->image);
+    else
+        LOG_INFO("Camera source: solid colour #{:06X}{}", self->color & 0xFFFFFF, self->pImpl->frame ? "" : ", which could not be created (frames are black)");
 }
 
 int Camera::get_attribute(CameraAttributes attribute) {
+    {
+        const std::lock_guard lock(pImpl->frame_mutex);
+        const auto it = pImpl->attributes.find(attribute);
+        if (it != pImpl->attributes.end())
+            return it->second;
+    }
     switch (attribute) {
     case CameraAttributes::Saturation: return SCE_CAMERA_SATURATION_10;
     case CameraAttributes::Brightness: return 128; // 0-255
@@ -220,12 +317,21 @@ int Camera::get_attribute(CameraAttributes attribute) {
     return 0;
 }
 
-int Camera::set_attribute(CameraAttributes attribute, int value) {
-    return 0;
+bool Camera::set_attribute(CameraAttributes attribute, int value) {
+    const std::lock_guard lock(pImpl->frame_mutex);
+    const auto it = pImpl->attributes.find(attribute);
+    if (it != pImpl->attributes.end() && it->second == value)
+        return false;
+    pImpl->attributes[attribute] = value;
+    return true;
 }
 
 int Camera::open(SceCameraInfo *info, uint64_t base_tick, uint64_t start_tick) {
     tick_diff_us = rtc_get_ticks(base_tick) - start_tick - (SDL_GetTicksNS() / SDL_NS_PER_US);
+    {
+        const std::lock_guard lock(pImpl->frame_mutex);
+        pImpl->attributes.clear();
+    }
     this->is_opened = true;
     this->info = {};
     memcpy(&(this->info), info, std::min<size_t>(sizeof(SceCameraInfo), info->size));
@@ -264,6 +370,7 @@ int Camera::open(SceCameraInfo *info, uint64_t base_tick, uint64_t start_tick) {
 }
 
 int Camera::start() {
+    const std::lock_guard lock(pImpl->frame_mutex);
     refresh_camera_image(this);
     this->is_started = true;
     this->frame_idx = 0;
@@ -311,9 +418,8 @@ int Camera::read(SceCameraRead *read, void *pIBase, void *pUBase, void *pVBase, 
         if (next_surface)
             SDL_ReleaseCameraFrame(pImpl->sdl_camera.get(), next_surface);
         if (surface) {
-            pImpl->frame.reset(SDL_DuplicateSurface(surface));
+            pImpl->frame.reset(convert_camera_frame(this, surface));
             SDL_ReleaseCameraFrame(pImpl->sdl_camera.get(), surface);
-            LOG_ERROR_IF(!pImpl->frame, "Failed to duplicate camera surface: {}", SDL_GetError());
             last_frame_timestamp_us = timestampNS / SDL_NS_PER_US + tick_diff_us;
         }
     }
@@ -387,6 +493,7 @@ int Camera::close() {
 }
 
 int Camera::stop() {
+    const std::lock_guard lock(pImpl->frame_mutex);
     this->is_started = false;
     pImpl->frame.reset();
     pImpl->sdl_camera.reset();
@@ -394,14 +501,17 @@ int Camera::stop() {
 }
 
 void Camera::update_config(int type, const std::string &id, const std::string &image, uint32_t color) {
+    const std::lock_guard lock(pImpl->frame_mutex);
     if (static_cast<int>(this->type) == type && this->id == id && this->image == image && this->color == color)
         return;
     this->type = static_cast<CameraType>(type);
     this->id = id;
     this->image = image;
     this->color = color;
-    if (is_started)
+    if (is_started) {
+        LOG_INFO("Camera settings changed while the game has the camera running, switching source now");
         refresh_camera_image(this);
+    }
 }
 
 void CameraState::deinit() {
@@ -421,37 +531,54 @@ void CameraState::deinit() {
     active_camera = SCE_CAMERA_DEVICE_UNKNOWN;
 }
 
+void CameraState::apply_config(Config &cfg) {
+    const std::lock_guard lock(config_mutex);
+    init_default_cameras(cfg);
+    front()->update_config(cfg.front_camera_type, cfg.front_camera_id, cfg.front_camera_image, cfg.front_camera_color);
+    back()->update_config(cfg.back_camera_type, cfg.back_camera_id, cfg.back_camera_image, cfg.back_camera_color);
+}
+
 BOOST_DESCRIBE_ENUM(SDL_CameraPosition, SDL_CAMERA_POSITION_UNKNOWN, SDL_CAMERA_POSITION_FRONT_FACING, SDL_CAMERA_POSITION_BACK_FACING)
 
 void init_default_cameras(Config &cfg) {
-    if (!((cfg.front_camera_type == WebCamera && cfg.front_camera_id.empty()) || (cfg.back_camera_type == WebCamera && cfg.back_camera_id.empty())))
+    const bool front_needed = cfg.front_camera_type == WebCamera && cfg.front_camera_id.empty();
+    const bool back_needed = cfg.back_camera_type == WebCamera && cfg.back_camera_id.empty();
+    if (!front_needed && !back_needed)
         return;
     LOG_DEBUG("Initialize default cameras...");
-    int num_cameras;
-    SDL_CameraListPtr cameras(SDL_GetCameras(&num_cameras));
-    for (int i = 0; i < num_cameras; i++) {
-        auto position = SDL_GetCameraPosition(cameras[i]);
-        LOG_TRACE("Found camera: name='{}' position={}", SDL_GetCameraName(cameras[i]), position);
-        if (position == SDL_CAMERA_POSITION_FRONT_FACING) {
-            cfg.front_camera_id = SDL_GetCameraName(cameras[i]);
-            cfg.front_camera_type = WebCamera;
-        }
-        if (position == SDL_CAMERA_POSITION_BACK_FACING) {
-            cfg.back_camera_id = SDL_GetCameraName(cameras[i]);
-            cfg.back_camera_type = WebCamera;
-        }
+    const auto cameras = list_cameras();
+    std::string front_id;
+    std::string back_id;
+    for (const auto &camera : cameras) {
+        LOG_TRACE("Found camera: name='{}' position={}", camera.name, camera.position);
+        if (camera.position == SDL_CAMERA_POSITION_FRONT_FACING && front_id.empty())
+            front_id = camera.name;
+        if (camera.position == SDL_CAMERA_POSITION_BACK_FACING && back_id.empty())
+            back_id = camera.name;
     }
-    if (num_cameras > 0) {
-        if (cfg.front_camera_id.empty()) {
-            cfg.front_camera_id = SDL_GetCameraName(cameras[0]);
-            cfg.front_camera_type = WebCamera;
-        }
-        if (cfg.back_camera_id.empty()) {
-            cfg.back_camera_id = SDL_GetCameraName(cameras[0]);
-            cfg.back_camera_type = WebCamera;
-        }
-    } else {
-        cfg.front_camera_type = SolidColor;
-        cfg.back_camera_type = SolidColor;
+    if (!cameras.empty()) {
+        if (front_id.empty())
+            front_id = cameras.front().name;
+        if (back_id.empty())
+            back_id = cameras.front().name;
     }
+    if (front_needed) {
+        if (front_id.empty())
+            cfg.front_camera_type = SolidColor;
+        else
+            cfg.front_camera_id = front_id;
+    }
+    if (back_needed) {
+        if (back_id.empty())
+            cfg.back_camera_type = SolidColor;
+        else
+            cfg.back_camera_id = back_id;
+    }
+}
+
+std::vector<std::string> get_camera_names() {
+    std::vector<std::string> names;
+    for (const auto &camera : list_cameras())
+        names.push_back(camera.name);
+    return names;
 }

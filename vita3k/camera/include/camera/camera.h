@@ -21,6 +21,9 @@
 #include <util/log.h>
 #include <util/types.h>
 
+#include <string>
+#include <vector>
+
 enum SceCameraErrorCode : uint32_t {
     SCE_CAMERA_ERROR_PARAM = 0x802E0000,
     SCE_CAMERA_ERROR_ALREADY_INIT = 0x802E0001,
@@ -344,7 +347,7 @@ public:
     uint64_t frame_interval_us = 0; // Time interval between frames in microseconds
     uint64_t tick_diff_us = 0; // Difference between emuenv ticks and SDL ticks in microseconds
     int get_attribute(CameraAttributes attribute);
-    int set_attribute(CameraAttributes attribute, int value);
+    bool set_attribute(CameraAttributes attribute, int value);
     int open(SceCameraInfo *info, uint64_t base_tick, uint64_t start_tick);
     int close();
     int start();
@@ -359,4 +362,7 @@ public:
     void update_config(int type, const std::string &id, const std::string &image, uint32_t color);
 };
 
+struct Config;
+
 void init_default_cameras(Config &cfg);
+std::vector<std::string> get_camera_names();

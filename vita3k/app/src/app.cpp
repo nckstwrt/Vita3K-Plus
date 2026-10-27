@@ -133,25 +133,7 @@ void ensure_camera_defaults(Config &cfg) {
 }
 
 std::vector<std::string> get_available_camera_names() {
-    int camera_count = 0;
-    auto *cameras = SDL_GetCameras(&camera_count);
-    if (!cameras && camera_count <= 0) {
-        SDL_ClearError();
-        return {};
-    }
-
-    std::vector<std::string> camera_names;
-    camera_names.reserve(static_cast<size_t>(std::max(camera_count, 0)));
-    for (int index = 0; index < camera_count; ++index) {
-        const char *camera_name = SDL_GetCameraName(cameras[index]);
-        if (camera_name)
-            camera_names.emplace_back(camera_name);
-    }
-
-    if (cameras)
-        SDL_free(cameras);
-
-    return camera_names;
+    return get_camera_names();
 }
 
 std::vector<AdhocAddressOption> get_available_adhoc_address_options() {

@@ -119,12 +119,11 @@ EXPORT(int, sceCameraOpen, SceCameraDevice devnum, SceCameraInfo *pInfo) {
     if (camera.is_opened) {
         return RET_ERROR(SCE_CAMERA_ERROR_ALREADY_OPEN);
     }
-    init_default_cameras(emuenv.cfg);
-    if (devnum == SCE_CAMERA_DEVICE_FRONT)
-        camera.update_config(emuenv.cfg.front_camera_type, emuenv.cfg.front_camera_id, emuenv.cfg.front_camera_image, emuenv.cfg.front_camera_color);
-    else
-        camera.update_config(emuenv.cfg.back_camera_type, emuenv.cfg.back_camera_id, emuenv.cfg.back_camera_image, emuenv.cfg.back_camera_color);
+    emuenv.camera.apply_config(emuenv.cfg);
     auto res = camera.open(pInfo, emuenv.kernel.base_tick.tick, emuenv.kernel.start_tick);
+    LOG_INFO("sceCameraOpen: {} camera, {} {}x{} at {} fps, {} range, buffer set by {}", devnum == SCE_CAMERA_DEVICE_FRONT ? "front" : "back",
+        pInfo->format, pInfo->width, pInfo->height, static_cast<int>(pInfo->framerate), pInfo->range == SCE_CAMERA_DATA_RANGE_BT601 ? "BT.601" : "full",
+        pInfo->buffer == SCE_CAMERA_BUFFER_SETBYREAD ? "read" : "open");
 
     return res;
 }
@@ -259,7 +258,7 @@ static int camera_get_attribute(EmuEnvState &emuenv, SceUID thread_id, const cha
         return RET_ERROR(SCE_CAMERA_ERROR_NOT_START);
 
     *pValue = camera.get_attribute(attribute);
-    return STUBBED("Default value");
+    return 0;
 }
 
 static int camera_set_attribute(EmuEnvState &emuenv, SceUID thread_id, const char *export_name, SceCameraDevice devnum, CameraAttributes attribute, int value) {
@@ -273,8 +272,10 @@ static int camera_set_attribute(EmuEnvState &emuenv, SceUID thread_id, const cha
     if (!camera.is_started)
         return RET_ERROR(SCE_CAMERA_ERROR_NOT_START);
 
-    UNIMPLEMENTED();
-    return camera.set_attribute(attribute, value);
+    if (camera.set_attribute(attribute, value))
+        LOG_INFO("{}: {} camera set to {}{}", export_name, devnum == SCE_CAMERA_DEVICE_FRONT ? "front" : "back", value,
+            attribute == CameraAttributes::EV ? ", applied to live camera frames as exposure compensation" : ", stored but not emulated");
+    return 0;
 }
 
 EXPORT(int, sceCameraGetSaturation, SceCameraDevice devnum, int *pValue) {

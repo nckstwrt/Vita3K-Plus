@@ -19,12 +19,16 @@
 
 #include "camera.h"
 
+#include <mutex>
+
 struct CameraState {
     // Put variable used by app here
     SceCameraDevice active_camera{ SCE_CAMERA_DEVICE_UNKNOWN };
     Camera cameras[2];
+    std::mutex config_mutex;
     Camera *front() { return &cameras[SCE_CAMERA_DEVICE_FRONT]; }
     Camera *back() { return &cameras[SCE_CAMERA_DEVICE_BACK]; }
 
+    void apply_config(Config &cfg);
     void deinit();
 };
