@@ -1386,6 +1386,32 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
             b.addName(spv_params.is_srgb_constant, "is_srgb");
         }
 
+        if (translation_state.is_vulkan && uses_depth_mirror(program, features)) {
+            spv_params.depth_func_constant = b.makeUintConstant(7, true);
+            b.addDecoration(spv_params.depth_func_constant, spv::DecorationSpecId, (int)DEPTH_MIRROR_FUNC_SPECIALIZATION_ID);
+            b.addName(spv_params.depth_func_constant, "depth_func");
+            spv_params.depth_write_constant = b.makeBoolConstant(false, true);
+            b.addDecoration(spv_params.depth_write_constant, spv::DecorationSpecId, (int)DEPTH_MIRROR_WRITE_SPECIALIZATION_ID);
+            b.addName(spv_params.depth_write_constant, "depth_write");
+
+            const spv::Id u32 = b.makeUintType(32);
+            const spv::Id depth_array = b.makeRuntimeArray(f32);
+            b.addDecoration(depth_array, spv::DecorationArrayStride, 4);
+            const spv::Id mirror_type = b.makeStructType({ u32, u32, depth_array }, "DepthMirror");
+            b.addDecoration(mirror_type, spv::DecorationBlock);
+            b.addMemberDecoration(mirror_type, 0, spv::DecorationOffset, 0);
+            b.addMemberDecoration(mirror_type, 1, spv::DecorationOffset, 4);
+            b.addMemberDecoration(mirror_type, 2, spv::DecorationOffset, 16);
+            b.addMemberName(mirror_type, 0, "width");
+            b.addMemberName(mirror_type, 1, "height");
+            b.addMemberName(mirror_type, 2, "depth");
+            b.addExtension("SPV_KHR_storage_buffer_storage_class");
+            spv_params.depth_mirror_id = b.createVariable(spv::NoPrecision, spv::StorageClassStorageBuffer, mirror_type, "depth_mirror");
+            b.addDecoration(spv_params.depth_mirror_id, spv::DecorationCoherent);
+            b.addDecoration(spv_params.depth_mirror_id, spv::DecorationDescriptorSet, 1);
+            b.addDecoration(spv_params.depth_mirror_id, spv::DecorationBinding, 3);
+        }
+
         if (translation_state.is_vulkan) {
             spv_params.has_surface_casts_constant = b.makeBoolConstant(false, true);
             b.addDecoration(spv_params.has_surface_casts_constant, spv::DecorationSpecId, (int)SURFACE_CAST_SPECIALIZATION_ID);
@@ -2432,7 +2458,9 @@ static SpirvCode convert_gxp_to_spirv_impl(const SceGxmProgram &program, const s
 
         if (program.is_frag_color_used() && features.should_use_shader_interlock()) {
             b.addExecutionMode(spv_func_main, spv::ExecutionModeSampleInterlockOrderedEXT);
-            b.addExecutionMode(spv_func_main, spv::ExecutionModeEarlyFragmentTests);
+            // early tests would ignore the depth the program writes
+            if (!(translation_state.is_vulkan && uses_depth_mirror(program, features)))
+                b.addExecutionMode(spv_func_main, spv::ExecutionModeEarlyFragmentTests);
             b.addExtension("SPV_EXT_fragment_shader_interlock");
             b.addCapability(spv::CapabilityFragmentShaderSampleInterlockEXT);
 
@@ -2744,6 +2772,7 @@ void convert_gxp_to_glsl_from_filepath(const std::string &shader_filepath_utf8) 
     };
     features.support_clip_distance = true;
     features.support_gxm_clip_planes = true;
+    features.support_depth_mirror = true;
 
     // use some default hints because we don't have them available
     Hints hints{

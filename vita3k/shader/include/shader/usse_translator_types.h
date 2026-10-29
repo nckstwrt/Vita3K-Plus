@@ -126,6 +126,10 @@ struct SpirvShaderParameters {
     spv::Id is_srgb_constant;
     // Specialization constant enabling the surface cast texture paths declared by Vulkan fragment shaders
     spv::Id has_surface_casts_constant = 0;
+    // Depth mirror buffer and the specialization constants with the draw's depth compare op and depth write enable
+    spv::Id depth_mirror_id = 0;
+    spv::Id depth_func_constant = 0;
+    spv::Id depth_write_constant = 0;
 };
 
 using Coord = std::pair<spv::Id, int>;

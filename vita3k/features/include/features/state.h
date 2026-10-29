@@ -34,6 +34,7 @@ struct FeatureState {
     bool support_gxm_clip_planes = false; ///< Route a vertex program's own CLIP0..7 outputs into gl_ClipDistance instead of dropping them
     bool force_full_precision = false; ///< Strip RelaxedPrecision so drivers that honour it (Mali = fp16) compute at fp32 instead
     bool emulate_f16_denormals = false; ///< The GPU flushes fp16 denormals when converting, so VPCK to F16 builds subnormal halves itself
+    bool support_depth_mirror = false; ///< Shader interlock with a D32 depth buffer. A blending program that writes its own depth tests it against a copy of the depth buffer as early fragment tests would ignore it
     int vertex_store_slots = 0;
 
     bool is_programmable_blending_supported() const {

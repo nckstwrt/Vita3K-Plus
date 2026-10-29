@@ -387,6 +387,10 @@ struct VKContext : public renderer::Context {
     vk::ImageView current_color_view;
     vk::ImageView current_color_storage_view;
     vk::ImageView current_ds_view;
+    vkutil::Image *current_ds_image = nullptr;
+
+    vkutil::Buffer depth_mirror;
+    bool depth_mirror_stale = true;
 
     bool is_recording = false;
     bool in_renderpass = false;
@@ -485,6 +489,9 @@ struct VKContext : public renderer::Context {
     void start_recording(bool first_in_scene = false);
     void start_render_pass(bool create_descriptor_set = true);
     void stop_render_pass();
+    void write_rendertarget_set();
+    void resize_depth_mirror(vk::DeviceSize size);
+    void refresh_depth_mirror();
     void stop_recording(const SceGxmNotification &notif1, const SceGxmNotification &notif2, bool submit = true);
 
     // check (when the render target has macroblock set) if we are drawing to another block
@@ -538,5 +545,6 @@ struct VKRenderTarget : public renderer::RenderTarget {
 struct VKFragmentProgram : public renderer::FragmentProgram {
     vk::PipelineColorBlendAttachmentState blending;
     uint64_t blending_hash;
+    bool depth_mirror = false;
 };
 } // namespace renderer::vulkan

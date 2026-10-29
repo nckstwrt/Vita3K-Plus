@@ -189,7 +189,7 @@ void PipelineCache::init(bool support_rasterized_order_access) {
     {
         // layout for the mask, color attachment as input, being an input attachment or a storage image
         // depending on whether or not we are using shader interlock
-        std::array<vk::DescriptorSetLayoutBinding, 3> layout_binding;
+        std::array<vk::DescriptorSetLayoutBinding, 4> layout_binding;
         const vk::DescriptorType intput_image_descriptor = state.features.support_shader_interlock
             ? vk::DescriptorType::eStorageImage
             : vk::DescriptorType::eInputAttachment;
@@ -212,6 +212,13 @@ void PipelineCache::init(bool support_rasterized_order_access) {
             layout_binding[binding_count++] = vk::DescriptorSetLayoutBinding{
                 .binding = 2,
                 .descriptorType = intput_image_descriptor,
+                .descriptorCount = 1,
+                .stageFlags = vk::ShaderStageFlagBits::eFragment
+            };
+        if (state.features.support_shader_interlock)
+            layout_binding[binding_count++] = vk::DescriptorSetLayoutBinding{
+                .binding = 3,
+                .descriptorType = vk::DescriptorType::eStorageBuffer,
                 .descriptorCount = 1,
                 .stageFlags = vk::ShaderStageFlagBits::eFragment
             };
@@ -626,6 +633,13 @@ static const vk::SpecializationInfo frag_spec_infos[4] = {
     { .mapEntryCount = 2, .pMapEntries = frag_spec_entries, .dataSize = sizeof(frag_spec_data[1]), .pData = frag_spec_data[1] },
     { .mapEntryCount = 2, .pMapEntries = frag_spec_entries, .dataSize = sizeof(frag_spec_data[2]), .pData = frag_spec_data[2] },
     { .mapEntryCount = 2, .pMapEntries = frag_spec_entries, .dataSize = sizeof(frag_spec_data[3]), .pData = frag_spec_data[3] },
+};
+
+static const vk::SpecializationMapEntry frag_mirror_spec_entries[] = {
+    { .constantID = shader::GAMMA_CORRECTION_SPECIALIZATION_ID, .offset = 0, .size = sizeof(uint32_t) },
+    { .constantID = shader::SURFACE_CAST_SPECIALIZATION_ID, .offset = sizeof(uint32_t), .size = sizeof(uint32_t) },
+    { .constantID = shader::DEPTH_MIRROR_FUNC_SPECIALIZATION_ID, .offset = 2 * sizeof(uint32_t), .size = sizeof(uint32_t) },
+    { .constantID = shader::DEPTH_MIRROR_WRITE_SPECIALIZATION_ID, .offset = 3 * sizeof(uint32_t), .size = sizeof(uint32_t) },
 };
 
 static Sha256Hash shader_cache_key(const SceGxmProgram *program, const Sha256Hash &base_hash, bool is_vertex, const shader::Hints &hints, const FeatureState &features, std::string &version_suffix) {
@@ -1404,7 +1418,7 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     if (cache_only && (!vertex_shader.module || !fragment_shader.module))
         // a cache-only request never translates a shader on the calling thread
         return nullptr;
-    const vk::PipelineShaderStageCreateInfo shader_stages[] = { vertex_shader, fragment_shader };
+    vk::PipelineShaderStageCreateInfo shader_stages[] = { vertex_shader, fragment_shader };
     // disable the fragment shader if gxm asks us to
     const bool is_fragment_disabled = !vertex_stores && (record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED || gxm_fragment_shader->has_no_effect());
     const uint32_t shader_stage_count = is_fragment_disabled ? 1U : 2U;
@@ -1444,6 +1458,21 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     }
     if (vertex_stores)
         ds_info = vk::PipelineDepthStencilStateCreateInfo{};
+
+    std::array<uint32_t, 4> mirror_spec_data{};
+    vk::SpecializationInfo mirror_spec_info;
+    if (fragment_program.depth_mirror && !vertex_stores && fragment_shader.pSpecializationInfo) {
+        memcpy(mirror_spec_data.data(), fragment_shader.pSpecializationInfo->pData, sizeof(frag_spec_data[0]));
+        mirror_spec_data[2] = static_cast<uint32_t>(ds_info.depthCompareOp);
+        mirror_spec_data[3] = ds_info.depthWriteEnable;
+        mirror_spec_info = vk::SpecializationInfo{
+            .mapEntryCount = static_cast<uint32_t>(std::size(frag_mirror_spec_entries)),
+            .pMapEntries = frag_mirror_spec_entries,
+            .dataSize = sizeof(mirror_spec_data),
+            .pData = mirror_spec_data.data()
+        };
+        shader_stages[1].pSpecializationInfo = &mirror_spec_info;
+    }
 
     vk::PipelineColorBlendStateCreateInfo color_blending{};
     if (support_coherent_framebuffer_fetch)

@@ -119,6 +119,15 @@ COMMAND(handle_set_context) {
 
     if (color_surface && !color_surface->disabled) {
         render_context->record.color_surface = *color_surface;
+        if (color_surface->data && (color_surface->width == 0 || color_surface->height == 0)) {
+            static uint32_t zero_size_surfaces = 0;
+            if (++zero_size_surfaces <= 8 || zero_size_surfaces % 1000 == 0)
+                LOG_ERROR("[ZEROSURF] #{}: colour surface at 0x{:X} is {}x{} (format 0x{:X}, type 0x{:X}, stride {}); the scene is drawn without it",
+                    zero_size_surfaces, color_surface->data.address(), color_surface->width, color_surface->height, static_cast<uint32_t>(color_surface->colorFormat),
+                    static_cast<uint32_t>(color_surface->surfaceType), color_surface->strideInPixels);
+            render_context->record.color_surface.data = nullptr;
+            render_context->record.color_surface.downscale = false;
+        }
     } else {
         render_context->record.color_surface.data = nullptr;
         render_context->record.color_surface.downscale = false;

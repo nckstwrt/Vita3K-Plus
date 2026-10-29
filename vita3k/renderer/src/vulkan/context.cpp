@@ -341,6 +341,7 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.current_fb_height = framebuffer.height;
     context.current_color_raw_view = framebuffer.raw_image ? framebuffer.raw_image->view : state.default_raw_image.view;
     context.current_color_raw_image = framebuffer.raw_image;
+    context.current_ds_image = framebuffer.ds_image;
 
     // make sure we are not keeping any texture from the previous pass
     // (textures can be still bound even though they are not used)
@@ -352,6 +353,7 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     }
 
     context.is_first_scene_draw = true;
+    context.depth_mirror_stale = true;
     context.last_macroblock_x = ~0;
     context.last_macroblock_y = ~0;
     context.ignore_macroblock = false;
@@ -447,6 +449,8 @@ static vk::DescriptorSet retrieve_color_descriptor(VKState &state, FrameDescript
         pool_sizes.push_back({ vk::DescriptorType::eInputAttachment, attachment_images_per_set * DESCRIPTOR_PACK_SIZE * MAX_FRAMES_RENDERING });
     if (storage_images_per_set > 0)
         pool_sizes.push_back({ vk::DescriptorType::eStorageImage, storage_images_per_set * DESCRIPTOR_PACK_SIZE * MAX_FRAMES_RENDERING });
+    if (state.features.support_shader_interlock)
+        pool_sizes.push_back({ vk::DescriptorType::eStorageBuffer, DESCRIPTOR_PACK_SIZE * MAX_FRAMES_RENDERING });
 
     vk::DescriptorPoolCreateInfo descriptor_pool_info{
         .maxSets = DESCRIPTOR_PACK_SIZE * MAX_FRAMES_RENDERING
@@ -485,6 +489,9 @@ void VKContext::start_render_pass(bool create_descriptor_set) {
 
     if (!is_recording)
         start_recording();
+
+    if (state.features.support_shader_interlock && !depth_mirror.buffer)
+        resize_depth_mirror(64);
 
     curr_renderpass_info = vk::RenderPassBeginInfo{
         .renderPass = current_render_pass,
@@ -545,7 +552,10 @@ void VKContext::start_render_pass(bool create_descriptor_set) {
 
     // update the rendertarget descriptor set
     rendertarget_set = retrieve_color_descriptor(state, state.frame().color_descriptor);
+    write_rendertarget_set();
+}
 
+void VKContext::write_rendertarget_set() {
     // update descriptor set for the whole scene with the color attachment
     const vk::DescriptorType input_type = state.features.support_shader_interlock ? vk::DescriptorType::eStorageImage : vk::DescriptorType::eInputAttachment;
 
@@ -581,6 +591,22 @@ void VKContext::start_render_pass(bool create_descriptor_set) {
     } else {
         state.device.updateDescriptorSets(write_descr, {});
     }
+
+    if (state.features.support_shader_interlock) {
+        const vk::DescriptorBufferInfo descr_mirror_info{
+            .buffer = depth_mirror.buffer,
+            .offset = 0,
+            .range = VK_WHOLE_SIZE
+        };
+        vk::WriteDescriptorSet write_mirror_descr{
+            .dstSet = rendertarget_set,
+            .dstBinding = 3,
+            .dstArrayElement = 0,
+            .descriptorType = vk::DescriptorType::eStorageBuffer,
+        };
+        write_mirror_descr.setBufferInfo(descr_mirror_info);
+        state.device.updateDescriptorSets(write_mirror_descr, {});
+    }
 }
 
 void VKContext::stop_render_pass() {
@@ -609,6 +635,91 @@ void VKContext::stop_render_pass() {
     }
 
     fill_half_pixel_strips();
+}
+
+void VKContext::resize_depth_mirror(const vk::DeviceSize size) {
+    if (depth_mirror.buffer)
+        state.frame().destroy_queue.add_buffer(depth_mirror);
+    depth_mirror = vkutil::Buffer(size);
+    depth_mirror.init_buffer(vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferDst);
+
+    render_cmd.fillBuffer(depth_mirror.buffer, 0, VK_WHOLE_SIZE, 0);
+    const vk::BufferMemoryBarrier barrier{
+        .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+        .dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = depth_mirror.buffer,
+        .offset = 0,
+        .size = VK_WHOLE_SIZE
+    };
+    render_cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eFragmentShader | vk::PipelineStageFlagBits::eTransfer, {}, {}, barrier, {});
+}
+
+void VKContext::refresh_depth_mirror() {
+    vkutil::Image *const depth = current_ds_image;
+    const uint32_t width = current_fb_width;
+    const uint32_t height = current_fb_height;
+    const bool usable = depth && depth->format == vk::Format::eD32SfloatS8Uint && width > 0 && height > 0;
+    const vk::DeviceSize needed = 16 + static_cast<vk::DeviceSize>(width) * height * 4;
+    if (usable && depth_mirror.size < needed) {
+        resize_depth_mirror(needed);
+        rendertarget_set = retrieve_color_descriptor(state, state.frame().color_descriptor);
+        write_rendertarget_set();
+    }
+
+    depth_mirror_stale = false;
+    vk::BufferMemoryBarrier mirror_barrier{
+        .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+        .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = depth_mirror.buffer,
+        .offset = 0,
+        .size = VK_WHOLE_SIZE
+    };
+    if (!usable) {
+        render_cmd.pipelineBarrier(vk::PipelineStageFlagBits::eFragmentShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, mirror_barrier, {});
+        render_cmd.fillBuffer(depth_mirror.buffer, 0, 8, 0);
+        mirror_barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+        mirror_barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+        render_cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eFragmentShader, {}, {}, mirror_barrier, {});
+        return;
+    }
+
+    vk::ImageMemoryBarrier depth_barrier{
+        .srcAccessMask = vk::AccessFlagBits::eDepthStencilAttachmentWrite,
+        .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+        .oldLayout = vk::ImageLayout::eDepthStencilReadOnlyOptimal,
+        .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = depth->image,
+        .subresourceRange = vkutil::ds_subresource_range
+    };
+    render_cmd.pipelineBarrier(vk::PipelineStageFlagBits::eEarlyFragmentTests | vk::PipelineStageFlagBits::eLateFragmentTests | vk::PipelineStageFlagBits::eFragmentShader,
+        vk::PipelineStageFlagBits::eTransfer, {}, {}, mirror_barrier, depth_barrier);
+
+    const vk::BufferImageCopy region{
+        .bufferOffset = 16,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource = { vk::ImageAspectFlagBits::eDepth, 0, 0, 1 },
+        .imageOffset = { 0, 0, 0 },
+        .imageExtent = { width, height, 1 }
+    };
+    render_cmd.copyImageToBuffer(depth->image, vk::ImageLayout::eTransferSrcOptimal, depth_mirror.buffer, region);
+    const std::array<uint32_t, 2> header = { width, height };
+    render_cmd.updateBuffer(depth_mirror.buffer, 0, sizeof(header), header.data());
+
+    depth_barrier.srcAccessMask = vk::AccessFlags();
+    depth_barrier.dstAccessMask = vk::AccessFlagBits::eDepthStencilAttachmentRead | vk::AccessFlagBits::eDepthStencilAttachmentWrite;
+    depth_barrier.oldLayout = vk::ImageLayout::eTransferSrcOptimal;
+    depth_barrier.newLayout = vk::ImageLayout::eDepthStencilReadOnlyOptimal;
+    mirror_barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+    mirror_barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+    render_cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+        vk::PipelineStageFlagBits::eEarlyFragmentTests | vk::PipelineStageFlagBits::eLateFragmentTests | vk::PipelineStageFlagBits::eFragmentShader, {}, {}, mirror_barrier, depth_barrier);
 }
 
 void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNotification &notif2, bool submit) {
@@ -1141,6 +1252,7 @@ void VKContext::macrotile_replay_pass(const uint32_t pass) {
     refresh_pipeline = true;
     current_render_pass = r.render_pass;
     is_first_scene_draw = true;
+    depth_mirror_stale = true;
     last_macroblock_x = r.pass_x;
     last_macroblock_y = r.pass_y;
     ignore_macroblock = false;

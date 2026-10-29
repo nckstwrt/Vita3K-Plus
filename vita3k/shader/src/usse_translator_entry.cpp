@@ -17,6 +17,8 @@
 
 #include <shader/usse_translator_entry.h>
 
+#include <SPIRV/GLSL.std.450.h>
+
 #include <gxm/types.h>
 #include <shader/decoder_detail.h>
 #include <shader/matcher.h>
@@ -1074,6 +1076,54 @@ spv::Function *USSERecompiler::compile_program_function() {
     return ret_func;
 }
 
+static spv::Id test_depth_mirror(spv::Builder &b, const SpirvShaderParameters &parameters, utils::SpirvUtilFunctions &utils, const spv::Id frag_depth, spv::Function *end_hook_func) {
+    const spv::Id f32 = b.makeFloatType(32);
+    const spv::Id u32 = b.makeUintType(32);
+    const spv::Id bool_type = b.makeBoolType();
+    const auto mirror_field = [&](const std::vector<spv::Id> &indices) {
+        return utils::create_access_chain(b, spv::StorageClassStorageBuffer, parameters.depth_mirror_id, indices);
+    };
+
+    const spv::Id depth = b.createBuiltinCall(f32, utils.std_builtins, GLSLstd450NClamp, { b.createLoad(frag_depth, spv::NoPrecision), b.makeFloatConstant(0.0f), b.makeFloatConstant(1.0f) });
+    b.createStore(depth, frag_depth);
+
+    const spv::Id frag_coord = b.createLoad(parameters.frag_coord_id, spv::NoPrecision);
+    const spv::Id x = b.createUnaryOp(spv::OpConvertFToU, u32, b.createCompositeExtract(frag_coord, f32, 0));
+    const spv::Id y = b.createUnaryOp(spv::OpConvertFToU, u32, b.createCompositeExtract(frag_coord, f32, 1));
+    const spv::Id width = b.createLoad(mirror_field({ b.makeIntConstant(0) }), spv::NoPrecision);
+    const spv::Id height = b.createLoad(mirror_field({ b.makeIntConstant(1) }), spv::NoPrecision);
+    const spv::Id inside_x = b.createBinOp(spv::OpULessThan, bool_type, x, width);
+    const spv::Id inside_y = b.createBinOp(spv::OpULessThan, bool_type, y, height);
+    const spv::Id inside = b.createBinOp(spv::OpLogicalAnd, bool_type, inside_x, inside_y);
+    const spv::Id index = b.createBinOp(spv::OpIAdd, u32, b.createBinOp(spv::OpIMul, u32, y, width), x);
+
+    const spv::Id passed_var = b.createVariable(spv::NoPrecision, spv::StorageClassFunction, bool_type, "depth_mirror_passed");
+    b.createStore(b.makeBoolConstant(true), passed_var);
+    spv::Builder::If inside_builder(inside, spv::SelectionControlMaskNone, b);
+    const spv::Id stored = b.createLoad(mirror_field({ b.makeIntConstant(2), index }), spv::NoPrecision);
+    const auto compare = [&](const uint32_t func_bit, const spv::Op op) {
+        const spv::Id bit = b.createBinOp(spv::OpBitwiseAnd, u32, parameters.depth_func_constant, b.makeUintConstant(func_bit));
+        const spv::Id enabled = b.createBinOp(spv::OpINotEqual, bool_type, bit, b.makeUintConstant(0));
+        return b.createBinOp(spv::OpLogicalAnd, bool_type, enabled, b.createBinOp(op, bool_type, depth, stored));
+    };
+    const spv::Id less = compare(1, spv::OpFOrdLessThan);
+    const spv::Id equal = compare(2, spv::OpFOrdEqual);
+    const spv::Id greater = compare(4, spv::OpFOrdGreaterThan);
+    const spv::Id less_or_equal = b.createBinOp(spv::OpLogicalOr, bool_type, less, equal);
+    b.createStore(b.createBinOp(spv::OpLogicalOr, bool_type, less_or_equal, greater), passed_var);
+    inside_builder.makeEndIf();
+
+    const spv::Id passed = b.createLoad(passed_var, spv::NoPrecision);
+    spv::Builder::If passed_builder(passed, spv::SelectionControlMaskNone, b);
+    b.createFunctionCall(end_hook_func, {});
+    spv::Builder::If write_builder(b.createBinOp(spv::OpLogicalAnd, bool_type, inside, parameters.depth_write_constant), spv::SelectionControlMaskNone, b);
+    b.createStore(depth, mirror_field({ b.makeIntConstant(2), index }));
+    write_builder.makeEndIf();
+    passed_builder.makeEndIf();
+
+    return passed;
+}
+
 void convert_gxp_usse_to_spirv(spv::Builder &b, const SceGxmProgram &program, const FeatureState &features, const SpirvShaderParameters &parameters, utils::SpirvUtilFunctions &utils,
     spv::Function *begin_hook_func, spv::Function *end_hook_func, const NonDependentTextureQueryCallInfos &queries, const spv::Id render_info_id, spv::Function *spv_func_main, std::vector<spv::Id> &interfaces) {
     const uint64_t *primary_program = program.primary_program_start();
@@ -1098,6 +1148,13 @@ void convert_gxp_usse_to_spirv(spv::Builder &b, const SceGxmProgram &program, co
     usse::USSERecompiler recomp(b, program, features, parameters, utils, end_hook_func, queries, render_info_id);
     recomp.visitor.seed_entry_populated_pa(parameters.frag_input_pa_regs);
 
+    if (parameters.depth_mirror_id != 0) {
+        recomp.visitor.frag_depth_id = b.createVariable(spv::NoPrecision, spv::StorageClassOutput, b.makeFloatType(32), "gl_FragDepth");
+        b.addDecoration(recomp.visitor.frag_depth_id, spv::DecorationBuiltIn, spv::BuiltInFragDepth);
+        const spv::Id frag_coord = b.createLoad(parameters.frag_coord_id, spv::NoPrecision);
+        b.createStore(b.createCompositeExtract(frag_coord, b.makeFloatType(32), 2), recomp.visitor.frag_depth_id);
+    }
+
     for (uint32_t phase = 0; phase < static_cast<uint32_t>(ShaderPhase::Max); ++phase) {
         const auto cur_phase_code = shader_code[phase];
 
@@ -1115,10 +1172,18 @@ void convert_gxp_usse_to_spirv(spv::Builder &b, const SceGxmProgram &program, co
 
     // We reach the end
     // Call end hook. If it's discard, this is not even called, so no worry
-    b.createFunctionCall(end_hook_func, {});
+    const spv::Id depth_passed = parameters.depth_mirror_id != 0 ? test_depth_mirror(b, parameters, utils, recomp.visitor.frag_depth_id, end_hook_func) : spv::NoResult;
+    if (depth_passed == spv::NoResult)
+        b.createFunctionCall(end_hook_func, {});
 
     if (features.should_use_shader_interlock() && program.is_fragment() && program.is_frag_color_used())
         b.createNoResultOp(spv::OpEndInvocationInterlockEXT);
+
+    if (depth_passed != spv::NoResult) {
+        spv::Builder::If discard_builder(b.createUnaryOp(spv::OpLogicalNot, b.makeBoolType(), depth_passed), spv::SelectionControlMaskNone, b);
+        b.makeStatementTerminator(spv::OpKill, "depth_mirror_discard");
+        discard_builder.makeEndIf();
+    }
 
     if (recomp.visitor.frag_depth_id != 0) {
         interfaces.push_back(recomp.visitor.frag_depth_id);

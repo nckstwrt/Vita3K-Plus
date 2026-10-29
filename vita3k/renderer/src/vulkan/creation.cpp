@@ -23,6 +23,7 @@
 #include <renderer/vulkan/state.h>
 
 #include <gxm/types.h>
+#include <shader/spirv_recompiler.h>
 
 #include <vkutil/vkutil.h>
 
@@ -191,7 +192,10 @@ VKRenderTarget::VKRenderTarget(VKState &state, const SceGxmRenderTargetParams &p
         depthstencil.height *= 2;
     }
 
-    depthstencil.init_image(vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eTransientAttachment);
+    if (state.features.support_depth_mirror)
+        depthstencil.init_image(vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eTransferSrc);
+    else
+        depthstencil.init_image(vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eTransientAttachment);
 
     // transition images to their right state
     vk::CommandBuffer cmd_buffer = vkutil::create_single_time_command(state.device, state.general_command_pool);
@@ -322,6 +326,7 @@ bool create(std::unique_ptr<FragmentProgram> &fp, VKState &state, const SceGxmPr
 
     // compute blending hash, as it will be used for the pipeline hash
     fp_vk->blending_hash = XXH_INLINE_XXH3_64bits(&fp_vk->blending, sizeof(vk::PipelineColorBlendAttachmentState));
+    fp_vk->depth_mirror = shader::uses_depth_mirror(program, state.features);
     return true;
 }
 

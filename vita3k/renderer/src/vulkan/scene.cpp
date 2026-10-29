@@ -516,6 +516,11 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     const ProgramBinding &fragment_program = *context.record.fragment_program_binding;
     const SceGxmProgram &fragment_program_gxp = *fragment_program.program();
 
+    const bool depth_mirror_draw = reinterpret_cast<const VKFragmentProgram *>(fragment_program.fragment_program.get())->depth_mirror && context.record.front_side_fragment_program_mode != SCE_GXM_FRAGMENT_PROGRAM_DISABLED && !fragment_program_gxp.has_no_effect();
+    if (!depth_mirror_draw && context.record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED)
+        context.depth_mirror_stale = true;
+    const bool depth_mirror_refresh = depth_mirror_draw && context.depth_mirror_stale;
+
     if (context.state.features.preserve_f16_nan_as_u16) {
         const VKFragmentProgram &vk_frag_program = *reinterpret_cast<VKFragmentProgram *>(fragment_program.fragment_program.get());
         if (vk_frag_program.blending.blendEnable)
@@ -540,9 +545,11 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         context.render_cmd.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::PipelineStageFlagBits::eFragmentShader,
             vk::DependencyFlagBits::eByRegion, {}, {}, vk::ArrayProxy<const vk::ImageMemoryBarrier>(barrier_count, barriers.data()));
     } else if (context.state.features.support_shader_interlock
-        && fragment_program_gxp.is_frag_color_used() != context.last_draw_was_framebuffer_fetch) {
+        && (fragment_program_gxp.is_frag_color_used() != context.last_draw_was_framebuffer_fetch || depth_mirror_refresh)) {
         // restart the render pass to act as a barrier
         context.render_cmd.endRenderPass();
+        if (depth_mirror_refresh)
+            context.refresh_depth_mirror();
 
         if (fragment_program_gxp.is_frag_color_used()) {
             context.curr_renderpass_info.framebuffer = context.current_shader_interlock_framebuffer;
@@ -554,6 +561,18 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
 
         context.render_cmd.beginRenderPass(context.curr_renderpass_info, vk::SubpassContents::eInline);
         context.last_draw_was_framebuffer_fetch = fragment_program_gxp.is_frag_color_used();
+    }
+
+    if (depth_mirror_draw) {
+        const auto follows = [](const auto &op) {
+            return op.func == SCE_GXM_STENCIL_FUNC_ALWAYS && op.depth_fail == SCE_GXM_STENCIL_OP_KEEP;
+        };
+        const auto &front = context.record.front_stencil_state_op;
+        if (!follows(front) || (context.record.two_sided == SCE_GXM_TWO_SIDED_ENABLED && !follows(context.record.back_stencil_state_op))) {
+            static uint32_t stencil_draws = 0;
+            if (++stencil_draws <= 8 || stencil_draws % 1000 == 0)
+                LOG_WARN("Stencil test on a draw whose blending program writes its own depth is not supported by the depth mirror (front func 0x{:X} zfail 0x{:X}, draw #{})", static_cast<uint32_t>(front.func), static_cast<uint32_t>(front.depth_fail), stencil_draws);
+        }
     }
 
     if (context.current_visibility_buffer != nullptr && context.current_query_idx != -1 && !context.is_in_query) {

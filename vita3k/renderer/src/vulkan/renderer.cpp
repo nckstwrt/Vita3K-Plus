@@ -1122,6 +1122,8 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
         features.support_shader_interlock = false;
     }
 
+    features.support_depth_mirror = features.should_use_shader_interlock() && deep_stencil_use == vk::Format::eD32SfloatS8Uint;
+
     // Diagnostic/workaround: without VK_EXT/ARM_rasterization_order_attachment_access, overlapping
     // primitives inside ONE draw have no defined order when the shader reads the colour attachment
     // (the per-draw barrier in scene.cpp only orders BETWEEN draws). On such devices this can corrupt
@@ -1259,9 +1261,9 @@ void VKState::log_gpu_configuration(const Config &cfg) {
         features.support_scaled_attribute_formats);
     LOG_INFO("  FeatureState: enable_memory_mapping={} use_texture_viewport={} spirv_shader={} emulate_f16_denormals={} features_mask=0x{:X}",
         features.enable_memory_mapping, features.use_texture_viewport, features.spirv_shader, features.emulate_f16_denormals, get_features_mask());
-    LOG_INFO("  derived: should_use_shader_interlock={} should_use_texture_barrier={} programmable_blending={}",
+    LOG_INFO("  derived: should_use_shader_interlock={} should_use_texture_barrier={} programmable_blending={} support_depth_mirror={}",
         features.should_use_shader_interlock(), features.should_use_texture_barrier(),
-        features.is_programmable_blending_supported());
+        features.is_programmable_blending_supported(), features.support_depth_mirror);
     LOG_INFO("  build switches: enable_depth_clamp={} support_clip_distance={} gxm_clip_planes={} vertex_store_slots={}", enable_depth_clamp, features.support_clip_distance, features.support_gxm_clip_planes, features.vertex_store_slots);
 
     const char *mapping_names[] = { "Disabled", "DoubleBuffer", "ExternalHost", "PageTable", "NativeBuffer" };

@@ -75,6 +75,8 @@ struct Framebuffer {
     uint32_t width;
     uint32_t height;
     vkutil::Image *raw_image = nullptr;
+    // depth-stencil image used by the framebuffer
+    vkutil::Image *ds_image = nullptr;
 };
 
 struct CastedTexture {

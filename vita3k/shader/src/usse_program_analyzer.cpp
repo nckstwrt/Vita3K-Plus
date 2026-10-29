@@ -173,6 +173,23 @@ bool uses_pn_predicate(const std::uint64_t inst) {
     }
 }
 
+static bool is_depthf(const std::uint64_t inst) {
+    return (inst >> 59) == 0b11111 && ((inst >> (32 + 20)) & 0b11) == 0b11 && ((inst >> (32 + 24)) & 0b111) == 0b011;
+}
+
+bool writes_depth(const SceGxmProgram &program) {
+    const std::uint64_t *primary = program.primary_program_start();
+    for (std::uint32_t i = 0; i < program.primary_program_instr_count; i++) {
+        if (is_depthf(primary[i]))
+            return true;
+    }
+    for (const std::uint64_t *inst = program.secondary_program_start(); inst < program.secondary_program_end(); inst++) {
+        if (is_depthf(*inst))
+            return true;
+    }
+    return false;
+}
+
 bool is_buffer_fetch_or_store(const std::uint64_t inst, int &base, int &cursor, int &offset, int &size) {
     // TODO: Is there any exception? Like any instruction use pre or post increment addressing mode.
     cursor = 0;

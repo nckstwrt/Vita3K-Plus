@@ -400,7 +400,7 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
         }
     } catch (const std::exception &e) {
         // a lost device fails every later submit so stop drawing rather than let it reach std::terminate
-        LOG_CRITICAL("Render thread stopped: {}", e.what());
+        LOG_CRITICAL("Render thread stopped: {} (last command opcode {})", e.what(), state.last_cmd_opcode.load(std::memory_order_relaxed));
         state.render_abort = true;
         state.command_finish_one.notify_all();
     }
