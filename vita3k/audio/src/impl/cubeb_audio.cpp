@@ -19,44 +19,74 @@
 #include "util/log.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+
+static uint64_t steady_now_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static int queued_frames(const CubebAudioOutPort &port) {
+    if (port.nb_buffers_ready <= 0 || port.frame_bytes == 0)
+        return 0;
+    return (port.nb_buffers_ready * port.len_bytes - port.head_position) / port.frame_bytes;
+}
+
+static int unplayed_frames(const CubebAudioOutPort &port, const uint64_t now) {
+    return port.play_end_us > now ? static_cast<int>((port.play_end_us - now) * port.spec.rate / 1000000) : 0;
+}
+
+static int pacing_threshold(const CubebAudioOutPort &port) {
+    const int callback = static_cast<int>(std::max(port.latency_frames, port.max_callback_frames));
+    const int wanted = std::max(3 * callback, AUDIO_MIN_QUEUE_MS * static_cast<int>(port.spec.rate) / 1000);
+    const int capacity = static_cast<int>(port.audio_buffers.size() - 1) * port.len_bytes / std::max(port.frame_bytes, 1);
+    return std::min(wanted, capacity);
+}
 
 static long impl_cubeb_audio_callback(cubeb_stream *stream, void *user_data, const void *input, void *output, long nframes) {
     assert(user_data != nullptr);
     assert(stream != nullptr);
     CubebAudioOutPort *port = static_cast<CubebAudioOutPort *>(user_data);
     uint8_t *output_buffer = static_cast<uint8_t *>(output);
+    const uint64_t now = steady_now_us();
 
+    std::unique_lock<std::mutex> lock(port->mutex);
+    const int ready = port->nb_buffers_ready;
+    int next = port->next_audio_buffer;
+    lock.unlock();
+
+    // the guest only fills buffers that are not ready, so the ready ones can be read without the lock
     int bytes_given = 0;
+    int released = 0;
     const int bytes_to_give = nframes * port->spec.channels * sizeof(uint16_t);
-    while (bytes_given < bytes_to_give) {
-        if (port->nb_buffers_ready == 0) {
-            // no data available, should we wait for it or return nothing?
-            // return nothing for now
-            break;
-        }
-
-        AudioBuffer &audio_buffer = port->audio_buffers[port->next_audio_buffer];
+    while (bytes_given < bytes_to_give && released < ready) {
+        AudioBuffer &audio_buffer = port->audio_buffers[next];
         // compute the number of bytes we can copy from this buffer to the output
         const int bytes_to_copy = std::min(bytes_to_give - bytes_given, port->len_bytes - audio_buffer.buffer_position);
         memcpy(&output_buffer[bytes_given], &audio_buffer.buffer[audio_buffer.buffer_position], bytes_to_copy);
         audio_buffer.buffer_position += bytes_to_copy;
-
-        if (audio_buffer.buffer_position == port->len_bytes) {
-            // if we are done with this buffer, tell it
-            std::unique_lock<std::mutex> lock(port->mutex);
-            port->next_audio_buffer = (port->next_audio_buffer + 1) % port->audio_buffers.size();
-            port->nb_buffers_ready--;
-            lock.unlock();
-            port->cond_var.notify_one();
-        }
-
         bytes_given += bytes_to_copy;
+        if (audio_buffer.buffer_position == port->len_bytes) {
+            next = (next + 1) % port->audio_buffers.size();
+            released++;
+        }
     }
 
     // ran dry so play silence instead of whatever the device buffer held before
     if (bytes_given < bytes_to_give)
         memset(&output_buffer[bytes_given], 0, bytes_to_give - bytes_given);
+
+    lock.lock();
+    port->next_audio_buffer = next;
+    port->nb_buffers_ready -= released;
+    port->head_position = port->nb_buffers_ready > 0 ? port->audio_buffers[next].buffer_position : 0;
+    if (port->callbacks >= 8)
+        port->max_callback_frames = std::max(port->max_callback_frames, static_cast<uint32_t>(nframes));
+    const uint64_t callback_us = static_cast<uint64_t>(nframes) * 1000000 / std::max<uint32_t>(port->spec.rate, 1);
+    port->play_end_us = std::min(std::max(port->play_end_us, now) + callback_us, now + 2 * callback_us);
+    port->callbacks++;
+    lock.unlock();
+    port->cond_var.notify_all();
 
     return nframes;
 }
@@ -101,7 +131,7 @@ AudioOutPortPtr CubebAudioAdapter::open_port(int nb_channels, int freq, int nb_s
         .prefs = CUBEB_STREAM_PREF_NONE
     };
 
-    uint32_t latency;
+    uint32_t latency = 0;
     cubeb_get_min_latency(cubeb_ctx, &port->spec, &latency);
 
     if (cubeb_stream_init(cubeb_ctx, &port->out_stream, "Vita3K audio out", nullptr, nullptr, nullptr,
@@ -112,11 +142,14 @@ AudioOutPortPtr CubebAudioAdapter::open_port(int nb_channels, int freq, int nb_s
     }
 
     port->len_bytes = nb_sample * nb_channels * sizeof(uint16_t);
+    port->len_microseconds = static_cast<uint64_t>(nb_sample) * 1'000'000ULL / freq;
+    port->frame_bytes = nb_channels * sizeof(uint16_t);
+    port->latency_frames = latency;
 
-    // allocate enough buffers to satisfy a callback and to hold AUDIO_MIN_QUEUE_MS (+1 to make sure one buffer can be ready)
     const uint32_t sample_count = static_cast<uint32_t>(nb_sample);
     const uint32_t min_queue_frames = static_cast<uint32_t>(freq) * AUDIO_MIN_QUEUE_MS / 1000;
-    const int nb_buffers = static_cast<int>(std::max((latency + sample_count - 1) / sample_count, (min_queue_frames + sample_count - 1) / sample_count)) + 1;
+    const uint32_t threshold = std::max(3 * latency, min_queue_frames);
+    const int nb_buffers = static_cast<int>((2 * threshold + sample_count - 1) / sample_count) + 1;
     port->audio_buffers.resize(nb_buffers);
     for (AudioBuffer &audio_buffer : port->audio_buffers) {
         // initialize all the buffers
@@ -136,11 +169,21 @@ void CubebAudioAdapter::audio_output(AudioOutPort &out_port, const void *buffer)
     if (out_port.stopping)
         return;
 
-    if (port.nb_buffers_ready == port.audio_buffers.size()) {
-        port.cond_var.wait(lock);
+    const uint64_t deadline = steady_now_us() + 2 * port.len_microseconds;
+    for (;;) {
+        const uint64_t now = steady_now_us();
+        const int pending = queued_frames(port) + unplayed_frames(port, now);
+        const int threshold = pacing_threshold(port);
+        if (pending <= threshold || now >= deadline)
+            break;
+        const uint64_t wait_us = std::min<uint64_t>(deadline - now, static_cast<uint64_t>(pending - threshold) * 1000000 / std::max<uint32_t>(port.spec.rate, 1) + 1);
+        port.cond_var.wait_for(lock, std::chrono::microseconds(wait_us));
         if (out_port.stopping)
             return;
     }
+    port.cond_var.wait(lock, [&] { return port.nb_buffers_ready < static_cast<int>(port.audio_buffers.size()) || out_port.stopping; });
+    if (out_port.stopping)
+        return;
 
     assert(port.nb_buffers_ready < port.audio_buffers.size());
     if (buffer) {
@@ -159,6 +202,12 @@ void CubebAudioAdapter::audio_output(AudioOutPort &out_port, const void *buffer)
 void CubebAudioAdapter::set_volume(AudioOutPort &out_port, float volume) {
     CubebAudioOutPort &port = static_cast<CubebAudioOutPort &>(out_port);
     cubeb_stream_set_volume(port.out_stream, volume);
+}
+
+int CubebAudioAdapter::get_rest_sample(AudioOutPort &out_port) {
+    CubebAudioOutPort &port = static_cast<CubebAudioOutPort &>(out_port);
+    const std::lock_guard<std::mutex> lock(port.mutex);
+    return queued_frames(port);
 }
 
 void CubebAudioAdapter::switch_state(const bool pause) {
