@@ -60,6 +60,10 @@ constexpr bool PAGE_NAME_TRACKING = true;
 static AccessViolationHandler access_violation_handler;
 static void register_access_violation_handler(const AccessViolationHandler &handler);
 
+static thread_local void *t_fault_host_context = nullptr;
+static void fault_host_registers(std::vector<std::pair<const char *, uint64_t>> &out);
+static bool fault_read_guest(const MemState &state, Address addr, void *dst, uint32_t size);
+
 static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_count, const char *name, const bool force);
 static void delete_memory(uint8_t *memory);
 
@@ -476,6 +480,12 @@ void set_fault_context_provider(std::string (*provider)()) {
     g_fault_context_provider = provider;
 }
 
+bool (*g_fault_guest_registers_provider)(uint32_t regs[16]) = nullptr;
+
+void set_fault_guest_registers_provider(bool (*provider)(uint32_t regs[16])) {
+    g_fault_guest_registers_provider = provider;
+}
+
 static inline uint8_t *guest_host_ptr(const MemState &mem, Address addr) {
     return mem.use_page_table ? mem.page_table[addr / KiB(4)] + addr : mem.memory.get() + addr;
 }
@@ -556,6 +566,97 @@ void memset_guest(MemState &mem, Address dst, int ch, uint32_t size) {
     }
 }
 
+static void log_fault_registers(MemState &state) {
+    static std::atomic<uint32_t> dumps{ 0 };
+    const uint32_t dump = dumps.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (dump > 3)
+        return;
+
+    std::vector<std::pair<Address, std::string>> addresses;
+    const uint64_t arena = std::bit_cast<uint64_t>(state.memory.get());
+    const auto note_address = [&](uint64_t value, const std::string &reg) {
+        Address guest = 0;
+        if (value < (1ULL << 32)) {
+            guest = static_cast<Address>(value);
+        } else if (value >= arena && value < arena + TOTAL_MEM_SIZE) {
+            guest = static_cast<Address>(value - arena);
+        } else if (state.use_page_table) {
+            // try_lock: this thread may have faulted while holding it
+            const std::unique_lock<std::mutex> lock(state.external_mapping_mutex, std::try_to_lock);
+            if (!lock.owns_lock())
+                return;
+            const auto it = state.external_mapping.lower_bound(value);
+            if (it == state.external_mapping.end() || value >= it->first + it->second.size)
+                return;
+            guest = it->second.address + static_cast<Address>(value - it->first);
+        } else {
+            return;
+        }
+        if (guest < 0x10000 || !is_valid_addr(state, guest))
+            return;
+        for (auto &[address, regs] : addresses) {
+            if (address == guest) {
+                regs += "," + reg;
+                return;
+            }
+        }
+        if (addresses.size() < 16)
+            addresses.emplace_back(guest, reg);
+    };
+
+    uint32_t guest_regs[16] = {};
+    if (g_fault_guest_registers_provider && g_fault_guest_registers_provider(guest_regs)) {
+        std::string text;
+        for (int i = 0; i < 16; i++) {
+            text += fmt::format(" r{}=0x{:X}", i, guest_regs[i]);
+            if (i != 15)
+                note_address(guest_regs[i], fmt::format("r{}", i));
+        }
+        LOG_CRITICAL("[FAULTREGS] #{} guest registers as the JIT last stored them (r13 sp, r14 lr, r15 pc; the faulting block may have changed some since):{}", dump, text);
+    }
+    std::vector<std::pair<const char *, uint64_t>> host;
+    fault_host_registers(host);
+    if (!host.empty()) {
+        std::string text;
+        for (const auto &[name, value] : host) {
+            text += fmt::format(" {}=0x{:X}", name, value);
+            note_address(value, name);
+        }
+        LOG_CRITICAL("[FAULTREGS] #{} host registers (the JIT keeps live guest values in these):{}", dump, text);
+    }
+
+    std::vector<uint8_t> page(STANDARD_PAGE_SIZE);
+    const auto page_state = [&](int64_t page_addr) {
+        if (page_addr < 0 || page_addr >= static_cast<int64_t>(TOTAL_MEM_SIZE) || !is_valid_addr(state, static_cast<Address>(page_addr))
+            || !fault_read_guest(state, static_cast<Address>(page_addr), page.data(), STANDARD_PAGE_SIZE))
+            return ' ';
+        return std::all_of(page.begin(), page.end(), [](uint8_t b) { return b == 0; }) ? '0' : '.';
+    };
+    const auto words_from = [&](Address start, uint32_t count) {
+        std::string words;
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t value = 0;
+            words += fault_read_guest(state, start + i * 4, &value, sizeof(value)) ? fmt::format(" {:08X}", value) : std::string(" ????????");
+        }
+        return words;
+    };
+    std::sort(addresses.begin(), addresses.end());
+    for (const auto &[address, regs] : addresses) {
+        const int64_t page_addr = address & ~0xFFFu;
+        std::string map;
+        for (int i = -32; i <= 32; i++)
+            map += page_state(page_addr + i * static_cast<int64_t>(STANDARD_PAGE_SIZE));
+        const bool mapped = state.use_page_table && state.page_table[address / KiB(4)] != state.memory.get();
+        const Address start = (address & ~3u) - 0x40;
+        LOG_CRITICAL("[FAULTREGS] #{} guest 0x{:08X} in {}: its page {} ({}); pages -32..+32 ('0' all zero, '.' data, ' ' none): [{}]; words from 0x{:08X}:{}",
+            dump, address, regs, map[32] == '0' ? "reads all zero" : (map[32] == '.' ? "has data" : "is unreadable"), mapped ? "GPU-mapped buffer" : "guest arena",
+            map, start, words_from(start, 64));
+    }
+    const Address sp = guest_regs[13] & ~3u;
+    if (sp >= 0x10000 && is_valid_addr(state, sp))
+        LOG_CRITICAL("[FAULTREGS] #{} guest stack from sp 0x{:08X}:{}", dump, sp, words_from(sp, 128));
+}
+
 bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcept {
     g_refused_guest_access = false;
     const uintptr_t memory_addr = reinterpret_cast<uintptr_t>(state.memory.get());
@@ -599,6 +700,7 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
         if (invalid_count.fetch_add(1, std::memory_order_relaxed) < 8)
             LOG_CRITICAL("Refused {} to INVALID guest address 0x{:X} (host 0x{:X}){}", write ? "write" : "read", vaddr, fault_addr,
                 g_fault_context_provider ? g_fault_context_provider() : std::string());
+        log_fault_registers(state);
         g_refused_guest_access = true;
         return false;
     }
@@ -612,6 +714,7 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
         if (null_count.fetch_add(1, std::memory_order_relaxed) < 8)
             LOG_CRITICAL("Refused {} to the NULL guard page (guest 0x{:X}){}", write ? "write" : "read", vaddr,
                 g_fault_context_provider ? g_fault_context_provider() : std::string());
+        log_fault_registers(state);
         g_refused_guest_access = true;
         return false;
     }
@@ -1099,6 +1202,24 @@ static bool rip_in_host_module(const uint64_t rip) noexcept {
     return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(rip), &module) != 0;
 }
 
+static void fault_host_registers(std::vector<std::pair<const char *, uint64_t>> &out) {
+#ifdef _M_X64
+    const CONTEXT *ctx = static_cast<const CONTEXT *>(t_fault_host_context);
+    if (!ctx)
+        return;
+    out = { { "rax", ctx->Rax }, { "rbx", ctx->Rbx }, { "rcx", ctx->Rcx }, { "rdx", ctx->Rdx }, { "rsi", ctx->Rsi }, { "rdi", ctx->Rdi },
+        { "rbp", ctx->Rbp }, { "rsp", ctx->Rsp }, { "r8", ctx->R8 }, { "r9", ctx->R9 }, { "r10", ctx->R10 }, { "r11", ctx->R11 },
+        { "r12", ctx->R12 }, { "r13", ctx->R13 }, { "r14", ctx->R14 }, { "r15", ctx->R15 }, { "rip", ctx->Rip } };
+#else
+    (void)out;
+#endif
+}
+
+// the SEH in debug_safe_copy_guest catches an unreadable page
+static bool fault_read_guest(const MemState &state, Address addr, void *dst, uint32_t size) {
+    return debug_safe_copy_guest(state, addr, dst, size);
+}
+
 static void zero_context_register(CONTEXT *ctx, const ZydisRegister reg) noexcept {
     const ZydisRegisterClass cls = ZydisRegisterGetClass(reg);
     switch (cls) {
@@ -1188,7 +1309,11 @@ static LONG WINAPI exception_handler(PEXCEPTION_POINTERS pExp) noexcept {
 
     if (pExp->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && !is_executing) {
         g_refused_guest_access = false;
-        if (access_violation_handler(ptr, is_writing)) {
+        void *const outer_context = t_fault_host_context;
+        t_fault_host_context = pExp->ContextRecord;
+        const bool handled = access_violation_handler(ptr, is_writing);
+        t_fault_host_context = outer_context;
+        if (handled) {
             return EXCEPTION_CONTINUE_EXECUTION;
         }
         if (g_refused_guest_access && g_emulate_refused_jit_access.load(std::memory_order_relaxed) && emulate_refused_jit_access(pExp, ptr, is_writing)) {
@@ -1210,6 +1335,65 @@ static void register_access_violation_handler(const AccessViolationHandler &hand
 
 static thread_local sigjmp_buf t_fault_probe_jmp;
 static thread_local volatile bool t_fault_probe_active = false;
+
+static bool fault_read_guest(const MemState &state, Address addr, void *dst, uint32_t size) {
+    sigset_t faults;
+    sigset_t previous;
+    sigemptyset(&faults);
+    sigaddset(&faults, SIGSEGV);
+    sigaddset(&faults, SIGBUS);
+    volatile bool ok = false;
+    t_fault_probe_active = true;
+    if (sigsetjmp(t_fault_probe_jmp, 1) == 0) {
+        pthread_sigmask(SIG_UNBLOCK, &faults, &previous);
+        const bool copied = debug_safe_copy_guest(state, addr, dst, size);
+        // an optimised build may otherwise store ok before the copy, and keep it when the copy faults
+        std::atomic_signal_fence(std::memory_order_seq_cst);
+        ok = copied;
+        pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+    }
+    t_fault_probe_active = false;
+    return ok;
+}
+
+static void fault_host_registers(std::vector<std::pair<const char *, uint64_t>> &out) {
+    const ucontext_t *context = static_cast<const ucontext_t *>(t_fault_host_context);
+    if (!context)
+        return;
+#if defined(__aarch64__)
+    static const char *const names[] = { "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+        "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28", "x29", "x30" };
+#if defined(__APPLE__)
+    for (int i = 0; i < 29; i++)
+        out.emplace_back(names[i], context->uc_mcontext->__ss.__x[i]);
+    out.emplace_back("x29", context->uc_mcontext->__ss.__fp);
+    out.emplace_back("x30", context->uc_mcontext->__ss.__lr);
+    out.emplace_back("sp", context->uc_mcontext->__ss.__sp);
+    out.emplace_back("pc", context->uc_mcontext->__ss.__pc);
+#else
+    for (int i = 0; i < 31; i++)
+        out.emplace_back(names[i], context->uc_mcontext.regs[i]);
+    out.emplace_back("sp", context->uc_mcontext.sp);
+    out.emplace_back("pc", context->uc_mcontext.pc);
+#endif
+#elif defined(__x86_64__)
+#if defined(__APPLE__)
+    const auto &ss = context->uc_mcontext->__ss;
+    out = { { "rax", ss.__rax }, { "rbx", ss.__rbx }, { "rcx", ss.__rcx }, { "rdx", ss.__rdx }, { "rsi", ss.__rsi }, { "rdi", ss.__rdi },
+        { "rbp", ss.__rbp }, { "rsp", ss.__rsp }, { "r8", ss.__r8 }, { "r9", ss.__r9 }, { "r10", ss.__r10 }, { "r11", ss.__r11 },
+        { "r12", ss.__r12 }, { "r13", ss.__r13 }, { "r14", ss.__r14 }, { "r15", ss.__r15 }, { "rip", ss.__rip } };
+#else
+    const auto *g = context->uc_mcontext.gregs;
+    const auto reg = [g](int index) { return static_cast<uint64_t>(g[index]); };
+    out = { { "rax", reg(REG_RAX) }, { "rbx", reg(REG_RBX) }, { "rcx", reg(REG_RCX) }, { "rdx", reg(REG_RDX) }, { "rsi", reg(REG_RSI) },
+        { "rdi", reg(REG_RDI) }, { "rbp", reg(REG_RBP) }, { "rsp", reg(REG_RSP) }, { "r8", reg(REG_R8) }, { "r9", reg(REG_R9) },
+        { "r10", reg(REG_R10) }, { "r11", reg(REG_R11) }, { "r12", reg(REG_R12) }, { "r13", reg(REG_R13) }, { "r14", reg(REG_R14) },
+        { "r15", reg(REG_R15) }, { "rip", reg(REG_RIP) } };
+#endif
+#else
+    (void)out;
+#endif
+}
 
 static uintptr_t extract_fault_pc(ucontext_t *context) {
 #if defined(__aarch64__)
@@ -1336,7 +1520,10 @@ static void signal_handler(int sig, siginfo_t *info, void *uct) noexcept {
 #endif
 
         if (!is_executing) {
-            if (access_violation_handler(reinterpret_cast<uint8_t *>(info->si_addr), is_writing)) {
+            t_fault_host_context = context;
+            const bool handled = access_violation_handler(reinterpret_cast<uint8_t *>(info->si_addr), is_writing);
+            t_fault_host_context = nullptr;
+            if (handled) {
                 return;
             }
         }

@@ -599,6 +599,18 @@ static std::string fault_context_provider() {
         pc, lr, imp_nid, import_name(imp_nid), imp_lr);
 }
 
+static bool fault_guest_registers(uint32_t regs[16]) {
+    CPUState *cpu = get_current_cpu_state();
+    if (!cpu)
+        return false;
+    for (int i = 0; i < 13; i++)
+        regs[i] = read_reg(*cpu, i);
+    regs[13] = read_sp(*cpu);
+    regs[14] = read_lr(*cpu);
+    regs[15] = read_pc(*cpu);
+    return true;
+}
+
 static std::string crash_context_provider() {
     const ThreadState *thread = g_tls_guest_thread;
     if (!thread)
@@ -627,6 +639,7 @@ bool late_init(EmuEnvState &state) {
     // for the stop-the-world bracket around page-table memory transitions
     state.renderer->kernel = &state.kernel;
     set_fault_context_provider(&fault_context_provider);
+    set_fault_guest_registers_provider(&fault_guest_registers);
     logging::set_crash_context_provider(&crash_context_provider);
 
     const bool need_page_table = state.renderer->mapping_method == MappingMethod::PageTable || state.renderer->mapping_method == MappingMethod::NativeBuffer;

@@ -375,8 +375,6 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
 
     logical->superframe_staging.clear();
 
-    state->samples_generated_since_key_on += decoded_size * SCE_NGS_MAX_SYSTEM_CHANNELS;
-    state->samples_generated_total += decoded_size * SCE_NGS_MAX_SYSTEM_CHANNELS;
     state->bytes_consumed_since_key_on += superframe_size;
     state->total_bytes_consumed += superframe_size;
     runtime->decoder->export_state(&logical->saved_state);
@@ -463,6 +461,8 @@ bool Atrac9Module::process(KernelState &kern, const MemState &mem, const SceUID 
 
     logical->decoded_pcm.consume_frames(samples_to_be_passed);
     logical->samples_played += samples_to_be_passed;
+    state->samples_generated_since_key_on += samples_to_be_passed * SCE_NGS_MAX_SYSTEM_CHANNELS;
+    state->samples_generated_total += samples_to_be_passed * SCE_NGS_MAX_SYSTEM_CHANNELS;
 
     if (!is_finished && limit > 0 && logical->samples_played >= static_cast<uint64_t>(limit)) {
         voice_lock.unlock();

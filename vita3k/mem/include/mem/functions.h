@@ -77,6 +77,7 @@ void memset_guest(MemState &mem, Address dst, int ch, uint32_t size);
 bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcept;
 bool test_arm64_atomics_on(void *ptr);
 void set_fault_context_provider(std::string (*provider)());
+void set_fault_guest_registers_provider(bool (*provider)(uint32_t regs[16]));
 Block alloc_block(MemState &mem, uint32_t size, const char *name, Address start_addr = user_main_memory_start);
 Address alloc_at(MemState &state, Address address, uint32_t size, const char *name);
 Address try_alloc_at(MemState &state, Address address, uint32_t size, const char *name);
