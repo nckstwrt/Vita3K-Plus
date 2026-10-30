@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <ctrl/ctrl.h>
+#include <util/mmx_targeting_fix.h>
 #include <ctrl/functions.h>
 #include <ctrl/state.h>
 
@@ -275,6 +276,53 @@ static void retrieve_ctrl_data(EmuEnvState &emuenv, int port, bool is_v2, bool n
         apply_keyboard(&buttons, axes.data(), is_v2, emuenv);
         for (const auto &[_, controller] : state.controllers) {
             apply_controller(emuenv, &buttons, axes.data(), controller.controller.get(), is_v2);
+        }
+    }
+
+    // Metal Max Xeno (PCSG00972) targeting fix. Preserve the exact test
+    // workflow that proved v1.57: press SELECT+START after SHOOTING appears to
+    // arm the validator + conditional clear-LOS type-6 fix. Input is not
+    // consumed or altered. Other titles are unaffected.
+    if (port == 1 && emuenv.io.title_id != "PCSG00972"
+        && mmx_targeting_fix::enabled.exchange(false, std::memory_order_acq_rel)) {
+        mmx_targeting_fix::validator_semantic_armed.store(false, std::memory_order_release);
+        mmx_targeting_fix::validator_restore_pending.store(false, std::memory_order_release);
+        mmx_targeting_fix::geometry_clear.store(false, std::memory_order_release);
+        mmx_targeting_fix::geometry_raw.store(0, std::memory_order_release);
+        mmx_targeting_fix::type6_branch_translated.store(false, std::memory_order_release);
+        mmx_targeting_fix::combo_latched.store(false, std::memory_order_release);
+    }
+
+    if (port == 1 && emuenv.io.title_id == "PCSG00972") {
+        if (mmx_targeting_fix::validator_restore_pending.exchange(false, std::memory_order_acq_rel)) {
+            mmx_targeting_fix::validator_remap_translated.store(false, std::memory_order_release);
+            mmx_targeting_fix::validator_saved_store_suppressed.store(false, std::memory_order_release);
+            emuenv.kernel.invalidate_jit_cache(0x810DCC80U, 0x180U);
+            LOG_WARN("[MMX-FIX-VALIDATOR-RESTORE] restored natural validator translation");
+        }
+
+        constexpr std::uint32_t combo = SCE_CTRL_SELECT | SCE_CTRL_START;
+        const bool down = (buttons & combo) == combo;
+        if ((buttons & combo) == 0)
+            mmx_targeting_fix::combo_latched.store(false, std::memory_order_release);
+
+        if (down && !mmx_targeting_fix::combo_latched.exchange(true, std::memory_order_acq_rel)) {
+            mmx_targeting_fix::enabled.store(true, std::memory_order_release);
+            mmx_targeting_fix::validator_semantic_armed.store(true, std::memory_order_release);
+            mmx_targeting_fix::validator_restore_pending.store(false, std::memory_order_release);
+            mmx_targeting_fix::validator_remap_translated.store(false, std::memory_order_release);
+            mmx_targeting_fix::validator_saved_store_suppressed.store(false, std::memory_order_release);
+            mmx_targeting_fix::validator_selected_ordinal.store(0, std::memory_order_release);
+            mmx_targeting_fix::validator_resolved_id.store(0, std::memory_order_release);
+            mmx_targeting_fix::geometry_clear.store(false, std::memory_order_release);
+            mmx_targeting_fix::geometry_raw.store(0, std::memory_order_release);
+            mmx_targeting_fix::type6_branch_translated.store(false, std::memory_order_release);
+
+            // Restore/retranslate the only two code regions modified by the
+            // minimal fix. The EDFA0 callback itself is always instrumented.
+            emuenv.kernel.invalidate_jit_cache(0x810DCC80U, 0x180U);
+            emuenv.kernel.invalidate_jit_cache(0x810ED400U, 0x200U);
+            LOG_WARN("[MMX-V1.57-ARMED] PCSG00972 minimal gameplay fix active; validator corrections + conditional clear-LOS type6 bypass; Fire/Blocked UI untouched");
         }
     }
 

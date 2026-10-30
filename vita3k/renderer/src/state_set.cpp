@@ -78,13 +78,25 @@ COMMAND_SET_STATE(region_clip) {
 COMMAND_SET_STATE(program) {
     TRACY_FUNC_COMMANDS_SET_STATE(program);
     const Ptr<void> program = helper.pop<Ptr<void>>();
+    auto *binding_payload = helper.pop<std::shared_ptr<ProgramBinding> *>();
     const bool is_fragment = helper.pop<bool>();
+
+    if (!binding_payload || !*binding_payload) {
+        LOG_ERROR("SetProgram command has no host-side program binding");
+        return;
+    }
+
+    const std::shared_ptr<ProgramBinding> binding = *binding_payload;
+    // Immediate commands execute once. Deferred commands may be linked and executed again, so
+    // their payload is released only when the deferred command list is destroyed.
+    if (!(helper.cmd->flags & Command::FLAG_NO_FREE))
+        delete binding_payload;
 
     if (is_fragment) {
         render_context->record.fragment_program = program.cast<SceGxmFragmentProgram>();
-        const SceGxmFragmentProgram *gxm_program = render_context->record.fragment_program.get(mem);
-        render_context->record.fragment_program_hash = gxm_program->renderer_data->hash;
-        render_context->record.is_maskupdate = gxm_program->is_maskupdate;
+        render_context->record.fragment_program_binding = binding;
+        render_context->record.fragment_program_hash = binding->fragment_program->hash;
+        render_context->record.is_maskupdate = binding->is_maskupdate;
 
         switch (renderer.current_backend) {
         case Backend::OpenGL:
@@ -100,8 +112,8 @@ COMMAND_SET_STATE(program) {
         }
     } else {
         render_context->record.vertex_program = program.cast<SceGxmVertexProgram>();
-        const SceGxmVertexProgram *gxm_program = render_context->record.vertex_program.get(mem);
-        render_context->record.vertex_program_hash = gxm_program->renderer_data->hash;
+        render_context->record.vertex_program_binding = binding;
+        render_context->record.vertex_program_hash = binding->vertex_program->hash;
     }
 
     if (renderer.current_backend == Backend::Vulkan) {
@@ -116,8 +128,8 @@ COMMAND_SET_STATE(uniform_buffer) {
     const int block_num = helper.pop<int>();
     const std::uint32_t size = helper.pop<std::uint32_t>();
 
-    renderer::ShaderProgram *program = is_vertex ? reinterpret_cast<ShaderProgram *>(render_context->record.vertex_program.get(mem)->renderer_data.get())
-                                                 : reinterpret_cast<ShaderProgram *>(render_context->record.fragment_program.get(mem)->renderer_data.get());
+    renderer::ShaderProgram *program = is_vertex ? static_cast<ShaderProgram *>(render_context->record.vertex_program_binding->vertex_program.get())
+                                                 : static_cast<ShaderProgram *>(render_context->record.fragment_program_binding->fragment_program.get());
 
     switch (renderer.current_backend) {
     case Backend::OpenGL:
