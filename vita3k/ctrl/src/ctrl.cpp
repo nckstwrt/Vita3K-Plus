@@ -111,6 +111,31 @@ static void map_android_half_controllers() {
     }
     SDL_free(joysticks);
 }
+
+static void map_android_digital_triggers(SDL_Gamepad *gamepad, SDL_JoystickID id, std::string_view name) {
+    if (SDL_IsJoystickVirtual(id))
+        return;
+    const int buttons = SDL_GetNumJoystickButtons(SDL_GetGamepadJoystick(gamepad));
+    const bool add_left = !SDL_GamepadHasAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) && buttons > 15;
+    const bool add_right = !SDL_GamepadHasAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) && buttons > 16;
+    if (!add_left && !add_right)
+        return;
+    char *current = SDL_GetGamepadMapping(gamepad);
+    if (!current)
+        return;
+    std::string mapping = current;
+    SDL_free(current);
+    if (!mapping.empty() && mapping.back() != ',')
+        mapping += ',';
+    if (add_left)
+        mapping += "lefttrigger:b15,";
+    if (add_right)
+        mapping += "righttrigger:b16,";
+    const bool added = SDL_AddGamepadMapping(mapping.c_str()) >= 0;
+    LOG_INFO("[CTRL] '{}' (gamepad {}, {} buttons) has no analog {}, its L2/R2 keys now act as the triggers{}: left {}, right {}; {}",
+        name, id, buttons, add_left && add_right ? "L2/R2" : (add_left ? "L2" : "R2"), added ? std::string() : fmt::format(" FAILED ({})", SDL_GetError()),
+        SDL_GamepadHasAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) ? "mapped" : "none", SDL_GamepadHasAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) ? "mapped" : "none", mapping);
+}
 #endif
 
 void refresh_controllers(CtrlState &state, EmuEnvState &emuenv) {
@@ -177,6 +202,10 @@ void refresh_controllers(CtrlState &state, EmuEnvState &emuenv) {
             LOG_WARN("[CTRL] gamepad {} has no name, ignored", gamepad_id);
             continue;
         }
+
+#ifdef __ANDROID__
+        map_android_digital_triggers(controller.get(), gamepad_id, controller_name);
+#endif
 
         // reserved after the open so a failed open holds no port
         Controller new_controller;
@@ -370,6 +399,15 @@ static void retrieve_ctrl_data(EmuEnvState &emuenv, int port, bool is_v2, bool n
     reset_axes();
 }
 
+static void report_extra_buttons(EmuEnvState &emuenv, int port, uint32_t buttons) {
+    static constexpr std::pair<uint32_t, const char *> EXTRA_BUTTONS[] = { { SCE_CTRL_L2, "L2" }, { SCE_CTRL_R2, "R2" }, { SCE_CTRL_L3, "L3" }, { SCE_CTRL_R3, "R3" } };
+    static std::atomic<uint32_t> reported{ 0 };
+    for (const auto &[bit, name] : EXTRA_BUTTONS) {
+        if ((buttons & bit) && !(reported.fetch_or(bit, std::memory_order_relaxed) & bit))
+            LOG_INFO("[CTRL] {} reached the game for the first time (port {}, PS TV mode {})", name, port, emuenv.cfg.current_config.pstv_mode ? "on" : "off");
+    }
+}
+
 int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2 *pData, SceUInt32 count, bool negative, bool is_peek, bool is_v2, bool from_ext) {
     emuenv.display.guest_input_reads.fetch_add(1, std::memory_order_relaxed);
     if (port > 1 && !emuenv.cfg.current_config.pstv_mode) {
@@ -403,6 +441,8 @@ int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2
     uint64_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(ts.time_since_epoch()).count();
     pData->timeStamp = timestamp;
     retrieve_ctrl_data(emuenv, port, is_v2, negative, from_ext, pData->buttons, pData->lx, pData->ly, pData->rx, pData->ry);
+    if (is_v2)
+        report_extra_buttons(emuenv, port, negative ? ~pData->buttons : pData->buttons);
 
     for (int i = 1; i < nb_returned_data; i++) {
         memcpy(&pData[i], &pData[0], sizeof(SceCtrlData2));

@@ -46,6 +46,8 @@ QString restart_required_setting_label(config::RestartRequiredSetting setting) {
         return QCoreApplication::translate("SettingsDialogTooltips", "Accurate Thread Scheduling");
     case config::RestartRequiredSetting::GuestCores:
         return QCoreApplication::translate("SettingsDialogTooltips", "Guest CPU Cores");
+    case config::RestartRequiredSetting::PstvMode:
+        return QCoreApplication::translate("SettingsDialogTooltips", "PlayStation TV Mode (PSTV)");
     }
 
     return {};
@@ -136,7 +138,7 @@ SettingsDialogTooltips::SettingsDialogTooltips(QObject *parent)
     , front_camera(tr("Select the front camera source.\nSolid Color or Static Image can be used as substitutes."))
     , back_camera(tr("Select the back camera source.\nSolid Color or Static Image can be used as substitutes."))
     , enter_button(tr("Select which button acts as the Enter/Confirm button. Some apps ignore this setting."))
-    , pstv_mode(tr("Enable PlayStation TV mode."))
+    , pstv_mode(tr("Makes games detect a PlayStation TV with a DualShock controller. Some games only accept L2/R2 and L3/R3 in this mode, and some change their controls.\nTakes effect the next time a game starts."))
     , show_mode(tr("Enable Show Mode."))
     , demo_mode(tr("Enable Demo Mode."))
     , boot_fullscreen(tr("Automatically enter fullscreen when booting an app."))

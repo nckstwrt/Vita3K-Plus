@@ -485,7 +485,7 @@
     <string name="settings_system_enter_circle">Circle</string>
     <string name="settings_system_enter_cross">Cross</string>
     <string name="settings_system_pstv_mode">PlayStation TV Mode (PSTV)</string>
-    <string name="settings_system_pstv_mode_desc">Enable PlayStation TV mode.</string>
+    <string name="settings_system_pstv_mode_desc">Makes games detect a PlayStation TV with a DualShock controller. Some games only accept L2/R2 and L3/R3 in this mode, and some change their controls. Takes effect the next time a game starts.</string>
     <string name="settings_system_show_mode">Show Mode</string>
     <string name="settings_system_show_mode_desc">Enable Show Mode.</string>
     <string name="settings_system_demo_mode">Demo Mode</string>

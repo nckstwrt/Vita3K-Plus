@@ -151,6 +151,7 @@ std::vector<RestartRequiredSetting> get_restart_required_settings(
     append_if_changed(before.validation_layer != after.validation_layer, RestartRequiredSetting::ValidationLayer);
     append_if_changed(before.accurate_thread_scheduling != after.accurate_thread_scheduling, RestartRequiredSetting::AccurateThreadScheduling);
     append_if_changed(before.guest_cores != after.guest_cores, RestartRequiredSetting::GuestCores);
+    append_if_changed(before.pstv_mode != after.pstv_mode, RestartRequiredSetting::PstvMode);
 
     return changed;
 }

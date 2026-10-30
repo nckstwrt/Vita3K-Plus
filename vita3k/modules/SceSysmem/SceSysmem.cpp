@@ -29,6 +29,8 @@
 #include <util/align.h>
 #include <util/string_utils.h>
 
+#include <atomic>
+
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceSysmem);
 
@@ -265,6 +267,9 @@ EXPORT(int, sceKernelGetSubbudgetInfo) {
 
 EXPORT(bool, sceKernelIsPSVitaTV) {
     TRACY_FUNC(sceKernelIsPSVitaTV);
+    static std::atomic<int> logged{ 0 };
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 4)
+        LOG_INFO("sceKernelIsPSVitaTV: {}", emuenv.cfg.current_config.pstv_mode ? "yes (PS TV mode on)" : "no (PS TV mode off)");
     return emuenv.cfg.current_config.pstv_mode;
 }
 

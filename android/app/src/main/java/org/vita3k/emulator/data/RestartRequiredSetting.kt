@@ -14,7 +14,8 @@ enum class RestartRequiredSetting(val nativeId: Int, @StringRes val labelResId: 
     AudioBackend(7, R.string.settings_audio_backend),
     ValidationLayer(8, R.string.settings_debug_validation_layer),
     AccurateThreadScheduling(9, R.string.settings_gpu_accurate_scheduling),
-    GuestCores(10, R.string.settings_gpu_guest_cores);
+    GuestCores(10, R.string.settings_gpu_guest_cores),
+    PstvMode(11, R.string.settings_system_pstv_mode);
 
     companion object {
         fun fromNative(values: IntArray): List<RestartRequiredSetting> {

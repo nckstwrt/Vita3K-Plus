@@ -238,6 +238,9 @@ static Config::CurrentConfig get_runtime_current_config_after_save(
         case config::RestartRequiredSetting::GuestCores:
             runtime_current.guest_cores = previous_current.guest_cores;
             break;
+        case config::RestartRequiredSetting::PstvMode:
+            runtime_current.pstv_mode = previous_current.pstv_mode;
+            break;
         }
     }
 
