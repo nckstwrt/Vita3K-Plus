@@ -51,8 +51,17 @@ struct MotionState {
     SDL_SensorPtr device_gyro;
     uint64_t last_updated_gyro_timestamp = 0;
     uint64_t last_updated_accel_timestamp = 0;
+    uint64_t last_virtual_tilt_timestamp = 0;
+    uint64_t last_virtual_tilt_log_timestamp = 0;
+
+    float virtual_tilt_roll_radians = 0.0f;
+    float virtual_tilt_velocity_radians = 0.0f;
+    float virtual_tilt_left_trigger = 0.0f;
+    float virtual_tilt_right_trigger = 0.0f;
+    float virtual_tilt_target_radians = 0.0f;
 
     bool has_device_motion_support = false;
+    bool has_virtual_tilt_motion_support = false;
     bool is_sampling = false;
 
     void init();
