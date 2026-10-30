@@ -983,8 +983,3 @@ struct SceKernelCallbackInfo {
     SceInt32 notifyArg;
     Ptr<void> pCommon;
 };
-otifyCount;
-SceInt32 notifyArg;
-Ptr<void> pCommon;
-}
-;
