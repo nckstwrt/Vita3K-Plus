@@ -183,6 +183,7 @@ private:
         QSlider *slider_analog_multiplier = nullptr;
         QLabel *lbl_analog_multiplier_value = nullptr;
         QCheckBox *chk_disable_motion = nullptr;
+        QCheckBox *chk_swap_triggers = nullptr;
         QPushButton *btn_reset = nullptr;
 
         std::vector<ControllerButtonBinding> bindings;
@@ -202,6 +203,7 @@ private:
     void refresh_shared_controller_settings();
     void set_analog_multiplier(float value);
     void set_motion_disabled(bool disabled);
+    void set_swap_triggers(bool swapped);
 
     void init_keyboard_bindings();
     void refresh_all_keyboard_labels();

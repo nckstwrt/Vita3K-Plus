@@ -567,6 +567,8 @@
     <string name="settings_controls_multiplier_value">%1$.1fx</string>
     <string name="settings_controls_disable_motion">Disable Motion Controls</string>
     <string name="settings_controls_disable_motion_desc">Ignore controller and device motion sensors for games that expect gyro or accelerometer input.</string>
+    <string name="settings_controls_swap_triggers">Swap L1/R1 with L2/R2</string>
+    <string name="settings_controls_swap_triggers_desc">The controller\'s triggers press L1/R1 (the Vita\'s L and R buttons) and its shoulder buttons press L2/R2. Useful for racing games and shooters.</string>
     <string name="settings_controls_capture_button_prompt">Press a controller button now, or choose a mapping from the list below.</string>
     <string name="settings_controls_capture_axis_prompt">Move a controller stick or trigger now, or choose a mapping from the list below.</string>
     <string name="settings_controls_capture_listening">Listening for controller input...</string>

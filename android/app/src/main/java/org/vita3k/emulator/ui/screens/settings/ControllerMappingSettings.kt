@@ -221,6 +221,19 @@ internal fun ControllerMappingSections(
             ),
             onShowHelp = onShowHelp
         )
+        SettingsToggleRow(
+            title = stringResource(R.string.settings_controls_swap_triggers),
+            checked = cfg.controllerSwapTriggers,
+            onCheckedChange = { checked ->
+                onUpdate { controllerSwapTriggers = checked }
+            },
+            help = SettingsHelpEntry(
+                title = stringResource(R.string.settings_controls_swap_triggers),
+                body = stringResource(R.string.settings_controls_swap_triggers_desc),
+                scope = SettingsScope.Global
+            ),
+            onShowHelp = onShowHelp
+        )
     }
 
     pendingButtonBinding?.let { row ->

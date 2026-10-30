@@ -313,29 +313,57 @@ static uint8_t float_to_byte(float f) {
     return static_cast<uint8_t>(std::lround((clamped_f + 1.0f) * 127.5f));
 }
 
+// the triggers press L1/R1 (the Vita's L/R) and the shoulders L2/R2; non-ext reads have no L2/R2, so there the shoulders press nothing
+static uint32_t swap_shoulders_and_triggers(uint32_t pressed, bool ext, bool left_trigger, bool right_trigger) {
+    const uint32_t vita_left = ext ? SCE_CTRL_L1 : SCE_CTRL_L;
+    const uint32_t vita_right = ext ? SCE_CTRL_R1 : SCE_CTRL_R;
+    const bool left_shoulder = pressed & vita_left;
+    const bool right_shoulder = pressed & vita_right;
+    pressed &= ~(vita_left | vita_right);
+    if (ext)
+        pressed &= ~(SCE_CTRL_L2 | SCE_CTRL_R2);
+    if (left_trigger)
+        pressed |= vita_left;
+    if (right_trigger)
+        pressed |= vita_right;
+    if (ext && left_shoulder)
+        pressed |= SCE_CTRL_L2;
+    if (ext && right_shoulder)
+        pressed |= SCE_CTRL_R2;
+    return pressed;
+}
+
 static void apply_controller(EmuEnvState &emuenv, uint32_t *buttons, float axes[4], SDL_Gamepad *controller, bool ext) {
     const auto &axis_binds = emuenv.cfg.controller_axis_binds;
+    const bool left_trigger = SDL_GetGamepadAxis(controller, static_cast<SDL_GamepadAxis>(axis_binds[4])) > 0x3FFF;
+    const bool right_trigger = SDL_GetGamepadAxis(controller, static_cast<SDL_GamepadAxis>(axis_binds[5])) > 0x3FFF;
 
+    uint32_t pressed = 0;
     if (ext) {
         for (const auto &binding : get_controller_bindings_ext(emuenv)) {
             if (SDL_GetGamepadButton(controller, binding.controller)) {
-                *buttons |= binding.button;
+                pressed |= binding.button;
             }
         }
 
-        if (SDL_GetGamepadAxis(controller, static_cast<SDL_GamepadAxis>(axis_binds[4])) > 0x3FFF) {
-            *buttons |= SCE_CTRL_L2;
+        if (left_trigger) {
+            pressed |= SCE_CTRL_L2;
         }
-        if (SDL_GetGamepadAxis(controller, static_cast<SDL_GamepadAxis>(axis_binds[5])) > 0x3FFF) {
-            *buttons |= SCE_CTRL_R2;
+        if (right_trigger) {
+            pressed |= SCE_CTRL_R2;
         }
     } else {
         for (const auto &binding : get_controller_bindings(emuenv)) {
             if (SDL_GetGamepadButton(controller, binding.controller)) {
-                *buttons |= binding.button;
+                pressed |= binding.button;
             }
         }
     }
+    if (emuenv.cfg.controller_swap_triggers) {
+        LOG_INFO_ONCE("[CTRL] L1/R1 and L2/R2 swapped: the controller's triggers press L1/R1 (the Vita's L and R) and its shoulder buttons L2/R2");
+        pressed = swap_shoulders_and_triggers(pressed, ext, left_trigger, right_trigger);
+    }
+    *buttons |= pressed;
 
     auto &analog_multiplier = emuenv.cfg.controller_analog_multiplier;
     axes[0] += axis_to_axis(SDL_GetGamepadAxis(controller, static_cast<SDL_GamepadAxis>(axis_binds[0])), analog_multiplier);

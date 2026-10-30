@@ -763,6 +763,9 @@ void ControlsDialog::build_controller_page(int index) {
     behavior_layout->addLayout(analog_layout, 0, 1);
     t.chk_disable_motion = new QCheckBox(tr("Disable Motion Controls"), behavior_group);
     behavior_layout->addWidget(t.chk_disable_motion, 1, 0, 1, 2);
+    t.chk_swap_triggers = new QCheckBox(tr("Swap L1/R1 with L2/R2"), behavior_group);
+    t.chk_swap_triggers->setToolTip(tr("The controller's triggers press L1/R1 (the Vita's L and R buttons) and its shoulder buttons press L2/R2. Useful for racing games and shooters."));
+    behavior_layout->addWidget(t.chk_swap_triggers, 2, 0, 1, 2);
     settings_layout->addWidget(behavior_group);
     settings_layout->addStretch();
 
@@ -775,6 +778,9 @@ void ControlsDialog::build_controller_page(int index) {
     });
     connect(t.chk_disable_motion, &QCheckBox::toggled, this, [this](bool checked) {
         set_motion_disabled(checked);
+    });
+    connect(t.chk_swap_triggers, &QCheckBox::toggled, this, [this](bool checked) {
+        set_swap_triggers(checked);
     });
 
     t.bindings = {
@@ -830,6 +836,10 @@ void ControlsDialog::refresh_shared_controller_settings() {
             const QSignalBlocker check_blocker(tab.chk_disable_motion);
             tab.chk_disable_motion->setChecked(m_emuenv.cfg.disable_motion);
         }
+        if (tab.chk_swap_triggers) {
+            const QSignalBlocker swap_blocker(tab.chk_swap_triggers);
+            tab.chk_swap_triggers->setChecked(m_emuenv.cfg.controller_swap_triggers);
+        }
     }
 }
 
@@ -841,6 +851,12 @@ void ControlsDialog::set_analog_multiplier(float value) {
 
 void ControlsDialog::set_motion_disabled(bool disabled) {
     m_emuenv.cfg.disable_motion = disabled;
+    save_config();
+    refresh_shared_controller_settings();
+}
+
+void ControlsDialog::set_swap_triggers(bool swapped) {
+    m_emuenv.cfg.controller_swap_triggers = swapped;
     save_config();
     refresh_shared_controller_settings();
 }
@@ -1173,6 +1189,7 @@ void ControlsDialog::set_controller_page_enabled(int index, bool enabled) {
         axis_binding.button->setEnabled(enabled);
     tab.slider_analog_multiplier->setEnabled(enabled);
     tab.chk_disable_motion->setEnabled(enabled);
+    tab.chk_swap_triggers->setEnabled(enabled);
     tab.btn_reset->setEnabled(enabled);
 }
 

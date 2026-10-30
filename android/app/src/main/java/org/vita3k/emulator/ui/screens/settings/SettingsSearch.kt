@@ -114,6 +114,7 @@ internal fun rememberSettingsSearchEntries(
         add(entry(SettingsCategory.Controls, R.string.settings_controls_mapping_axes_title, R.string.settings_controls_mapping_axes_desc, scope = SettingsScope.Global, keywords = "controller remap sticks triggers axes gamepad"))
         add(entry(SettingsCategory.Controls, R.string.settings_controls_analog_multiplier, R.string.settings_controls_analog_multiplier_desc, scope = SettingsScope.Global, keywords = "analog stick sensitivity multiplier"))
         add(entry(SettingsCategory.Controls, R.string.settings_controls_disable_motion, R.string.settings_controls_disable_motion_desc, scope = SettingsScope.Global, keywords = "gyro accelerometer motion controls"))
+        add(entry(SettingsCategory.Controls, R.string.settings_controls_swap_triggers, R.string.settings_controls_swap_triggers_desc, scope = SettingsScope.Global, keywords = "l1 r1 l2 r2 triggers shoulders bumpers swap remap racing"))
         add(entry(SettingsCategory.Network, R.string.settings_network_psn_signed_in, R.string.settings_network_psn_signed_in_desc, scope = SettingsScope.PerApp))
         if (!isPerApp) {
             add(entry(SettingsCategory.Network, R.string.settings_network_http_enable, R.string.settings_network_http_enable_desc, scope = SettingsScope.Global))

@@ -252,12 +252,20 @@ EXPORT(int, sceKernelGetMemBlockInfoByRange) {
 
 EXPORT(int, sceKernelGetModel) {
     TRACY_FUNC(sceKernelGetModel);
-    return emuenv.cfg.current_config.pstv_mode ? SCE_KERNEL_MODEL_VITATV : SCE_KERNEL_MODEL_VITA;
+    const int model = emuenv.cfg.current_config.pstv_mode ? SCE_KERNEL_MODEL_VITATV : SCE_KERNEL_MODEL_VITA;
+    static std::atomic<int> logged{ 0 };
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 4)
+        LOG_INFO("sceKernelGetModel: 0x{:X} ({})", model, model == SCE_KERNEL_MODEL_VITATV ? "PS TV" : "PS Vita");
+    return model;
 }
 
 EXPORT(int, sceKernelGetModelForCDialog) {
     TRACY_FUNC(sceKernelGetModelForCDialog);
-    return emuenv.cfg.current_config.pstv_mode ? SCE_KERNEL_MODEL_VITATV : SCE_KERNEL_MODEL_VITA;
+    const int model = emuenv.cfg.current_config.pstv_mode ? SCE_KERNEL_MODEL_VITATV : SCE_KERNEL_MODEL_VITA;
+    static std::atomic<int> logged{ 0 };
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 4)
+        LOG_INFO("sceKernelGetModelForCDialog: 0x{:X} ({})", model, model == SCE_KERNEL_MODEL_VITATV ? "PS TV" : "PS Vita");
+    return model;
 }
 
 EXPORT(int, sceKernelGetSubbudgetInfo) {
