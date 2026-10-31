@@ -366,6 +366,21 @@ std::uint32_t get_dynamic_uniform_buffers(const SceGxmProgram &program) {
     return blocks;
 }
 
+std::uint32_t get_written_uniform_buffers(const SceGxmProgram &program) {
+    const SceGxmProgramParameter *const parameters = program.program_parameters();
+    if (!(program.program_flags & SCE_GXM_PROGRAM_FLAG_BUFFER_STORE) || !parameters)
+        return 0;
+
+    std::uint32_t blocks = 0;
+    for (std::uint32_t i = 0; i < program.parameter_count; i++) {
+        const SceGxmProgramParameter &parameter = parameters[i];
+        if (parameter.category == SCE_GXM_PARAMETER_CATEGORY_UNIFORM_BUFFER && static_cast<int>(parameter.semantic) == 3
+            && parameter.resource_index < SCE_GXM_MAX_UNIFORM_BUFFERS)
+            blocks |= 1u << (parameter.resource_index + SCE_GXM_UNIFORM_BUFFER_OFFSET);
+    }
+    return blocks;
+}
+
 void get_attribute_informations(const SceGxmProgram &program, AttributeInformationMap &locmap) {
     const SceGxmProgramParameter *const gxp_parameters = program.program_parameters();
     std::uint32_t fcount_allocated = 0;

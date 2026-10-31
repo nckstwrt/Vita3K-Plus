@@ -238,6 +238,7 @@ void get_attribute_informations(const SceGxmProgram &program, AttributeInformati
 int get_uniform_buffer_sizes(const SceGxmProgram &program, UniformBufferSizes &sizes);
 
 std::uint32_t get_dynamic_uniform_buffers(const SceGxmProgram &program);
+std::uint32_t get_written_uniform_buffers(const SceGxmProgram &program);
 
 bool writes_depth(const SceGxmProgram &program);
 

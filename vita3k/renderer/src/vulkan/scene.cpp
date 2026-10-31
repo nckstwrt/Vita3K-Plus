@@ -88,6 +88,8 @@ void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *
         }
 
         const uint64_t buffer_address = context.state.get_matching_device_address(data.address());
+        if (program->written_uniform_buffers & (1u << block_num))
+            context.state.surface_cache.note_shader_written_memory(data.address(), program->uniform_buffer_sizes.at(block_num) * 4);
 
         if (vertex_shader) {
             context.curr_vert_ublock.set_buffer_address(block_num, buffer_address);

@@ -391,6 +391,11 @@ struct AttributeInputSource {
 
 // Face-flag register index in the USSE GLOBAL bank (non-zero = front-facing)
 constexpr uint32_t GLOBAL_REG_FRONT_FACING = 16;
+constexpr uint32_t GLOBAL_REG_PIXEL_X = 23;
+constexpr uint32_t GLOBAL_REG_PIXEL_Y = 24;
+constexpr uint32_t GLOBAL_REG_TILE_XY = 43;
+constexpr bool emulate_tile_pixel_registers = true;
+constexpr bool early_tests_for_buffer_stores = true;
 
 struct LiteralInputSource {
     // The constant data

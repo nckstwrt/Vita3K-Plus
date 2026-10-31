@@ -343,6 +343,11 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.current_color_raw_image = framebuffer.raw_image;
     context.current_ds_image = framebuffer.ds_image;
 
+    // the GPU loads a force-loaded depth/stencil from memory
+    constexpr bool load_shader_written_stencil = true;
+    if (load_shader_written_stencil && ds_surface_fin != nullptr && stencil_load)
+        state.surface_cache.load_shader_written_stencil(*ds_surface_fin, framebuffer.ds_image);
+
     // make sure we are not keeping any texture from the previous pass
     // (textures can be still bound even though they are not used)
     context.last_vert_texture_count = ~0;

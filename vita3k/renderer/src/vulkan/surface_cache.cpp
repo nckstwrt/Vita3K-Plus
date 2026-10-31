@@ -595,6 +595,22 @@ void VKSurfaceCache::cleanup() {
         depth_alias_scratch.destroy();
     }
 
+    if (stencil_upload_shader) {
+        state.device.destroy(stencil_upload_pipeline);
+        state.device.destroy(stencil_upload_pipeline_layout);
+        state.device.destroy(stencil_upload_desc_layout);
+        state.device.destroy(stencil_upload_desc_pool);
+        state.device.destroy(stencil_upload_shader);
+        stencil_upload_pipeline = nullptr;
+        stencil_upload_pipeline_layout = nullptr;
+        stencil_upload_desc_layout = nullptr;
+        stencil_upload_desc_pool = nullptr;
+        stencil_upload_desc_set = nullptr;
+        stencil_upload_shader = nullptr;
+        stencil_upload_scratch.destroy();
+    }
+    shader_written_memory.clear();
+
     for (auto &[cube_address, cube] : cube_textures)
         cube.texture.destroy();
     cube_textures.clear();
@@ -3754,6 +3770,198 @@ bool VKSurfaceCache::ensure_depth_alias_scratch(const vk::DeviceSize size) {
     const vk::DescriptorBufferInfo buffer_info{ depth_alias_scratch.buffer, 0, VK_WHOLE_SIZE };
     vk::WriteDescriptorSet write{
         .dstSet = depth_alias_desc_set,
+        .dstBinding = 0,
+        .descriptorCount = 1,
+        .descriptorType = vk::DescriptorType::eStorageBuffer
+    };
+    write.setBufferInfo(buffer_info);
+    state.device.updateDescriptorSets(write, {});
+    return true;
+}
+
+void VKSurfaceCache::note_shader_written_memory(const Address address, const uint32_t size) {
+    for (auto &range : shader_written_memory) {
+        if (range.first == address) {
+            range.second = std::max(range.second, size);
+            return;
+        }
+    }
+    if (shader_written_memory.size() >= 64)
+        shader_written_memory.erase(shader_written_memory.begin());
+    shader_written_memory.emplace_back(address, size);
+}
+
+// The GPU loads a force-loaded depth/stencil from memory, so a stencil plane that programs stored to is copied into the image
+void VKSurfaceCache::load_shader_written_stencil(const SceGxmDepthStencilSurface &depth_stencil, const vkutil::Image *ds_image) {
+    if (shader_written_memory.empty() || !depth_stencil.stencil_data)
+        return;
+
+    DepthStencilSurfaceCacheInfo *info = nullptr;
+    if (depth_stencil.depth_data) {
+        const auto it = depth_address_lookup.find(depth_stencil.depth_data.address());
+        if (it != depth_address_lookup.end())
+            info = it->second;
+    } else {
+        const auto it = stencil_address_lookup.find(depth_stencil.stencil_data.address());
+        if (it != stencil_address_lookup.end())
+            info = it->second;
+    }
+    if (info == nullptr || !info->texture.image || info->memory_width <= 0 || info->memory_height <= 0)
+        return;
+
+    const Address plane = depth_stencil.stencil_data.address();
+    const uint64_t plane_end = plane + static_cast<uint64_t>(info->stride_samples) * info->memory_height;
+    bool stored_to = false;
+    for (auto it = shader_written_memory.begin(); it != shader_written_memory.end();) {
+        if (it->first<plane_end &&static_cast<uint64_t>(it->first) + it->second> plane) {
+            stored_to = true;
+            it = shader_written_memory.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (!stored_to)
+        return;
+
+    const SceGxmDepthStencilFormat format = depth_stencil.get_format();
+    const bool own_plane = format == SCE_GXM_DEPTH_STENCIL_FORMAT_S8 || format == SCE_GXM_DEPTH_STENCIL_FORMAT_DF32_S8 || format == SCE_GXM_DEPTH_STENCIL_FORMAT_DF32M_S8;
+    static constexpr const char *refusals[] = { "its stencil shares words with the depth", "the surface is tiled", "the scene draws into a resampled copy",
+        "the plane is not in mapped memory", "the upload shader is unavailable" };
+    int refusal = -1;
+    uint64_t device_address = 0;
+    if (!own_plane)
+        refusal = 0;
+    else if (info->tiling != SurfaceTiling::Linear)
+        refusal = 1;
+    else if (ds_image != &info->texture)
+        refusal = 2;
+    else if (!state.features.enable_memory_mapping || (device_address = state.get_matching_device_address(plane)) == 0)
+        refusal = 3;
+    else if (!ensure_stencil_upload_pipeline())
+        refusal = 4;
+    if (refusal >= 0) {
+        if (!(stencil_upload_refusals & (1u << refusal))) {
+            stencil_upload_refusals |= 1u << refusal;
+            LOG_WARN("A scene loads depth/stencil 0x{:08X}/0x{:08X} (format 0x{:X}) whose stencil programs stored to, not taken in: {}",
+                depth_stencil.depth_data.address(), plane, static_cast<uint32_t>(format), refusals[refusal]);
+        }
+        return;
+    }
+
+    const uint32_t src_width = std::min(static_cast<uint32_t>(info->memory_width), info->stride_samples);
+    const uint32_t src_height = static_cast<uint32_t>(info->memory_height);
+    const uint32_t dst_width = std::min(info->texture.width, static_cast<uint32_t>(std::lround(info->memory_width * state.res_multiplier / info->samples_per_texel_x)));
+    const uint32_t dst_height = std::min(info->texture.height, static_cast<uint32_t>(std::lround(info->memory_height * state.res_multiplier / info->samples_per_texel_y)));
+    const vk::DeviceSize staged_bytes = align(static_cast<vk::DeviceSize>(dst_width) * dst_height, 4);
+    if (dst_width == 0 || dst_height == 0 || !ensure_stencil_upload_scratch(staged_bytes))
+        return;
+
+    vk::CommandBuffer cmd_buffer = reinterpret_cast<VKContext *>(state.context)->prerender_cmd;
+    // the stores of the scenes before this one, and the previous upload's copy out of the staging buffer
+    const vk::MemoryBarrier before{
+        .srcAccessMask = vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferRead,
+        .dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite
+    };
+    cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eVertexShader | vk::PipelineStageFlagBits::eFragmentShader | vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eTransfer,
+        vk::PipelineStageFlagBits::eComputeShader, {}, before, {}, {});
+    cmd_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, stencil_upload_pipeline);
+    cmd_buffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, stencil_upload_pipeline_layout, 0, stencil_upload_desc_set, {});
+    const std::array<uint32_t, 8> params{ static_cast<uint32_t>(device_address & ~uint64_t(3)), static_cast<uint32_t>(device_address >> 32),
+        static_cast<uint32_t>(device_address & 3), info->stride_samples, src_width, src_height, dst_width, dst_height };
+    cmd_buffer.pushConstants(stencil_upload_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(params), params.data());
+    cmd_buffer.dispatch(static_cast<uint32_t>((staged_bytes / 4 + 63) / 64), 1, 1);
+    const vk::MemoryBarrier staged{
+        .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+        .dstAccessMask = vk::AccessFlagBits::eTransferRead
+    };
+    cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer, {}, staged, {}, {});
+    info->texture.transition_to(cmd_buffer, vkutil::ImageLayout::TransferDst, vkutil::ds_subresource_range);
+    const vk::BufferImageCopy region{
+        .bufferOffset = 0,
+        .bufferRowLength = dst_width,
+        .bufferImageHeight = dst_height,
+        .imageSubresource = { vk::ImageAspectFlagBits::eStencil, 0, 0, 1 },
+        .imageOffset = { 0, 0, 0 },
+        .imageExtent = { dst_width, dst_height, 1 }
+    };
+    cmd_buffer.copyBufferToImage(stencil_upload_scratch.buffer, info->texture.image, vk::ImageLayout::eTransferDstOptimal, region);
+    info->texture.transition_to(cmd_buffer, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
+}
+
+bool VKSurfaceCache::ensure_stencil_upload_pipeline() {
+    if (stencil_upload_pipeline)
+        return true;
+    if (stencil_upload_unavailable)
+        return false;
+
+    if (!(state.physical_device_queue_families[state.general_family_index].queueFlags & vk::QueueFlagBits::eCompute)) {
+        LOG_ERROR("The graphics queue has no compute support, a stencil plane that programs store to is not taken in");
+        stencil_upload_unavailable = true;
+        return false;
+    }
+    const fs::path shader_path = state.static_assets / "shaders-builtin/vulkan" / "stencil_upload.comp.spv";
+    stencil_upload_shader = vkutil::load_shader(state.device, shader_path);
+    if (!stencil_upload_shader) {
+        LOG_ERROR("Could not load {}, a stencil plane that programs store to is not taken in", shader_path);
+        stencil_upload_unavailable = true;
+        return false;
+    }
+
+    const vk::DescriptorSetLayoutBinding binding{
+        .binding = 0,
+        .descriptorType = vk::DescriptorType::eStorageBuffer,
+        .descriptorCount = 1,
+        .stageFlags = vk::ShaderStageFlagBits::eCompute
+    };
+    vk::DescriptorSetLayoutCreateInfo layout_info{};
+    layout_info.setBindings(binding);
+    stencil_upload_desc_layout = state.device.createDescriptorSetLayout(layout_info);
+
+    const vk::PushConstantRange push_range{
+        .stageFlags = vk::ShaderStageFlagBits::eCompute,
+        .offset = 0,
+        .size = 8 * sizeof(uint32_t)
+    };
+    vk::PipelineLayoutCreateInfo pl_info{};
+    pl_info.setSetLayouts(stencil_upload_desc_layout);
+    pl_info.setPushConstantRanges(push_range);
+    stencil_upload_pipeline_layout = state.device.createPipelineLayout(pl_info);
+
+    const vk::ComputePipelineCreateInfo pipeline_info{
+        .stage = vk::PipelineShaderStageCreateInfo{
+            .stage = vk::ShaderStageFlagBits::eCompute,
+            .module = stencil_upload_shader,
+            .pName = "main" },
+        .layout = stencil_upload_pipeline_layout
+    };
+    stencil_upload_pipeline = state.device.createComputePipeline(nullptr, pipeline_info).value;
+    return true;
+}
+
+bool VKSurfaceCache::ensure_stencil_upload_scratch(const vk::DeviceSize size) {
+    if (stencil_upload_scratch.buffer && stencil_upload_scratch.size >= size)
+        return true;
+
+    vkutil::DestroyQueue &destroy_queue = state.frame().destroy_queue;
+    destroy_queue.add_buffer(stencil_upload_scratch);
+    destroy_queue.add(stencil_upload_desc_pool);
+    stencil_upload_desc_set = nullptr;
+
+    stencil_upload_scratch = vkutil::Buffer(size);
+    stencil_upload_scratch.init_buffer(vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc);
+
+    const vk::DescriptorPoolSize pool_size{ vk::DescriptorType::eStorageBuffer, 1 };
+    vk::DescriptorPoolCreateInfo pool_info{ .maxSets = 1 };
+    pool_info.setPoolSizes(pool_size);
+    stencil_upload_desc_pool = state.device.createDescriptorPool(pool_info);
+
+    vk::DescriptorSetAllocateInfo alloc_info{ .descriptorPool = stencil_upload_desc_pool };
+    alloc_info.setSetLayouts(stencil_upload_desc_layout);
+    stencil_upload_desc_set = state.device.allocateDescriptorSets(alloc_info).front();
+
+    const vk::DescriptorBufferInfo buffer_info{ stencil_upload_scratch.buffer, 0, VK_WHOLE_SIZE };
+    vk::WriteDescriptorSet write{
+        .dstSet = stencil_upload_desc_set,
         .dstBinding = 0,
         .descriptorCount = 1,
         .descriptorType = vk::DescriptorType::eStorageBuffer

@@ -2465,6 +2465,9 @@ static SpirvCode convert_gxp_to_spirv_impl(const SceGxmProgram &program, const s
             b.addCapability(spv::CapabilityFragmentShaderSampleInterlockEXT);
 
             b.createNoResultOp(spv::OpBeginInvocationInterlockEXT);
+        } else if (usse::early_tests_for_buffer_stores && translation_state.is_vulkan && features.enable_memory_mapping
+            && (program.program_flags & SCE_GXM_PROGRAM_FLAG_BUFFER_STORE) && !program.is_discard_used() && !program.is_depth_replace_used()) {
+            b.addExecutionMode(spv_func_main, spv::ExecutionModeEarlyFragmentTests);
         }
     }
 

@@ -158,6 +158,11 @@ std::string reg_to_str(RegisterBank bank, uint32_t reg_num, uint8_t index_scale)
         break;
     }
 
+    case RegisterBank::GLOBAL: {
+        opstr += "g";
+        break;
+    }
+
     case RegisterBank::IMMEDIATE: {
         break;
     }
