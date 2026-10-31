@@ -629,6 +629,8 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     if (context.pipeline_stops_lrz_write != context.stencil_compare_mask_zeroed) {
         context.stencil_compare_mask_zeroed = context.pipeline_stops_lrz_write;
         sync_stencil_func(context, false);
+        if (context.record.two_sided == SCE_GXM_TWO_SIDED_ENABLED)
+            sync_stencil_func(context, true);
     }
 
     if (config.log_active_shaders) {

@@ -1449,8 +1449,9 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         .depthCompareOp = translate_depth_func(record.front_depth_func),
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_TRUE,
-        .front = convert_op_state(record.front_stencil_state_op),
-        .back = convert_op_state(two_sided ? record.back_stencil_state_op : record.front_stencil_state_op)
+        // GXM gives its front two-sided state to clockwise triangles
+        .front = convert_op_state(two_sided ? record.back_stencil_state_op : record.front_stencil_state_op),
+        .back = convert_op_state(record.front_stencil_state_op)
     };
     if (fetch_draw_stops_lrz_write(state, record, *gxm_fragment_shader)) {
         ds_info.front.compareOp = vk::CompareOp::eEqual;
