@@ -1,0 +1,43 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+layout(local_size_x = 64) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer GuestWords {
+    uint words[];
+};
+
+layout(std430, set = 0, binding = 0) writeonly buffer Staging {
+    uint staged[];
+};
+
+layout(push_constant) uniform Parameters {
+    uvec2 src_address; // 4-byte aligned
+    uint src_offset; // bytes from src_address to the first sample
+    uint src_stride;
+    uint src_width;
+    uint src_height;
+    uint dst_width;
+    uint dst_height;
+} params;
+
+void main() {
+    const uint word = gl_GlobalInvocationID.x;
+    const uint total = params.dst_width * params.dst_height;
+    if (word * 4u >= total)
+        return;
+
+    GuestWords guest = GuestWords(params.src_address);
+    uint packed = 0u;
+    for (uint k = 0u; k < 4u; k++) {
+        const uint i = word * 4u + k;
+        if (i >= total)
+            break;
+        const uint sx = min((i % params.dst_width) * params.src_width / params.dst_width, params.src_width - 1u);
+        const uint sy = min((i / params.dst_width) * params.src_height / params.dst_height, params.src_height - 1u);
+        const uint offset = params.src_offset + sy * params.src_stride + sx;
+        packed |= ((guest.words[offset >> 2u] >> ((offset & 3u) * 8u)) & 0xFFu) << (k * 8u);
+    }
+    staged[word] = packed;
+}
