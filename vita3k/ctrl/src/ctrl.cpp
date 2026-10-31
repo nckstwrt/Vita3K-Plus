@@ -454,9 +454,10 @@ int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2
         const uint64_t current_vcount = emuenv.display.vblank_count.load();
         if (current_vcount <= state.last_vcount[port]) {
             // sceCtrlRead is blocking, wait for the next vsync for the buffer to be updated
+            // (also mid-vblank under the fps hack so a game built for 30 fps keeps two samples per frame)
             auto thread = emuenv.kernel.get_thread(thread_id);
 
-            wait_vblank(emuenv.display, emuenv.kernel, thread, state.last_vcount[port] + 1, false);
+            wait_vblank(emuenv.display, emuenv.kernel, thread, state.last_vcount[port] + 1, false, emuenv.display.fps_hack);
         }
         uint64_t vblank_count = emuenv.display.vblank_count.load();
         nb_returned_data = std::min<int32_t>(count, vblank_count - state.last_vcount[port]);

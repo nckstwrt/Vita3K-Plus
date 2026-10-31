@@ -123,6 +123,25 @@ static void freeze_watchdog_thread(EmuEnvState &emuenv) {
     }
 }
 
+static void wake_half_vblank_waiters(DisplayState &display) {
+    std::vector<ThreadStatePtr> ready;
+    {
+        const std::lock_guard<std::mutex> guard(display.mutex);
+        for (std::size_t i = 0; i < display.vblank_wait_infos.size();) {
+            if (display.vblank_wait_infos[i].wake_at_half_vblank) {
+                ready.push_back(display.vblank_wait_infos[i].target_thread);
+                display.vblank_wait_infos.erase(display.vblank_wait_infos.begin() + i);
+            } else {
+                i++;
+            }
+        }
+    }
+    for (const ThreadStatePtr &target_wait : ready) {
+        const std::lock_guard<std::mutex> target_lock(target_wait->mutex);
+        target_wait->update_status(ThreadStatus::run);
+    }
+}
+
 static void vblank_sync_thread(EmuEnvState &emuenv) {
     DisplayState &display = emuenv.display;
     std::thread watchdog(freeze_watchdog_thread, std::ref(emuenv));
@@ -483,7 +502,17 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
 
         const auto time_ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         const auto time_left = TARGET_MICRO_PER_FRAME - (time_ms % TARGET_MICRO_PER_FRAME);
-        std::this_thread::sleep_for(std::chrono::microseconds(time_left));
+        if (display.fps_hack) {
+            if (time_left > TARGET_MICRO_PER_FRAME / 2) {
+                std::this_thread::sleep_for(std::chrono::microseconds(time_left - TARGET_MICRO_PER_FRAME / 2));
+                wake_half_vblank_waiters(display);
+            }
+            const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            if (time_ms + time_left > now_us)
+                std::this_thread::sleep_for(std::chrono::microseconds(time_ms + time_left - now_us));
+        } else {
+            std::this_thread::sleep_for(std::chrono::microseconds(time_left));
+        }
     }
 
     watchdog.join();
@@ -493,7 +522,7 @@ void start_sync_thread(EmuEnvState &emuenv) {
     emuenv.display.vblank_thread = std::make_unique<std::thread>(vblank_sync_thread, std::ref(emuenv));
 }
 
-void wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePtr &wait_thread, const uint64_t target_vcount, const bool is_cb) {
+void wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePtr &wait_thread, const uint64_t target_vcount, const bool is_cb, const bool wake_at_half_vblank) {
     if (!wait_thread) {
         return;
     }
@@ -508,7 +537,7 @@ void wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePt
                 return;
 
             wait_thread->update_status(ThreadStatus::wait);
-            display.vblank_wait_infos.push_back({ wait_thread, target_vcount });
+            display.vblank_wait_infos.push_back({ wait_thread, target_vcount, wake_at_half_vblank });
         }
 
         wait_thread->status_cond.wait(thread_lock, [&]() {

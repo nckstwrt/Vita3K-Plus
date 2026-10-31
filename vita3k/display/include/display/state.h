@@ -37,6 +37,7 @@ typedef std::shared_ptr<ThreadState> ThreadStatePtr;
 struct DisplayStateVBlankWaitInfo {
     ThreadStatePtr target_thread;
     uint64_t target_vcount;
+    bool wake_at_half_vblank = false;
 };
 
 struct DisplayFrameInfo {
