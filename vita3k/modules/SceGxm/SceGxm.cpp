@@ -1815,6 +1815,8 @@ EXPORT(int, sceGxmBeginCommandList, SceGxmContext *deferredContext) {
     return 0;
 }
 
+static thread_local const SceGxmDepthStencilSurface *scene_ex_store_surface = nullptr;
+
 EXPORT(int, sceGxmBeginScene, SceGxmContext *context, uint32_t flags, const SceGxmRenderTarget *renderTarget, const SceGxmValidRegion *validRegion, SceGxmSyncObject *vertexSyncObject, Ptr<SceGxmSyncObject> fragmentSyncObject, const SceGxmColorSurface *colorSurface, const SceGxmDepthStencilSurface *depthStencil) {
     TRACY_FUNC(sceGxmBeginScene, context, flags, renderTarget, validRegion, vertexSyncObject, fragmentSyncObject, colorSurface, depthStencil);
     if (!context) {
@@ -1874,8 +1876,13 @@ EXPORT(int, sceGxmBeginScene, SceGxmContext *context, uint32_t flags, const SceG
         *depth_stencil_surface_copy = *depthStencil;
     }
 
-    renderer::set_context(*emuenv.renderer, context->renderer.get(), renderTarget->renderer.get(), color_surface_copy,
-        depth_stencil_surface_copy);
+    SceGxmDepthStencilSurface *store_surface_copy = nullptr;
+    if (scene_ex_store_surface) {
+        store_surface_copy = new SceGxmDepthStencilSurface;
+        *store_surface_copy = *scene_ex_store_surface;
+    }
+
+    renderer::set_context(*emuenv.renderer, context->renderer.get(), renderTarget->renderer.get(), color_surface_copy, depth_stencil_surface_copy, store_surface_copy);
 
     const std::uint32_t xmax = (validRegion ? validRegion->xMax : renderTarget->width - 1);
     const std::uint32_t ymax = (validRegion ? validRegion->yMax : renderTarget->height - 1);
@@ -1907,8 +1914,11 @@ EXPORT(int, sceGxmBeginSceneEx, SceGxmContext *immediateContext, uint32_t flags,
         return RET_ERROR(SCE_GXM_ERROR_WITHIN_SCENE);
     }
 
-    STUBBED("Using sceGxmBeginScene");
-    return CALL_EXPORT(sceGxmBeginScene, immediateContext, flags, renderTarget, validRegion, vertexSyncObject, fragmentSyncObject, colorSurface, loadDepthStencilSurface);
+    const bool separate_store = storeDepthStencilSurface && (!loadDepthStencilSurface || loadDepthStencilSurface->depth_data.address() != storeDepthStencilSurface->depth_data.address() || loadDepthStencilSurface->stencil_data.address() != storeDepthStencilSurface->stencil_data.address());
+    scene_ex_store_surface = separate_store ? storeDepthStencilSurface : nullptr;
+    const int result = CALL_EXPORT(sceGxmBeginScene, immediateContext, flags, renderTarget, validRegion, vertexSyncObject, fragmentSyncObject, colorSurface, loadDepthStencilSurface);
+    scene_ex_store_surface = nullptr;
+    return result;
 }
 
 DECL_EXPORT(int, sceGxmTextureInitLinear, SceGxmTexture *texture, Ptr<const void> data, SceGxmTextureFormat texFormat, uint32_t width, uint32_t height, uint32_t mipCount);

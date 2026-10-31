@@ -102,7 +102,7 @@ void set_uniform_buffer(State &state, Context *ctx, const bool is_vertex_uniform
 void set_visibility_buffer(State &state, Context *ctx, Ptr<uint32_t> visibility_address, uint32_t visibility_stride);
 void set_visibility_index(State &state, Context *ctx, bool enable, uint32_t index, bool is_increment);
 
-void set_context(State &state, Context *ctx, RenderTarget *target, SceGxmColorSurface *color_surface, SceGxmDepthStencilSurface *depth_stencil_surface);
+void set_context(State &state, Context *ctx, RenderTarget *target, SceGxmColorSurface *color_surface, SceGxmDepthStencilSurface *depth_stencil_surface, SceGxmDepthStencilSurface *store_depth_stencil_surface = nullptr);
 void set_vertex_stream(State &state, Context *ctx, const std::size_t index, const std::size_t data_len, const Ptr<const void> stream);
 void stream_snapshot_kick(MemState &mem, CommandList &list);
 const uint8_t *stream_snapshot_get(uint64_t handle, uint32_t size);

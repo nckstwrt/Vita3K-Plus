@@ -1194,11 +1194,23 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
     // boundaries than native.  Bilinear filtering at the same UV produces different blend
     // weights, corrupting data textures with discrete values (e.g. tile-index maps in LBP).
     // Force the cast path to downsample back to native resolution so filtering matches hardware.
-    const bool non_integer_downsample = state.res_multiplier != 1.0f
+    // A texture read with gamma decoding or a float texture holds continuous values and stays upscaled.
+    constexpr bool keep_srgb_point_textures_upscaled = true;
+    constexpr bool keep_float_point_textures_upscaled = true;
+    const bool is_float_format = base_format == SCE_GXM_COLOR_BASE_FORMAT_F16
+        || base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16
+        || base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16
+        || base_format == SCE_GXM_COLOR_BASE_FORMAT_F32
+        || base_format == SCE_GXM_COLOR_BASE_FORMAT_F32F32
+        || base_format == SCE_GXM_COLOR_BASE_FORMAT_F11F11F10
+        || base_format == SCE_GXM_COLOR_BASE_FORMAT_SE5M9M9M9
+        || base_format == SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10;
+    const bool small_point_texture = state.res_multiplier != 1.0f
         && state.res_multiplier != std::floor(state.res_multiplier)
         && original_width <= 256 && original_height <= 256
         && texture.min_filter == SCE_GXM_TEXTURE_FILTER_POINT
         && texture.mag_filter == SCE_GXM_TEXTURE_FILTER_POINT;
+    const bool non_integer_downsample = small_point_texture && !(keep_srgb_point_textures_upscaled && is_srgb) && !(keep_float_point_textures_upscaled && is_float_format);
 
     if (is_same_image || (start_sourced_line != 0) || (start_x != 0) || (info.width != width) || (info.height != height) || (info.format != base_format) || non_integer_downsample || raw_bits_cast) {
         const uint64_t scene_timestamp = reinterpret_cast<VKContext *>(state.context)->scene_timestamp;
@@ -3825,8 +3837,7 @@ void VKSurfaceCache::load_shader_written_stencil(const SceGxmDepthStencilSurface
 
     const SceGxmDepthStencilFormat format = depth_stencil.get_format();
     const bool own_plane = format == SCE_GXM_DEPTH_STENCIL_FORMAT_S8 || format == SCE_GXM_DEPTH_STENCIL_FORMAT_DF32_S8 || format == SCE_GXM_DEPTH_STENCIL_FORMAT_DF32M_S8;
-    static constexpr const char *refusals[] = { "its stencil shares words with the depth", "the surface is tiled", "the scene draws into a resampled copy",
-        "the plane is not in mapped memory", "the upload shader is unavailable" };
+    static constexpr const char *refusals[] = { "its stencil shares words with the depth", "the surface is tiled", "the scene draws into another image (a resampled copy, or the store surface of a scene that loads from this one)", "the plane is not in mapped memory", "the upload shader is unavailable" };
     int refusal = -1;
     uint64_t device_address = 0;
     if (!own_plane)
@@ -3888,6 +3899,47 @@ void VKSurfaceCache::load_shader_written_stencil(const SceGxmDepthStencilSurface
     info->texture.transition_to(cmd_buffer, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
 }
 
+void VKSurfaceCache::load_depth_stencil_from_surface(const SceGxmDepthStencilSurface &load_surface, vkutil::Image *store_image) {
+    DepthStencilSurfaceCacheInfo *load_info = nullptr;
+    if (load_surface.depth_data) {
+        const auto it = depth_address_lookup.find(load_surface.depth_data.address());
+        if (it != depth_address_lookup.end())
+            load_info = it->second;
+    } else if (load_surface.stencil_data) {
+        const auto it = stencil_address_lookup.find(load_surface.stencil_data.address());
+        if (it != stencil_address_lookup.end())
+            load_info = it->second;
+    }
+    if (load_info == nullptr || !load_info->texture.image || &load_info->texture == store_image)
+        return;
+    vkutil::Image &source = serves_stored_depth(*load_info) ? *load_info->stored_copy : load_info->texture;
+    const uint32_t width = std::min(source.width, store_image->width);
+    const uint32_t height = std::min(source.height, store_image->height);
+    if (source.format != store_image->format || width == 0 || height == 0)
+        return;
+
+    vk::CommandBuffer cmd_buffer = reinterpret_cast<VKContext *>(state.context)->prerender_cmd;
+    source.transition_to(cmd_buffer, vkutil::ImageLayout::TransferSrc, vkutil::ds_subresource_range);
+    store_image->transition_to(cmd_buffer, vkutil::ImageLayout::TransferDst, vkutil::ds_subresource_range);
+    const auto region_for = [&](vk::ImageAspectFlagBits aspect) {
+        const vk::ImageSubresourceLayers layers{ aspect, 0, 0, 1 };
+        return vk::ImageCopy{
+            .srcSubresource = layers,
+            .srcOffset = { 0, 0, 0 },
+            .dstSubresource = layers,
+            .dstOffset = { 0, 0, 0 },
+            .extent = { width, height, 1 }
+        };
+    };
+    const std::array<vk::ImageCopy, 2> regions{
+        region_for(vk::ImageAspectFlagBits::eDepth),
+        region_for(vk::ImageAspectFlagBits::eStencil)
+    };
+    cmd_buffer.copyImage(source.image, vk::ImageLayout::eTransferSrcOptimal, store_image->image, vk::ImageLayout::eTransferDstOptimal, regions);
+    source.transition_to(cmd_buffer, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
+    store_image->transition_to(cmd_buffer, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
+}
+
 bool VKSurfaceCache::ensure_stencil_upload_pipeline() {
     if (stencil_upload_pipeline)
         return true;
@@ -3907,34 +3959,41 @@ bool VKSurfaceCache::ensure_stencil_upload_pipeline() {
         return false;
     }
 
-    const vk::DescriptorSetLayoutBinding binding{
-        .binding = 0,
-        .descriptorType = vk::DescriptorType::eStorageBuffer,
-        .descriptorCount = 1,
-        .stageFlags = vk::ShaderStageFlagBits::eCompute
-    };
-    vk::DescriptorSetLayoutCreateInfo layout_info{};
-    layout_info.setBindings(binding);
-    stencil_upload_desc_layout = state.device.createDescriptorSetLayout(layout_info);
+    // an old driver may fail to build it so carry on without the upload
+    try {
+        const vk::DescriptorSetLayoutBinding binding{
+            .binding = 0,
+            .descriptorType = vk::DescriptorType::eStorageBuffer,
+            .descriptorCount = 1,
+            .stageFlags = vk::ShaderStageFlagBits::eCompute
+        };
+        vk::DescriptorSetLayoutCreateInfo layout_info{};
+        layout_info.setBindings(binding);
+        stencil_upload_desc_layout = state.device.createDescriptorSetLayout(layout_info);
 
-    const vk::PushConstantRange push_range{
-        .stageFlags = vk::ShaderStageFlagBits::eCompute,
-        .offset = 0,
-        .size = 8 * sizeof(uint32_t)
-    };
-    vk::PipelineLayoutCreateInfo pl_info{};
-    pl_info.setSetLayouts(stencil_upload_desc_layout);
-    pl_info.setPushConstantRanges(push_range);
-    stencil_upload_pipeline_layout = state.device.createPipelineLayout(pl_info);
+        const vk::PushConstantRange push_range{
+            .stageFlags = vk::ShaderStageFlagBits::eCompute,
+            .offset = 0,
+            .size = 8 * sizeof(uint32_t)
+        };
+        vk::PipelineLayoutCreateInfo pl_info{};
+        pl_info.setSetLayouts(stencil_upload_desc_layout);
+        pl_info.setPushConstantRanges(push_range);
+        stencil_upload_pipeline_layout = state.device.createPipelineLayout(pl_info);
 
-    const vk::ComputePipelineCreateInfo pipeline_info{
-        .stage = vk::PipelineShaderStageCreateInfo{
-            .stage = vk::ShaderStageFlagBits::eCompute,
-            .module = stencil_upload_shader,
-            .pName = "main" },
-        .layout = stencil_upload_pipeline_layout
-    };
-    stencil_upload_pipeline = state.device.createComputePipeline(nullptr, pipeline_info).value;
+        const vk::ComputePipelineCreateInfo pipeline_info{
+            .stage = vk::PipelineShaderStageCreateInfo{
+                .stage = vk::ShaderStageFlagBits::eCompute,
+                .module = stencil_upload_shader,
+                .pName = "main" },
+            .layout = stencil_upload_pipeline_layout
+        };
+        stencil_upload_pipeline = state.device.createComputePipeline(nullptr, pipeline_info).value;
+    } catch (const vk::SystemError &error) {
+        LOG_ERROR("Could not create the stencil upload pipeline ({}), a stencil plane that programs store to is not taken in", error.what());
+        stencil_upload_unavailable = true;
+        return false;
+    }
     return true;
 }
 

@@ -295,6 +295,21 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
             ds.force_load, ds.force_store, context.state.res_multiplier);
     }
 
+    const SceGxmDepthStencilSurface scene_ex_load_surface = context.record.depth_stencil_surface;
+    bool scene_ex_loads_other_surface = false;
+    if (context.record.has_depth_stencil_store_surface && context.record.depth_stencil_store_surface.force_store) {
+        const bool has_load = scene_ex_load_surface.depth_data || scene_ex_load_surface.stencil_data;
+        SceGxmDepthStencilSurface combined = context.record.depth_stencil_store_surface;
+        combined.force_load = has_load && scene_ex_load_surface.force_load;
+        if (has_load) {
+            combined.background_depth = scene_ex_load_surface.background_depth;
+            combined.stencil = scene_ex_load_surface.stencil;
+            combined.mask = scene_ex_load_surface.mask;
+        }
+        context.record.depth_stencil_surface = combined;
+        scene_ex_loads_other_surface = combined.force_load;
+    }
+
     SceGxmDepthStencilSurface *ds_surface_fin = &context.record.depth_stencil_surface;
     // if the depth-stencil buffer is not backed by memory, use the transient attachment instead.
     // Was the Android build that added the changes:
@@ -324,7 +339,7 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
         constexpr bool use_ds_depth_validity = true;
         const bool game_stores = context.record.depth_stencil_surface.force_store;
         const bool depth_content_valid = state.surface_cache.begin_ds_scene_depth_check(*ds_surface_fin, game_stores, context.record.color_surface.data.address());
-        if (use_ds_depth_validity && game_stores && !depth_content_valid)
+        if (use_ds_depth_validity && game_stores && !depth_content_valid && !scene_ex_loads_other_surface)
             depth_load = false;
     }
     const bool color_has_raw = context.record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16;
@@ -343,10 +358,13 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.current_color_raw_image = framebuffer.raw_image;
     context.current_ds_image = framebuffer.ds_image;
 
+    if (scene_ex_loads_other_surface && framebuffer.ds_image)
+        state.surface_cache.load_depth_stencil_from_surface(scene_ex_load_surface, framebuffer.ds_image);
+
     // the GPU loads a force-loaded depth/stencil from memory
     constexpr bool load_shader_written_stencil = true;
     if (load_shader_written_stencil && ds_surface_fin != nullptr && stencil_load)
-        state.surface_cache.load_shader_written_stencil(*ds_surface_fin, framebuffer.ds_image);
+        state.surface_cache.load_shader_written_stencil(scene_ex_loads_other_surface ? scene_ex_load_surface : *ds_surface_fin, framebuffer.ds_image);
 
     // make sure we are not keeping any texture from the previous pass
     // (textures can be still bound even though they are not used)

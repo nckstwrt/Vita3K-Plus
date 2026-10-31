@@ -396,6 +396,7 @@ constexpr uint32_t GLOBAL_REG_PIXEL_Y = 24;
 constexpr uint32_t GLOBAL_REG_TILE_XY = 43;
 constexpr bool emulate_tile_pixel_registers = true;
 constexpr bool early_tests_for_buffer_stores = true;
+constexpr bool buffer_stores_at_guest_pixel_centre = true;
 
 struct LiteralInputSource {
     // The constant data

@@ -705,9 +705,37 @@ static void record_vertex_stores(spv::Builder &b, SpirvUtilFunctions &utils, spv
         utils.vertex_store_in_loop = true;
 }
 
+static spv::Id holds_guest_pixel_centre(spv::Builder &b, const SpirvShaderParameters &params, const SpirvUtilFunctions &utils) {
+    const spv::Id f32 = b.makeFloatType(32);
+    const spv::Id bool_type = b.makeBoolType();
+    spv::Id res_multiplier = create_access_chain(b, spv::StorageClassUniform, params.render_info_id, { b.makeIntConstant(FRAG_UNIFORM_res_multiplier) });
+    res_multiplier = b.createLoad(res_multiplier, spv::NoPrecision);
+    const spv::Id frag_coord = b.createLoad(params.frag_coord_id, spv::NoPrecision);
+    const auto centred = [&](const int comp) {
+        const spv::Id coord = b.createCompositeExtract(frag_coord, f32, comp);
+        const spv::Id host = b.createBuiltinCall(f32, utils.std_builtins, GLSLstd450Floor, { coord });
+        const spv::Id guest = b.createBuiltinCall(f32, utils.std_builtins, GLSLstd450Floor, { b.createBinOp(spv::OpFDiv, f32, coord, res_multiplier) });
+        const spv::Id centre = b.createBinOp(spv::OpFMul, f32, b.createBinOp(spv::OpFAdd, f32, guest, b.makeFloatConstant(0.5f)), res_multiplier);
+        return b.createBinOp(spv::OpFOrdEqual, bool_type, host, b.createBuiltinCall(f32, utils.std_builtins, GLSLstd450Floor, { centre }));
+    };
+    return b.createBinOp(spv::OpLogicalAnd, bool_type, centred(0), centred(1));
+}
+
 void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFunctions &utils, const FeatureState &features, Operand dest, int dest_offset, spv::Id addr, uint32_t component_size, uint32_t nb_components, int buffer_idx, bool is_buffer_store) {
     if (is_buffer_store && utils.drop_buffer_stores)
         return;
+    const spv::Id store_condition = (is_buffer_store && buffer_stores_at_guest_pixel_centre && params.frag_coord_id != spv::NoResult && utils.vertex_stores == spv::NoResult)
+        ? holds_guest_pixel_centre(b, params, utils)
+        : spv::NoResult;
+    const auto store_to_buffer = [&](const spv::Id data, const spv::Id pointer) {
+        if (store_condition == spv::NoResult) {
+            b.createStore(data, pointer, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
+            return;
+        }
+        spv::Builder::If centre(store_condition, spv::SelectionControlMaskNone, b);
+        b.createStore(data, pointer, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
+        centre.makeEndIf();
+    };
     const spv::Id i32 = b.makeIntType(32);
     const spv::Id u32 = b.makeUintType(32);
     const spv::Id zero = b.makeIntConstant(0);
@@ -763,7 +791,7 @@ void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params,
                     if (utils.vertex_stores != spv::NoResult)
                         record_vertex_stores(b, utils, buffer_address, buffer_idx_vec4 * 16, data);
                     else
-                        b.createStore(data, accessed, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
+                        store_to_buffer(data, accessed);
                 } else {
                     accessed = b.createLoad(accessed, spv::NoPrecision, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
                     store(b, params, utils, features, dest, accessed, 0b1111, dest_offset);
@@ -788,7 +816,7 @@ void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params,
                 if (utils.vertex_stores != spv::NoResult)
                     record_vertex_stores(b, utils, buffer_address, buffer_idx_vec4 * 16, data);
                 else
-                    b.createStore(data, accessed, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
+                    store_to_buffer(data, accessed);
             } else {
                 accessed = b.createLoad(accessed, spv::NoPrecision, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
                 store(b, params, utils, features, dest, accessed, (1 << nb_components) - 1, dest_offset);

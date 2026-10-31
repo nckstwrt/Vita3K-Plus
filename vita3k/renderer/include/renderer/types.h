@@ -140,6 +140,8 @@ struct GxmRecordState {
 
     SceGxmColorSurface color_surface;
     SceGxmDepthStencilSurface depth_stencil_surface;
+    SceGxmDepthStencilSurface depth_stencil_store_surface;
+    bool has_depth_stencil_store_surface = false;
 
     bool viewport_flat = false;
     std::array<float, 4> viewport_flip = { 1.0f, 1.0f, 1.0f, 1.0f };

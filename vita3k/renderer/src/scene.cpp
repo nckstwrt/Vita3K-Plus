@@ -47,8 +47,10 @@ void destroy_command_payload(Command &cmd) {
     case CommandOpcode::SetContext: {
         auto *color_surface = reinterpret_cast<SceGxmColorSurface **>(&cmd.data[sizeof(RenderTarget *)]);
         auto *depth_stencil_surface = reinterpret_cast<SceGxmDepthStencilSurface **>(&cmd.data[sizeof(RenderTarget *) + sizeof(SceGxmColorSurface *)]);
+        auto *store_depth_stencil_surface = reinterpret_cast<SceGxmDepthStencilSurface **>(&cmd.data[sizeof(RenderTarget *) + sizeof(SceGxmColorSurface *) + sizeof(SceGxmDepthStencilSurface *)]);
         delete *color_surface;
         delete *depth_stencil_surface;
+        delete *store_depth_stencil_surface;
         break;
     }
 
@@ -84,11 +86,14 @@ void append_command_list(Context &destination, const CommandList &source) {
             const std::uint32_t surfaces_at = payload.point;
             const SceGxmColorSurface *color_surface = payload.pop<SceGxmColorSurface *>();
             const SceGxmDepthStencilSurface *depth_stencil_surface = payload.pop<SceGxmDepthStencilSurface *>();
+            const SceGxmDepthStencilSurface *store_depth_stencil_surface = payload.pop<SceGxmDepthStencilSurface *>();
             SceGxmColorSurface *color_surface_copy = color_surface ? new SceGxmColorSurface(*color_surface) : nullptr;
             SceGxmDepthStencilSurface *depth_stencil_surface_copy = depth_stencil_surface ? new SceGxmDepthStencilSurface(*depth_stencil_surface) : nullptr;
+            SceGxmDepthStencilSurface *store_depth_stencil_surface_copy = store_depth_stencil_surface ? new SceGxmDepthStencilSurface(*store_depth_stencil_surface) : nullptr;
             payload.point = surfaces_at;
             payload.push(color_surface_copy);
             payload.push(depth_stencil_surface_copy);
+            payload.push(store_depth_stencil_surface_copy);
         } else if (copy->opcode == CommandOpcode::SetState && payload.pop<GXMState>() == GXMState::Program) {
             payload.pop<Ptr<void>>();
             const std::uint32_t binding_at = payload.point;
@@ -114,6 +119,7 @@ COMMAND(handle_set_context) {
     RenderTarget *rt = helper.pop<RenderTarget *>();
     const SceGxmColorSurface *color_surface = helper.pop<SceGxmColorSurface *>();
     const SceGxmDepthStencilSurface *depth_stencil_surface = helper.pop<SceGxmDepthStencilSurface *>();
+    const SceGxmDepthStencilSurface *store_depth_stencil_surface = helper.pop<SceGxmDepthStencilSurface *>();
 
     render_context->current_render_target = rt;
 
@@ -139,6 +145,9 @@ COMMAND(handle_set_context) {
         render_context->record.depth_stencil_surface.depth_data.reset();
         render_context->record.depth_stencil_surface.stencil_data.reset();
     }
+    render_context->record.has_depth_stencil_store_surface = store_depth_stencil_surface && !store_depth_stencil_surface->disabled();
+    if (render_context->record.has_depth_stencil_store_surface)
+        render_context->record.depth_stencil_store_surface = *store_depth_stencil_surface;
 
     destroy_command_payload(*helper.cmd);
 

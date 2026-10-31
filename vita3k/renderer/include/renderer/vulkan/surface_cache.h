@@ -420,6 +420,7 @@ public:
 
     void note_shader_written_memory(Address address, uint32_t size);
     void load_shader_written_stencil(const SceGxmDepthStencilSurface &depth_stencil, const vkutil::Image *ds_image);
+    void load_depth_stencil_from_surface(const SceGxmDepthStencilSurface &load_surface, vkutil::Image *store_image);
 
     void perform_pending_casts(VKContext &context, uint16_t vert_texture_count, uint16_t frag_texture_count);
     void flush_all_pending_casts();

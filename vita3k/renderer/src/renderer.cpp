@@ -263,8 +263,8 @@ void set_side_fragment_program_enable(State &state, Context *ctx, const bool is_
     renderer::add_state_set_command(ctx, renderer::GXMState::FragmentProgramEnable, is_front, mode);
 }
 
-void set_context(State &state, Context *ctx, RenderTarget *target, SceGxmColorSurface *color_surface, SceGxmDepthStencilSurface *depth_stencil_surface) {
-    renderer::add_command(ctx, renderer::CommandOpcode::SetContext, nullptr, target, color_surface, depth_stencil_surface);
+void set_context(State &state, Context *ctx, RenderTarget *target, SceGxmColorSurface *color_surface, SceGxmDepthStencilSurface *depth_stencil_surface, SceGxmDepthStencilSurface *store_depth_stencil_surface) {
+    renderer::add_command(ctx, renderer::CommandOpcode::SetContext, nullptr, target, color_surface, depth_stencil_surface, store_depth_stencil_surface);
 }
 
 namespace {
