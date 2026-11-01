@@ -355,7 +355,18 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
             const uint8_t *snapshot = mapped
                 ? renderer::stream_snapshot_get(state.vertex_streams[i].snapshot, stream_size)
                 : nullptr;
-            if (mapped && !snapshot && !restride) {
+            bool copy_misaligned = false;
+            if (mapped && !snapshot && !restride && (state.vertex_streams[i].data.address() & 3)) {
+                copy_misaligned = !renderer::stream_snapshot_disabled();
+                static uint32_t misaligned_copied = 0;
+                static uint32_t misaligned_in_place = 0;
+                const uint32_t n = ++(copy_misaligned ? misaligned_copied : misaligned_in_place);
+                if (n <= 4 || (n & (n - 1)) == 0)
+                    LOG_INFO("Vertex stream {} at 0x{:08X} ({} bytes, stride {}) is not 4-byte aligned: {} (#{})", i, state.vertex_streams[i].data.address(),
+                        stream_size, vertex_program.streams[i].stride,
+                        copy_misaligned ? "copied to the ring buffer" : "bound in place, this game writes memory from the GPU", n);
+            }
+            if (mapped && !snapshot && !restride && !copy_misaligned) {
                 auto [buffer, offset] = context.state.get_matching_mapping(state.vertex_streams[i].data.cast<void>());
 
                 context.vertex_stream_offsets[i] = offset;

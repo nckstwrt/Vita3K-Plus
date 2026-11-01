@@ -421,6 +421,10 @@ void stream_snapshot_disable_for_program(const uint32_t program_addr, const uint
     LOG_INFO("[SNAPSHOT] disabled for this game: the program at 0x{:08X} (flags 0x{:X}) writes memory from the GPU, so a copy of a vertex stream taken on the guest thread could miss what the GPU writes into it later", program_addr, program_flags);
 }
 
+bool stream_snapshot_disabled() {
+    return g_snap_disabled.load(std::memory_order_relaxed);
+}
+
 void set_vertex_stream(State &state, Context *ctx, const std::size_t index, const std::size_t data_len, const Ptr<const void> stream) {
     renderer::add_state_set_command(ctx, renderer::GXMState::VertexStream, stream, index, data_len, static_cast<uint64_t>(~0ull));
 }

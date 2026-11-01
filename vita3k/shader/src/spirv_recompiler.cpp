@@ -2241,6 +2241,22 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
         }
     }
 
+    // a fragment program can read iterators this vertex program never writes so declare the missing ones
+    if (translation_state.is_vulkan) {
+        const spv::Id v4 = b.makeVectorType(b.makeFloatType(32), 4);
+        const spv::Id zero = b.makeFloatConstant(0.0f);
+        const spv::Id zero_v4 = b.makeCompositeConstant(v4, { zero, zero, zero, zero });
+        for (const auto vo : vertex_outputs_list) {
+            if (vo == SCE_GXM_VERTEX_PROGRAM_OUTPUT_POSITION || vo == SCE_GXM_VERTEX_PROGRAM_OUTPUT_PSIZE || vo >= SCE_GXM_VERTEX_PROGRAM_OUTPUT_CLIP0 || (vertex_outputs & vo))
+                continue;
+            const VertexProgramOutputProperties &properties = vertex_properties_map.at(vo);
+            const spv::Id out_var = b.createVariable(spv::NoPrecision, spv::StorageClassOutput, v4, properties.name.c_str());
+            b.addDecoration(out_var, spv::DecorationLocation, properties.location);
+            translation_state.interfaces.push_back(out_var);
+            b.createStore(zero_v4, out_var);
+        }
+    }
+
     b.makeReturn(false);
     b.setBuildPoint(last_build_point);
 

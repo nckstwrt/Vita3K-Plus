@@ -373,6 +373,10 @@ elseif(WIN32)
 	target_sources(vita3k PRIVATE resource.h Vita3KPlus.ico Vita3K.rc Windows.manifest)
 	set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT vita3k)
 	set_target_properties(vita3k PROPERTIES WIN32_EXECUTABLE TRUE VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$(Configuration)")
+	if(MSVC AND (CMAKE_INTERPROCEDURAL_OPTIMIZATION OR CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE))
+		# incremental LTCG reuses callers compiled for an older callee and can drop an argument it now uses
+		target_link_options(vita3k PRIVATE $<$<CONFIG:Release>:/LTCG>)
+	endif()
 	add_custom_command(
 		TARGET vita3k
 		POST_BUILD
