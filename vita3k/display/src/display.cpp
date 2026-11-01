@@ -53,8 +53,7 @@
 
 // Code heavily influenced by PPSSSPP's SceDisplay.cpp
 
-static constexpr int TARGET_FPS = 60;
-static constexpr int64_t TARGET_MICRO_PER_FRAME = 1000000LL / TARGET_FPS;
+static constexpr int64_t VBLANK_PERIOD_NS = 16'683'333;
 // how many cycles do we need to see before we start predicting the next frame
 static constexpr int predict_threshold = 3;
 static constexpr int max_expected_swapchain_size = 6;
@@ -500,18 +499,18 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             }
         }
 
-        const auto time_ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-        const auto time_left = TARGET_MICRO_PER_FRAME - (time_ms % TARGET_MICRO_PER_FRAME);
+        const auto time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        const auto time_left = VBLANK_PERIOD_NS - (time_ns % VBLANK_PERIOD_NS);
         if (display.fps_hack) {
-            if (time_left > TARGET_MICRO_PER_FRAME / 2) {
-                std::this_thread::sleep_for(std::chrono::microseconds(time_left - TARGET_MICRO_PER_FRAME / 2));
+            if (time_left > VBLANK_PERIOD_NS / 2) {
+                std::this_thread::sleep_for(std::chrono::nanoseconds(time_left - VBLANK_PERIOD_NS / 2));
                 wake_half_vblank_waiters(display);
             }
-            const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-            if (time_ms + time_left > now_us)
-                std::this_thread::sleep_for(std::chrono::microseconds(time_ms + time_left - now_us));
+            const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            if (time_ns + time_left > now_ns)
+                std::this_thread::sleep_for(std::chrono::nanoseconds(time_ns + time_left - now_ns));
         } else {
-            std::this_thread::sleep_for(std::chrono::microseconds(time_left));
+            std::this_thread::sleep_for(std::chrono::nanoseconds(time_left));
         }
     }
 
