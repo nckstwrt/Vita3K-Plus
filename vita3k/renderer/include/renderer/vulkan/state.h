@@ -159,6 +159,10 @@ struct VKState : public renderer::State {
 #ifdef __ANDROID__
     bool support_android_buffer_import = false;
     bool support_unix_fd_import = false;
+    // set before create(): this session runs on the system driver whatever custom driver is selected
+    bool ignore_custom_driver = false;
+    // set by create() when the selected custom driver could not make the swapchain (its objects are already freed)
+    bool custom_driver_cannot_present = false;
 #endif
 
     VKState(int gpu_idx);
@@ -194,6 +198,7 @@ struct VKState : public renderer::State {
 #ifdef __ANDROID__
     bool support_custom_drivers() override;
     void set_turbo_mode(bool set) override;
+    void cleanup_failed_create();
 #endif
     std::string_view get_gpu_name() override;
     uint32_t get_gpu_version() override;

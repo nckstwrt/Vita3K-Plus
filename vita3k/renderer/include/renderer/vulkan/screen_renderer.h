@@ -54,6 +54,8 @@ public:
     std::vector<vk::Semaphore> image_acquired_semaphores;
     std::vector<vk::Semaphore> image_ready_semaphores;
     bool swapchain_has_storage = false;
+    // the driver refused a swapchain with storage usage, so every later swapchain is made without it
+    bool swapchain_storage_refused = false;
     // FSR can write this swapchain directly or through its blit
     bool swapchain_supports_fsr = false;
 

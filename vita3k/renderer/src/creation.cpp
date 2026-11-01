@@ -457,8 +457,21 @@ bool init(FrameHost &frame, std::unique_ptr<State> &state, Backend backend, cons
         state = std::make_unique<vulkan::VKState>(config.current_config.gpu_idx);
         state->frame = &frame;
         state->init_paths(root_paths);
-        if (!vulkan::create(state, config))
+        if (!vulkan::create(state, config)) {
+#ifdef __ANDROID__
+            if (!static_cast<vulkan::VKState &>(*state).custom_driver_cannot_present)
+                return false;
+            LOG_WARN("Custom driver {} could not create the swapchain on this device. This session runs on the system driver (the driver setting is unchanged)", config.current_config.custom_driver_name);
+            state = std::make_unique<vulkan::VKState>(config.current_config.gpu_idx);
+            static_cast<vulkan::VKState &>(*state).ignore_custom_driver = true;
+            state->frame = &frame;
+            state->init_paths(root_paths);
+            if (!vulkan::create(state, config))
+                return false;
+#else
             return false;
+#endif
+        }
         break;
 
     default:

@@ -230,7 +230,12 @@ bool ScreenRenderer::setup() {
 
     create_render_pass();
 
-    create_swapchain();
+    try {
+        create_swapchain();
+    } catch (const vk::SystemError &error) {
+        LOG_ERROR("Could not create the swapchain: {}", error.what());
+        return false;
+    }
 
     // these functions do not need to be called when the swapchain is resized
     create_surface_image();
@@ -277,6 +282,7 @@ void ScreenRenderer::create_swapchain() {
         swapchain_has_storage = surface_format.format == vk::Format::eR8G8B8A8Unorm
             // workaround for a Turnip driver bug: adding storage flag here breaks the swapchain
             && !state.is_adreno_turnip
+            && !swapchain_storage_refused
             && static_cast<bool>(surface_capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eStorage)
             && static_cast<bool>(swapchain_features & vk::FormatFeatureFlagBits::eStorageImage);
         if (swapchain_has_storage)
@@ -313,7 +319,23 @@ void ScreenRenderer::create_swapchain() {
             .clipped = true,
         };
 
-        swapchain = state.device.createSwapchainKHR(swapchain_info);
+        try {
+            swapchain = state.device.createSwapchainKHR(swapchain_info);
+        } catch (const vk::SystemError &error) {
+            if (!swapchain_has_storage)
+                throw;
+            LOG_WARN("The driver refused a swapchain with storage usage ({}); trying again without it, FSR will blit its output", error.what());
+            swapchain_storage_refused = true;
+#ifdef __ANDROID__
+            const bool new_surface = true;
+#else
+            const bool new_surface = error.code() == vk::Result::eErrorSurfaceLostKHR;
+#endif
+            if (new_surface && !create())
+                throw;
+            create_swapchain();
+            return;
+        }
     }
 
     // Get Swapchain Images
@@ -414,13 +436,12 @@ void ScreenRenderer::cleanup() {
     state.device.destroy(swapchain);
     swapchain = nullptr;
 
-    for (uint32_t i = 0; i <= swapchain_size; i++) {
-        if (i != swapchain_size)
-            state.device.destroy(fences[i]);
-
-        state.device.destroy(image_acquired_semaphores[i]);
-        state.device.destroy(image_ready_semaphores[i]);
-    }
+    for (vk::Fence fence : fences)
+        state.device.destroy(fence);
+    for (vk::Semaphore semaphore : image_acquired_semaphores)
+        state.device.destroy(semaphore);
+    for (vk::Semaphore semaphore : image_ready_semaphores)
+        state.device.destroy(semaphore);
     fences.clear();
     image_acquired_semaphores.clear();
     image_ready_semaphores.clear();

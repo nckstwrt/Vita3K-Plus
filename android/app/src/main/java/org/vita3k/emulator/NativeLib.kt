@@ -110,6 +110,8 @@ object NativeLib {
     external fun getCustomDriverSupportInfo(customDriverName: String): IntArray
     /** Returns true when the Android custom GPU driver option should be shown on this device. */
     external fun shouldShowCustomDriverOptions(): Boolean
+    /** Returns true when the GPU is an Adreno, the only GPU turbo mode works on. */
+    external fun shouldShowTurboModeOption(): Boolean
     /** Returns the names of the camera devices currently visible to SDL. */
     external fun getAvailableCameras(): Array<String>
     /** Returns a flat array [label0, mask0, label1, mask1, ...] of available ad-hoc addresses. */

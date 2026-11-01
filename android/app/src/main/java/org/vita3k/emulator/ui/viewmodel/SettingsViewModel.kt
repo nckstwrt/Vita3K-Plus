@@ -77,6 +77,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     var showCustomDriverOptions by mutableStateOf(true)
         private set
 
+    var showTurboModeOption by mutableStateOf(true)
+        private set
+
     var customDriverBusy by mutableStateOf(false)
         private set
 
@@ -617,6 +620,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         modulesList = snapshot.modulesList
         installedCustomDrivers = snapshot.installedCustomDrivers
         showCustomDriverOptions = snapshot.showCustomDriverOptions
+        showTurboModeOption = snapshot.showTurboModeOption
         supportedMemoryMappingMask = snapshot.supportedMemoryMappingMask
         customDriverLoadStatus = snapshot.customDriverLoadStatus
         availableCameras = snapshot.availableCameras

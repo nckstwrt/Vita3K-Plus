@@ -413,13 +413,14 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         }
     }
 #ifdef __ANDROID__
-    const bool custom_driver_requested = !config.current_config.custom_driver_name.empty();
+    const std::string custom_driver_name = ignore_custom_driver ? std::string() : config.current_config.custom_driver_name;
+    const bool custom_driver_requested = !custom_driver_name.empty();
 #endif
 
     // Create Instance
     {
 #if defined(__ANDROID__) && defined(USE_ADRENO_TOOLS)
-        PFN_vkGetInstanceProcAddr vk_get_instance_proc_addr = android_driver::resolve_vk_get_instance_proc_addr(config.current_config.custom_driver_name);
+        PFN_vkGetInstanceProcAddr vk_get_instance_proc_addr = android_driver::resolve_vk_get_instance_proc_addr(custom_driver_name);
         if (!vk_get_instance_proc_addr)
             return false;
 
@@ -654,9 +655,9 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
                     physical_device_properties.vendorID,
                     physical_device_properties.driverVersion,
                     physical_device_properties.deviceName.data()))
-                LOG_INFO("Custom Adreno driver {} injected successfully", config.current_config.custom_driver_name);
+                LOG_INFO("Custom driver {} injected successfully", config.current_config.custom_driver_name);
             else
-                LOG_WARN("Custom Adreno driver {} fell back to the system Vulkan loader", config.current_config.custom_driver_name);
+                LOG_WARN("Custom driver {} fell back to the system Vulkan loader", config.current_config.custom_driver_name);
         }
 #endif
 
@@ -1087,8 +1088,15 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         frame.destroy_queue.init(device);
     }
 
-    if (!screen_renderer.setup())
+    if (!screen_renderer.setup()) {
+#ifdef __ANDROID__
+        if (custom_driver_requested) {
+            cleanup_failed_create();
+            custom_driver_cannot_present = true;
+        }
+#endif
         return false;
+    }
 
     init_overlay_font_dirs();
 
@@ -2438,6 +2446,47 @@ void VKState::wait_gpu_idle() {
 }
 
 #ifdef __ANDROID__
+void VKState::cleanup_failed_create() {
+    screen_renderer.cleanup();
+
+    default_image.destroy();
+    default_raw_image.destroy();
+    default_buffer.destroy();
+
+    for (int i = 0; i < MAX_FRAMES_RENDERING; i++) {
+        device.destroy(frames[i].render_pool);
+        frames[i].render_pool = nullptr;
+        device.destroy(frames[i].prerender_pool);
+        frames[i].prerender_pool = nullptr;
+    }
+
+    device.destroy(general_command_pool);
+    general_command_pool = nullptr;
+    device.destroy(transfer_command_pool);
+    transfer_command_pool = nullptr;
+    device.destroy(multithread_command_pool);
+    multithread_command_pool = nullptr;
+
+    allocator.destroy();
+
+    vkutil::deinit();
+
+    device.destroy();
+    device = nullptr;
+
+    if (debug_messenger) {
+        instance.destroyDebugUtilsMessengerEXT(debug_messenger);
+        debug_messenger = nullptr;
+    }
+    if (debug_report) {
+        instance.destroyDebugReportCallbackEXT(debug_report);
+        debug_report = nullptr;
+    }
+
+    instance.destroy();
+    instance = nullptr;
+}
+
 bool VKState::support_custom_drivers() {
     // vendor ID 0x5143 is Qualcomm, being stock or turnip
     return physical_device_properties.vendorID == 0x5143;
