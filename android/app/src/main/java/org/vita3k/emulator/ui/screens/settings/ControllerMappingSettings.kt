@@ -74,7 +74,8 @@ private data class ManualBindingOption(
 
 private enum class CaptureMode {
     Button,
-    Axis
+    Axis,
+    Trigger
 }
 
 private val buttonBindingRows = listOf(
@@ -262,7 +263,7 @@ internal fun ControllerMappingSections(
             prompt = stringResource(R.string.settings_controls_capture_axis_prompt),
             options = axisManualOptions(controllerFamily),
             selectedValue = currentAxisBinding(cfg, row.bindIndex),
-            captureMode = CaptureMode.Axis,
+            captureMode = if (row.bindIndex == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || row.bindIndex == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) CaptureMode.Trigger else CaptureMode.Axis,
             connectedGamepads = connectedGamepads,
             onDismiss = { pendingAxisBinding = null },
             onSelected = { mappedAxis ->
@@ -395,6 +396,7 @@ private fun CaptureInputSurface(
 private class GamepadCaptureView(context: Context) : View(context) {
     var captureMode: CaptureMode = CaptureMode.Button
     var onCaptured: (Int) -> Unit = {}
+    private val axisRests = HashMap<Int, Float>()
 
     init {
         isFocusable = true
@@ -410,24 +412,25 @@ private class GamepadCaptureView(context: Context) : View(context) {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (captureMode != CaptureMode.Button) {
+        if (captureMode == CaptureMode.Axis) {
             return super.dispatchKeyEvent(event)
         }
         if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0 || !isGamepadDevice(event.device)) {
             return super.dispatchKeyEvent(event)
         }
 
-        val mapped = keyCodeToSdlButton(event.keyCode) ?: return super.dispatchKeyEvent(event)
+        val mapped = (if (captureMode == CaptureMode.Trigger) keyCodeToSdlTrigger(event.keyCode) else keyCodeToSdlButton(event.keyCode))
+            ?: return super.dispatchKeyEvent(event)
         onCaptured(mapped)
         return true
     }
 
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
-        if (captureMode != CaptureMode.Axis || !event.isFromSource(InputDevice.SOURCE_JOYSTICK)) {
+        if (captureMode == CaptureMode.Button || !event.isFromSource(InputDevice.SOURCE_JOYSTICK)) {
             return super.onGenericMotionEvent(event)
         }
 
-        val mapped = dominantAxisMapping(event) ?: return super.onGenericMotionEvent(event)
+        val mapped = dominantAxisMapping(event, axisRests) ?: return super.onGenericMotionEvent(event)
         onCaptured(mapped)
         return true
     }
@@ -440,26 +443,33 @@ private fun isGamepadDevice(device: InputDevice?): Boolean {
         (sources and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
 }
 
-private fun dominantAxisMapping(event: MotionEvent): Int? {
+private fun dominantAxisMapping(event: MotionEvent, rests: MutableMap<Int, Float>): Int? {
+    fun rest(axis: Int) = rests.getOrPut(axis) { event.getAxisValue(axis).takeIf { abs(it) >= 0.9f } ?: 0f }
+    fun atEnd(axis: Int) = if (rest(axis) < 0f) 1 else 0
+    val device = event.device
+    val bothPairs = device?.getMotionRange(MotionEvent.AXIS_Z) != null && device.getMotionRange(MotionEvent.AXIS_RX) != null
+    val zBias = atEnd(MotionEvent.AXIS_Z) + atEnd(MotionEvent.AXIS_RZ) - atEnd(MotionEvent.AXIS_RX) - atEnd(MotionEvent.AXIS_RY)
+    val zIsTrigger = bothPairs && zBias > 0
+    val rxIsTrigger = bothPairs && zBias < 0
     val candidates = listOf(
         MotionEvent.AXIS_X to SDL_GAMEPAD_AXIS_LEFTX,
         MotionEvent.AXIS_Y to SDL_GAMEPAD_AXIS_LEFTY,
-        MotionEvent.AXIS_Z to SDL_GAMEPAD_AXIS_RIGHTX,
-        MotionEvent.AXIS_RZ to SDL_GAMEPAD_AXIS_RIGHTY,
-        MotionEvent.AXIS_RX to SDL_GAMEPAD_AXIS_RIGHTX,
-        MotionEvent.AXIS_RY to SDL_GAMEPAD_AXIS_RIGHTY,
+        MotionEvent.AXIS_Z to if (zIsTrigger) SDL_GAMEPAD_AXIS_LEFT_TRIGGER else SDL_GAMEPAD_AXIS_RIGHTX,
+        MotionEvent.AXIS_RZ to if (zIsTrigger) SDL_GAMEPAD_AXIS_RIGHT_TRIGGER else SDL_GAMEPAD_AXIS_RIGHTY,
+        MotionEvent.AXIS_RX to if (rxIsTrigger) SDL_GAMEPAD_AXIS_LEFT_TRIGGER else SDL_GAMEPAD_AXIS_RIGHTX,
+        MotionEvent.AXIS_RY to if (rxIsTrigger) SDL_GAMEPAD_AXIS_RIGHT_TRIGGER else SDL_GAMEPAD_AXIS_RIGHTY,
         MotionEvent.AXIS_LTRIGGER to SDL_GAMEPAD_AXIS_LEFT_TRIGGER,
         MotionEvent.AXIS_BRAKE to SDL_GAMEPAD_AXIS_LEFT_TRIGGER,
         MotionEvent.AXIS_RTRIGGER to SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,
         MotionEvent.AXIS_GAS to SDL_GAMEPAD_AXIS_RIGHT_TRIGGER
     )
 
-    var bestValue = 0f
+    var bestMove = 0f
     var bestAxis: Int? = null
     for ((androidAxis, sdlAxis) in candidates) {
-        val value = abs(event.getAxisValue(androidAxis))
-        if (value > 0.6f && value > bestValue) {
-            bestValue = value
+        val move = abs(event.getAxisValue(androidAxis) - rest(androidAxis))
+        if (move > 0.6f && move > bestMove) {
+            bestMove = move
             bestAxis = sdlAxis
         }
     }
@@ -483,6 +493,14 @@ private fun keyCodeToSdlButton(keyCode: Int): Int? {
         KeyEvent.KEYCODE_DPAD_DOWN -> SDL_GAMEPAD_BUTTON_DPAD_DOWN
         KeyEvent.KEYCODE_DPAD_LEFT -> SDL_GAMEPAD_BUTTON_DPAD_LEFT
         KeyEvent.KEYCODE_DPAD_RIGHT -> SDL_GAMEPAD_BUTTON_DPAD_RIGHT
+        else -> null
+    }
+}
+
+private fun keyCodeToSdlTrigger(keyCode: Int): Int? {
+    return when (keyCode) {
+        KeyEvent.KEYCODE_BUTTON_L2 -> SDL_GAMEPAD_AXIS_LEFT_TRIGGER
+        KeyEvent.KEYCODE_BUTTON_R2 -> SDL_GAMEPAD_AXIS_RIGHT_TRIGGER
         else -> null
     }
 }
