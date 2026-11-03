@@ -20,6 +20,7 @@
 #include <mem/util.h>
 
 #include <map>
+#include <vector>
 
 struct MemState;
 
@@ -33,6 +34,7 @@ using SegmentInfosForReloc = std::map<uint16_t, SegmentInfoForReloc>;
 /**
  * \param is_var_import True when alternate format 1 should be used (it's used for var import relocations)
  * \param explicit_symval Used only if is_var_import is true, specifies the value to be written to the relocation target
+ * \param patched Used only if is_var_import is true (receives the guest address of each rewritten word)
  * \return True on success, false on error
  */
-bool relocate(const void *entries, uint32_t size, const SegmentInfosForReloc &segments, const MemState &mem, bool is_var_import = false, uint32_t explicit_symval = 0);
+bool relocate(const void *entries, uint32_t size, const SegmentInfosForReloc &segments, const MemState &mem, bool is_var_import = false, uint32_t explicit_symval = 0, std::vector<Address> *patched = nullptr);

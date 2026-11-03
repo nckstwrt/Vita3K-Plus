@@ -394,18 +394,13 @@ static bool load_var_exports(const uint32_t *nids, const Ptr<uint32_t> *entries,
                 }
             }
 
-            // Note: We make the assumption that variables are not imported into executable code (wouldn't make a lot of sense)
-            // If this is not the case, uncomment the following
-            /* if (!seg.empty()) {
-                for (const auto &[key, value] : seg) {
-                    kernel.invalidate_jit_cache(value.addr, value.size);
-                }
-            }*/
-
             if (!seg.empty()) {
-                if (!relocate(var_binding_info.entries, var_binding_info.size, seg, mem, true, entry.address())) {
+                std::vector<Address> patched;
+                if (!relocate(var_binding_info.entries, var_binding_info.size, seg, mem, true, entry.address(), &patched)) {
                     LOG_ERROR("Failed to relocate late binding info");
                 }
+                for (const Address word : patched)
+                    kernel.invalidate_jit_cache(word, sizeof(uint32_t));
             }
         }
         if (old_entry_address)

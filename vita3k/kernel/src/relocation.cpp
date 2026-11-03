@@ -300,7 +300,7 @@ static bool relocate_entry(void *data, uint32_t code, uint32_t symval, uint32_t 
     return true; // ignore unhandled relocations
 }
 
-bool relocate(const void *entries, uint32_t size, const SegmentInfosForReloc &segments, const MemState &mem, bool is_var_import, uint32_t explicit_symval) {
+bool relocate(const void *entries, uint32_t size, const SegmentInfosForReloc &segments, const MemState &mem, bool is_var_import, uint32_t explicit_symval, std::vector<Address> *patched) {
     const void *const end = static_cast<const uint8_t *>(entries) + size;
     const Entry *entry = static_cast<const Entry *>(entries);
 
@@ -425,6 +425,8 @@ bool relocate(const void *entries, uint32_t size, const SegmentInfosForReloc &se
                 if (!relocate_entry(Ptr<uint32_t>(p).get(mem), format1_entry->code, s, a, p)) {
                     return false;
                 }
+                if (patched)
+                    patched->push_back(p);
 
                 g_addr = patch_seg_start;
                 g_offset = offset;
@@ -486,6 +488,8 @@ bool relocate(const void *entries, uint32_t size, const SegmentInfosForReloc &se
                 if (!relocate_entry(Ptr<uint32_t>(p).get(mem), format1_entry->code, s, a, p)) {
                     return false;
                 }
+                if (patched)
+                    patched->push_back(p);
 
                 g_addr = patch_seg_start;
                 g_offset = offset;
