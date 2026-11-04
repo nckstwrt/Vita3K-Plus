@@ -436,6 +436,13 @@ static void report_extra_buttons(EmuEnvState &emuenv, int port, uint32_t buttons
     }
 }
 
+SceUInt32 ctrl_peek_buttons(EmuEnvState &emuenv, int port) {
+    SceUInt32 buttons = 0;
+    SceUInt8 lx, ly, rx, ry;
+    retrieve_ctrl_data(emuenv, port, false, false, false, buttons, lx, ly, rx, ry);
+    return buttons;
+}
+
 int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2 *pData, SceUInt32 count, bool negative, bool is_peek, bool is_v2, bool from_ext) {
     emuenv.display.guest_input_reads.fetch_add(1, std::memory_order_relaxed);
     if (port > 1 && !emuenv.cfg.current_config.pstv_mode) {
