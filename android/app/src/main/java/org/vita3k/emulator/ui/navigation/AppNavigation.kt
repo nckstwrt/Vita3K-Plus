@@ -45,6 +45,8 @@ import org.vita3k.emulator.ui.viewmodel.InstallViewModel
 import org.vita3k.emulator.ui.viewmodel.InstallType
 import org.vita3k.emulator.ui.viewmodel.SettingsViewModel
 import org.vita3k.emulator.ui.viewmodel.UserManagementViewModel
+import org.vita3k.emulator.store.StoreScreen
+import org.vita3k.emulator.store.StoreViewModel
 
 private const val ROUTE_INITIAL_SETUP = "initial_setup"
 private const val ROUTE_INITIAL_SETUP_MANUAL = "initial_setup/manual"
@@ -52,6 +54,7 @@ private const val ROUTE_APPS_LIST = "apps_list"
 private const val ROUTE_SETTINGS = "settings"
 private const val ROUTE_USER_MANAGEMENT = "users"
 private const val ROUTE_TROPHIES = "trophies"
+private const val ROUTE_STORE = "store"
 private const val ROUTE_CUSTOM_CONFIG = "settings/custom/{titleId}?appName={appName}"
 private const val ARG_TITLE_ID = "titleId"
 private const val ARG_APP_NAME = "appName"
@@ -294,6 +297,11 @@ fun AppNavigation(
                         launchSingleTop = true
                     }
                 },
+                onOpenStore = {
+                    navController.navigate(ROUTE_STORE) {
+                        launchSingleTop = true
+                    }
+                },
                 onOpenTrophyManager = {
                     navController.navigate(ROUTE_TROPHIES) {
                         launchSingleTop = true
@@ -314,6 +322,18 @@ fun AppNavigation(
                         launchSingleTop = true
                     }
                 }
+            )
+        }
+
+        composable(route = ROUTE_STORE) {
+            val storeViewModel: StoreViewModel = viewModel()
+            StoreScreen(
+                viewModel = storeViewModel,
+                installedTitleIds = appsListViewModel.apps.map { it.titleId }.toSet(),
+                onPlay = { titleId ->
+                    appsListViewModel.apps.firstOrNull { it.titleId == titleId }?.let { onAppLaunch(it) }
+                },
+                onBack = { navController.popBackStack() }
             )
         }
 
