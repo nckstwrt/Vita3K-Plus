@@ -20,6 +20,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
@@ -108,6 +109,7 @@ fun AppsListScreen(
     onRefresh: () -> Unit,
     onInstallClick: () -> Unit,
     onOpenSettings: () -> Unit = {},
+    onOpenStore: () -> Unit = {},
     onOpenTrophyManager: () -> Unit = {},
     onOpenUserManagement: () -> Unit = {},
     onOpenWelcomeScreen: () -> Unit = {},
@@ -175,6 +177,9 @@ fun AppsListScreen(
                         } else {
                             IconButton(onClick = { showSearchBar = true }) {
                                 Icon(Icons.Default.Search, contentDescription = stringResource(R.string.apps_list_cd_search))
+                            }
+                            IconButton(onClick = onOpenStore) {
+                                Icon(Icons.Default.ShoppingCart, contentDescription = "Store")
                             }
                             IconButton(onClick = onOpenSettings) {
                                 Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.settings_cd_open))
