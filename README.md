@@ -21,7 +21,7 @@ https://github.com/nckstwrt/Vita3K-Plus/releases
 
 ## Enhancements
 
-# v1.4 - Currently Unreleased
+# v1.4 - Released 6th November 2026
 - **Battle Pentagram** - Now working with Mali
 - **UPPERS** - Was freezing in v1.3, now fixed again
 - **Call of Duty** - Shadows fixed on Turnip for Adreno 6xx devices
@@ -39,7 +39,7 @@ https://github.com/nckstwrt/Vita3K-Plus/releases
 - **Low Memory Device Improvements** - Now can run games like Killzone on low memory devices (like Retroid Flip 1 (4GB RAM))
 - **Lots of little additions** - Gamepad improvements, upstream additions (cheat db + home screen shortcuts), etc
 
-# v1.3 - Release 18th October 2026
+# v1.3 - Released 18th October 2026
 - **Pixeljunk Shooter ultimate** - Sound glitches fixed
 - **UNDER NIGHT IN-BIRTH** - Fixed flickering
 - **Madoka Magica - The Battle Pentagram** - Graphics fixes
