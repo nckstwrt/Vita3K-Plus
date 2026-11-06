@@ -350,6 +350,7 @@ SDLMAIN_DECLSPEC int SDL_main(int argc, char *argv[]) {
 
         poll_input_devices();
         refresh_controllers(emuenv->ctrl, *emuenv);
+        ctrl_log_joystick_census(*emuenv);
 
         {
             JNIEnv *jni_env = reinterpret_cast<JNIEnv *>(SDL_GetAndroidJNIEnv());

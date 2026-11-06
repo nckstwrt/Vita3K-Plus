@@ -51,6 +51,9 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
 
 import org.libsdl.app.SDLActivity;
 import org.libsdl.app.SDLControllerManager;
@@ -101,6 +104,9 @@ public class Emulator extends SDLActivity
     private boolean restoreImeAfterPauseMenu;
     private long lastImeCompletionUptimeMs;
     private long lastUnfocusedControllerLogMs;
+    private String lastAndroidPads;
+    private int lastOverlayMask = -1;
+    private final HashMap<Integer, DirectPad> directPads = new HashMap<>();
     private RelativeLayout.LayoutParams lastTextInputLayoutParams;
     private int lastTextInputType;
     private boolean hasLastTextInputState;
@@ -126,6 +132,8 @@ public class Emulator extends SDLActivity
     public void setCurrentGameId(String gameId){
         runOnUiThread(() -> {
             currentGameId = gameId != null ? gameId : "";
+            clearDirectPads("a game is starting");
+            logInputDevices("launch of " + currentGameId);
             refreshControllerOverlayScope();
             if (sessionViewModel != null) {
                 String runningAppTitle = "";
@@ -277,6 +285,7 @@ public class Emulator extends SDLActivity
 
     @Override
     protected void onPause() {
+        clearDirectPads("the app paused");
         suspendForBackgroundIfNeeded();
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE);
         super.onPause();
@@ -318,11 +327,14 @@ public class Emulator extends SDLActivity
         if (hasFocus) {
             refreshUiState(false);
             focusGameSurface();
+        } else {
+            clearDirectPads("the game window lost focus");
         }
     }
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        updateDirectPadKey(event);
         if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && nativeKeyboardRequested) {
             if (event.getAction() == KeyEvent.ACTION_UP && event.getRepeatCount() == 0) {
                 dismissImeFromKeyboard(mTextEdit);
@@ -357,6 +369,7 @@ public class Emulator extends SDLActivity
 
     @Override
     public boolean dispatchGenericMotionEvent(MotionEvent event) {
+        updateDirectPadMotion(event);
         if (isControllerSource(event.getSource()) && mSurface != null && !mSurface.hasFocus()) {
             if (gameOwnsControllerInput()) {
                 reclaimGameFocus("stick", event.getDeviceId());
@@ -433,6 +446,327 @@ public class Emulator extends SDLActivity
         return false;
     }
 
+    private static final int[] PAD_KEYS = {
+            KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_BUTTON_X, KeyEvent.KEYCODE_BUTTON_Y,
+            KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_BUTTON_R1, KeyEvent.KEYCODE_BUTTON_L2, KeyEvent.KEYCODE_BUTTON_R2,
+            KeyEvent.KEYCODE_BUTTON_THUMBL, KeyEvent.KEYCODE_BUTTON_THUMBR, KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_BUTTON_SELECT,
+            KeyEvent.KEYCODE_BUTTON_MODE, KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_BUTTON_C, KeyEvent.KEYCODE_BUTTON_Z,
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_BUTTON_1, KeyEvent.KEYCODE_BUTTON_2, KeyEvent.KEYCODE_BUTTON_3, KeyEvent.KEYCODE_BUTTON_4,
+            KeyEvent.KEYCODE_BUTTON_5, KeyEvent.KEYCODE_BUTTON_6, KeyEvent.KEYCODE_BUTTON_7, KeyEvent.KEYCODE_BUTTON_8,
+            KeyEvent.KEYCODE_BUTTON_9, KeyEvent.KEYCODE_BUTTON_10, KeyEvent.KEYCODE_BUTTON_11, KeyEvent.KEYCODE_BUTTON_12,
+            KeyEvent.KEYCODE_BUTTON_13, KeyEvent.KEYCODE_BUTTON_14, KeyEvent.KEYCODE_BUTTON_15, KeyEvent.KEYCODE_BUTTON_16,
+            KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_ESCAPE, KeyEvent.KEYCODE_A, KeyEvent.KEYCODE_Z
+    };
+
+    private static String describeSources(int sources) {
+        final int[] values = { InputDevice.SOURCE_KEYBOARD, InputDevice.SOURCE_DPAD, InputDevice.SOURCE_GAMEPAD, InputDevice.SOURCE_JOYSTICK,
+                InputDevice.SOURCE_TOUCHSCREEN, InputDevice.SOURCE_MOUSE, InputDevice.SOURCE_MOUSE_RELATIVE, InputDevice.SOURCE_STYLUS,
+                InputDevice.SOURCE_TRACKBALL, InputDevice.SOURCE_TOUCHPAD, InputDevice.SOURCE_TOUCH_NAVIGATION, InputDevice.SOURCE_ROTARY_ENCODER,
+                InputDevice.SOURCE_HDMI, InputDevice.SOURCE_SENSOR };
+        final String[] names = { "keyboard", "dpad", "gamepad", "joystick", "touchscreen", "mouse", "mouse-relative", "stylus",
+                "trackball", "touchpad", "touch-navigation", "rotary", "hdmi", "sensor" };
+        StringBuilder text = new StringBuilder(String.format(Locale.ROOT, "0x%08X (", sources));
+        int named = 0;
+        for (int i = 0; i < values.length; i++) {
+            if ((sources & values[i]) == values[i])
+                text.append(named++ == 0 ? "" : " ").append(names[i]);
+        }
+        return text.append(named == 0 ? "none)" : ")").toString();
+    }
+
+    private static int sdlGuidCrc(InputDevice device) {
+        String desc = device.getDescriptor();
+        if (desc == null || desc.isEmpty())
+            desc = device.getName();
+        int crc = 0;
+        for (byte b : desc.getBytes(java.nio.charset.StandardCharsets.UTF_8)) {
+            int r = (crc ^ b) & 0xFF;
+            int c = 0;
+            for (int i = 0; i < 8; i++) {
+                c = (((c ^ r) & 1) != 0 ? 0xA001 : 0) ^ (c >>> 1);
+                r >>>= 1;
+            }
+            crc = c ^ (crc >>> 8);
+        }
+        return crc & 0xFFFF;
+    }
+
+    private static String describeDevice(InputDevice device) {
+        StringBuilder text = new StringBuilder(String.format(Locale.ROOT, "device %d '%s' vendor 0x%04X product 0x%04X | sources %s, keyboard type %d, controller number %d",
+                device.getId(), device.getName(), device.getVendorId(), device.getProductId(), describeSources(device.getSources()),
+                device.getKeyboardType(), device.getControllerNumber()));
+        if (Build.VERSION.SDK_INT >= 29)
+            text.append(device.isExternal() ? ", external" : ", built in");
+        if (device.isVirtual())
+            text.append(", virtual");
+        text.append(String.format(Locale.ROOT, " | SDL joystick %s, SDL GUID crc 0x%04X, descriptor %s",
+                SDLControllerManager.isDeviceSDLJoystick(device.getId()) ? "yes" : "no", sdlGuidCrc(device), device.getDescriptor()));
+        boolean[] has = device.hasKeys(PAD_KEYS);
+        text.append(" | keys:");
+        int keys = 0;
+        for (int i = 0; i < PAD_KEYS.length; i++) {
+            if (has[i]) {
+                text.append(' ').append(KeyEvent.keyCodeToString(PAD_KEYS[i]).replace("KEYCODE_", ""));
+                keys++;
+            }
+        }
+        if (keys == 0)
+            text.append(" none");
+        text.append(" | axes:");
+        List<InputDevice.MotionRange> ranges = device.getMotionRanges();
+        if (ranges.isEmpty())
+            text.append(" none");
+        for (InputDevice.MotionRange range : ranges) {
+            text.append(String.format(Locale.ROOT, " %s(0x%X %.2f..%.2f flat %.2f)", MotionEvent.axisToString(range.getAxis()).replace("AXIS_", ""),
+                    range.getSource(), range.getMin(), range.getMax(), range.getFlat()));
+        }
+        return text.toString();
+    }
+
+    private void logInputDevices(String why) {
+        int[] ids = InputDevice.getDeviceIds();
+        StringBuilder text = new StringBuilder(String.format(Locale.ROOT, "[INPUT] %d input devices (%s):", ids.length, why));
+        for (int id : ids) {
+            InputDevice device = InputDevice.getDevice(id);
+            text.append("\n[INPUT] ").append(device != null ? describeDevice(device) : "device " + id + " (gone)");
+        }
+        logInputDiagnostic(text.toString());
+    }
+
+    private void logInputDeviceChange(String what, int deviceId) {
+        InputDevice device = InputDevice.getDevice(deviceId);
+        logInputDiagnostic("[INPUT] input device " + what + ": " + (device != null ? describeDevice(device) : "device " + deviceId));
+    }
+
+    private static final int DIRECT_PAD_LEFT_TRIGGER = 1 << 30;
+    private static final int DIRECT_PAD_RIGHT_TRIGGER = 1 << 31;
+    private static final int[] DIRECT_PAD_ZRZ = { MotionEvent.AXIS_Z, MotionEvent.AXIS_RZ };
+    private static final int[] DIRECT_PAD_RXRY = { MotionEvent.AXIS_RX, MotionEvent.AXIS_RY };
+
+    private static final class DirectPad {
+        int keys;
+        int hat;
+        final float[] axes = new float[6];
+        int crc;
+        boolean axesChosen;
+        int[] stick;
+        int[] triggers;
+        final boolean[] triggerRestsLow = new boolean[2];
+        int sentButtons = -1;
+        final float[] sentAxes = new float[6];
+    }
+
+    private static native void setDirectPad(int deviceId, String name, int vendor, int product, int crc, int buttons, float[] axes);
+    private static native void removeDirectPad(int deviceId);
+
+    private static boolean isDirectPadDevice(InputDevice device) {
+        if (device == null || device.isVirtual())
+            return false;
+        final String name = device.getName() != null ? device.getName() : "";
+        if (name.startsWith("uinput-") || name.startsWith("gf_"))
+            return false;
+        final int sources = device.getSources();
+        return (sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+                || (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+    }
+
+    // the SDL gamepad button SDL gives each key (BACK and MODE open the pause menu instead)
+    private static int directPadKeyBit(int keyCode) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_BUTTON_A:
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+                return 1;
+            case KeyEvent.KEYCODE_BUTTON_B:
+                return 1 << 1;
+            case KeyEvent.KEYCODE_BUTTON_X:
+                return 1 << 2;
+            case KeyEvent.KEYCODE_BUTTON_Y:
+                return 1 << 3;
+            case KeyEvent.KEYCODE_BUTTON_SELECT:
+                return 1 << 4;
+            case KeyEvent.KEYCODE_BUTTON_START:
+            case KeyEvent.KEYCODE_MENU:
+                return 1 << 6;
+            case KeyEvent.KEYCODE_BUTTON_THUMBL:
+                return 1 << 7;
+            case KeyEvent.KEYCODE_BUTTON_THUMBR:
+                return 1 << 8;
+            case KeyEvent.KEYCODE_BUTTON_L1:
+                return 1 << 9;
+            case KeyEvent.KEYCODE_BUTTON_R1:
+                return 1 << 10;
+            case KeyEvent.KEYCODE_DPAD_UP:
+                return 1 << 11;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                return 1 << 12;
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                return 1 << 13;
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                return 1 << 14;
+            case KeyEvent.KEYCODE_BUTTON_L2:
+                return DIRECT_PAD_LEFT_TRIGGER;
+            case KeyEvent.KEYCODE_BUTTON_R2:
+                return DIRECT_PAD_RIGHT_TRIGGER;
+            default:
+                return 0;
+        }
+    }
+
+    private DirectPad directPadFor(InputDevice device) {
+        if (nativeKeyboardRequested) {
+            clearDirectPads("the keyboard is up");
+            return null;
+        }
+        if (!isDirectPadDevice(device))
+            return null;
+        DirectPad pad = directPads.get(device.getId());
+        if (pad == null) {
+            pad = new DirectPad();
+            pad.crc = sdlGuidCrc(device);
+            directPads.put(device.getId(), pad);
+        }
+        return pad;
+    }
+
+    private void updateDirectPadKey(KeyEvent event) {
+        final int bit = directPadKeyBit(event.getKeyCode());
+        if (bit == 0 || (event.getFlags() & KeyEvent.FLAG_FALLBACK) != 0)
+            return;
+        final InputDevice device = event.getDevice();
+        final DirectPad pad = directPadFor(device);
+        if (pad == null)
+            return;
+        if (event.getAction() == KeyEvent.ACTION_DOWN)
+            pad.keys |= bit;
+        else if (event.getAction() == KeyEvent.ACTION_UP)
+            pad.keys &= ~bit;
+        sendDirectPad(device, pad);
+    }
+
+    private static boolean hasAxis(InputDevice device, int axis) {
+        return device.getMotionRange(axis, InputDevice.SOURCE_JOYSTICK) != null;
+    }
+
+    private static int restsLow(MotionEvent event, int axis) {
+        return event.getAxisValue(axis) <= -0.9f ? 1 : 0;
+    }
+
+    private static boolean triggerRestsLow(InputDevice device, MotionEvent event, int axis) {
+        final float value = event.getAxisValue(axis);
+        if (value <= -0.5f)
+            return true;
+        if (Math.abs(value) < 0.5f)
+            return false;
+        final InputDevice.MotionRange range = device.getMotionRange(axis, InputDevice.SOURCE_JOYSTICK);
+        return range != null && range.getMin() < -0.5f;
+    }
+
+    private static String axisPairName(int[] axes) {
+        return axes == null ? "none" : MotionEvent.axisToString(axes[0]).replace("AXIS_", "") + "/" + MotionEvent.axisToString(axes[1]).replace("AXIS_", "");
+    }
+
+    // the pair with more axes resting at -1 holds the triggers (Z/RZ and RX/RY are the right stick on some pads and the triggers on others)
+    private void chooseDirectPadAxes(InputDevice device, DirectPad pad, MotionEvent event) {
+        pad.axesChosen = true;
+        final boolean zrz = hasAxis(device, MotionEvent.AXIS_Z) && hasAxis(device, MotionEvent.AXIS_RZ);
+        final boolean rxry = hasAxis(device, MotionEvent.AXIS_RX) && hasAxis(device, MotionEvent.AXIS_RY);
+        final int zLow = restsLow(event, MotionEvent.AXIS_Z) + restsLow(event, MotionEvent.AXIS_RZ);
+        final int rLow = restsLow(event, MotionEvent.AXIS_RX) + restsLow(event, MotionEvent.AXIS_RY);
+        int[] pairTriggers = null;
+        if (zrz && rxry) {
+            pad.stick = zLow > rLow ? DIRECT_PAD_RXRY : DIRECT_PAD_ZRZ;
+            pairTriggers = zLow > rLow ? DIRECT_PAD_ZRZ : DIRECT_PAD_RXRY;
+        } else if (zrz) {
+            if (zLow == 2)
+                pairTriggers = DIRECT_PAD_ZRZ;
+            else
+                pad.stick = DIRECT_PAD_ZRZ;
+        } else if (rxry) {
+            if (rLow == 2)
+                pairTriggers = DIRECT_PAD_RXRY;
+            else
+                pad.stick = DIRECT_PAD_RXRY;
+        }
+        if (hasAxis(device, MotionEvent.AXIS_LTRIGGER) && hasAxis(device, MotionEvent.AXIS_RTRIGGER))
+            pad.triggers = new int[] { MotionEvent.AXIS_LTRIGGER, MotionEvent.AXIS_RTRIGGER };
+        else if (hasAxis(device, MotionEvent.AXIS_BRAKE) && hasAxis(device, MotionEvent.AXIS_GAS))
+            pad.triggers = new int[] { MotionEvent.AXIS_BRAKE, MotionEvent.AXIS_GAS };
+        else
+            pad.triggers = pairTriggers;
+        if (pad.triggers != null) {
+            for (int i = 0; i < 2; i++)
+                pad.triggerRestsLow[i] = triggerRestsLow(device, event, pad.triggers[i]);
+        }
+        logInputDiagnostic(String.format(Locale.ROOT, "[INPUT] direct pad: device %d '%s' right stick %s, triggers %s%s | first values Z=%.2f RZ=%.2f RX=%.2f RY=%.2f LTRIGGER=%.2f RTRIGGER=%.2f BRAKE=%.2f GAS=%.2f",
+                device.getId(), device.getName(), axisPairName(pad.stick), axisPairName(pad.triggers),
+                pad.triggers != null && (pad.triggerRestsLow[0] || pad.triggerRestsLow[1]) ? " (travel -1..1)" : "",
+                event.getAxisValue(MotionEvent.AXIS_Z), event.getAxisValue(MotionEvent.AXIS_RZ), event.getAxisValue(MotionEvent.AXIS_RX),
+                event.getAxisValue(MotionEvent.AXIS_RY), event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_RTRIGGER),
+                event.getAxisValue(MotionEvent.AXIS_BRAKE), event.getAxisValue(MotionEvent.AXIS_GAS)));
+    }
+
+    private void updateDirectPadMotion(MotionEvent event) {
+        if ((event.getSource() & InputDevice.SOURCE_CLASS_JOYSTICK) == 0 || event.getActionMasked() != MotionEvent.ACTION_MOVE)
+            return;
+        final InputDevice device = event.getDevice();
+        final DirectPad pad = directPadFor(device);
+        if (pad == null)
+            return;
+        if (!pad.axesChosen)
+            chooseDirectPadAxes(device, pad, event);
+        pad.axes[0] = event.getAxisValue(MotionEvent.AXIS_X);
+        pad.axes[1] = event.getAxisValue(MotionEvent.AXIS_Y);
+        pad.axes[2] = pad.stick != null ? event.getAxisValue(pad.stick[0]) : 0f;
+        pad.axes[3] = pad.stick != null ? event.getAxisValue(pad.stick[1]) : 0f;
+        for (int i = 0; i < 2; i++) {
+            float value = pad.triggers != null ? event.getAxisValue(pad.triggers[i]) : 0f;
+            if (pad.triggers != null && pad.triggerRestsLow[i])
+                value = (value + 1f) / 2f;
+            pad.axes[4 + i] = Math.max(0f, Math.min(1f, value));
+        }
+        final float hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X);
+        final float hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y);
+        pad.hat = (hatY < -0.5f ? 1 << 11 : 0) | (hatY > 0.5f ? 1 << 12 : 0) | (hatX < -0.5f ? 1 << 13 : 0) | (hatX > 0.5f ? 1 << 14 : 0);
+        sendDirectPad(device, pad);
+    }
+
+    private void sendDirectPad(InputDevice device, DirectPad pad) {
+        final int buttons = pad.keys | pad.hat;
+        boolean changed = buttons != pad.sentButtons;
+        for (int i = 0; i < 6 && !changed; i++)
+            changed = Math.abs(pad.axes[i] - pad.sentAxes[i]) >= 0.01f;
+        if (!changed)
+            return;
+        pad.sentButtons = buttons;
+        System.arraycopy(pad.axes, 0, pad.sentAxes, 0, 6);
+        try {
+            setDirectPad(device.getId(), device.getName(), device.getVendorId(), device.getProductId(), pad.crc, buttons, pad.axes);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void clearDirectPads(String why) {
+        if (directPads.isEmpty())
+            return;
+        directPads.clear();
+        try {
+            removeDirectPad(-1);
+        } catch (Throwable ignored) {
+        }
+        logInputDiagnostic("[INPUT] direct pads cleared (" + why + ")");
+    }
+
+    private void dropDirectPad(int deviceId, String why) {
+        if (directPads.remove(deviceId) == null)
+            return;
+        try {
+            removeDirectPad(deviceId);
+        } catch (Throwable ignored) {
+        }
+        logInputDiagnostic("[INPUT] direct pad: device " + deviceId + " dropped (" + why + ")");
+    }
+
     private static void logInputDiagnostic(String text) {
         try {
             if (NativeLib.INSTANCE.isInitialized())
@@ -455,6 +789,13 @@ public class Emulator extends SDLActivity
         if (overlay == null)
             return;
 
+        if (overlay_mask != lastOverlayMask) {
+            logInputDiagnostic(String.format(Locale.ROOT, "[INPUT] on-screen controls mask %s -> 0x%X (editing %s, pad connected %s, hidden while a pad is connected %s)",
+                    lastOverlayMask < 0 ? "unset" : String.format(Locale.ROOT, "0x%X", lastOverlayMask), overlay_mask, edit,
+                    sessionViewModel != null && sessionViewModel.getUiState().getControllerConnected(),
+                    sessionViewModel != null && sessionViewModel.getUiState().getHideOverlayWhenControllerConnected()));
+            lastOverlayMask = overlay_mask;
+        }
         overlay.setState(overlay_mask);
         overlay.setIsInEditMode(edit);
 
@@ -476,6 +817,7 @@ public class Emulator extends SDLActivity
         runOnUiThread(() -> {
             nativeKeyboardRequested = active;
             if (active) {
+                clearDirectPads("the keyboard opened");
                 imeDismissedByUser = false;
                 restoreImeAfterPauseMenu = false;
                 suppressImeHiddenHandler = false;
@@ -1373,8 +1715,17 @@ public class Emulator extends SDLActivity
     }
 
     private void updateControllerConnectionState() {
+        final List<ConnectedGamepad> pads = InputDeviceUtils.getPhysicalGamepads();
+        StringBuilder text = new StringBuilder();
+        for (ConnectedGamepad pad : pads)
+            text.append(text.length() == 0 ? "" : ", ").append('\'').append(pad.getName()).append("' (device ").append(pad.getDeviceId()).append(')');
+        final String padList = text.length() == 0 ? "none" : text.toString();
+        if (!padList.equals(lastAndroidPads)) {
+            lastAndroidPads = padList;
+            logInputDiagnostic("[INPUT] pads found by the app's own check (it hides the on-screen controls): " + padList);
+        }
         if (sessionViewModel != null) {
-            sessionViewModel.setControllerConnected(this, InputDeviceUtils.hasPhysicalGamepadConnected());
+            sessionViewModel.setControllerConnected(this, !pads.isEmpty());
         }
     }
 
@@ -1416,16 +1767,21 @@ public class Emulator extends SDLActivity
 
     @Override
     public void onInputDeviceAdded(int deviceId) {
+        logInputDeviceChange("added", deviceId);
         updateControllerConnectionState();
     }
 
     @Override
     public void onInputDeviceRemoved(int deviceId) {
+        logInputDeviceChange("removed", deviceId);
+        dropDirectPad(deviceId, "removed");
         updateControllerConnectionState();
     }
 
     @Override
     public void onInputDeviceChanged(int deviceId) {
+        logInputDeviceChange("changed", deviceId);
+        dropDirectPad(deviceId, "changed");
         updateControllerConnectionState();
     }
 }

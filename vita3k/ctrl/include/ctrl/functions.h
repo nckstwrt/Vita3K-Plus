@@ -21,6 +21,8 @@
 #include <emuenv/state.h>
 
 #include <array>
+#include <cstdint>
+#include <string>
 
 std::array<ControllerBinding, 15> get_controller_bindings_ext(EmuEnvState &emuenv);
 SceCtrlExternalInputMode get_type_of_controller(CtrlState &state, int port);
@@ -28,3 +30,8 @@ SceCtrlExternalInputMode get_type_of_controller(CtrlState &state, int port);
 SceUInt32 ctrl_peek_buttons(EmuEnvState &emuenv, int port);
 int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2 *pData, SceUInt32 count, bool negative, bool is_peek, bool is_v2, bool from_ext);
 void refresh_controllers(CtrlState &state, EmuEnvState &emuenv);
+// logs the pad settings and every SDL joystick on Android
+void ctrl_log_joystick_census(EmuEnvState &emuenv);
+// a pad read from Android's own key and stick events (used when SDL has no gamepad for it)
+void ctrl_set_direct_pad(EmuEnvState &emuenv, int device_id, const std::string &name, uint16_t vendor, uint16_t product, uint16_t crc, uint32_t buttons, const float axes[6]);
+void ctrl_remove_direct_pad(EmuEnvState &emuenv, int device_id);

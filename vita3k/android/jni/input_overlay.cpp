@@ -25,6 +25,8 @@
 #include <jni.h>
 #include <touch/functions.h>
 
+#include <string>
+
 static int virtual_joystick_id = -1;
 static SDL_Joystick *virtual_joystick = nullptr;
 
@@ -115,6 +117,27 @@ Java_org_vita3k_emulator_overlay_InputOverlay_setTouchState(JNIEnv *env, jobject
         return;
 
     set_touch_mode(emuenv->touch, static_cast<int>(mode));
+}
+
+JNIEXPORT void JNICALL
+Java_org_vita3k_emulator_Emulator_setDirectPad(JNIEnv *env, jclass, jint device_id, jstring name, jint vendor, jint product, jint crc, jint buttons, jfloatArray axes) {
+    auto *emuenv = get_emuenv();
+    if (!emuenv || !axes || env->GetArrayLength(axes) < 6)
+        return;
+    float values[6];
+    env->GetFloatArrayRegion(axes, 0, 6, values);
+    const char *chars = name ? env->GetStringUTFChars(name, nullptr) : nullptr;
+    const std::string name_string = chars ? chars : "";
+    if (chars)
+        env->ReleaseStringUTFChars(name, chars);
+    ctrl_set_direct_pad(*emuenv, device_id, name_string, static_cast<uint16_t>(vendor), static_cast<uint16_t>(product), static_cast<uint16_t>(crc), static_cast<uint32_t>(buttons), values);
+}
+
+JNIEXPORT void JNICALL
+Java_org_vita3k_emulator_Emulator_removeDirectPad(JNIEnv *env, jclass, jint device_id) {
+    auto *emuenv = get_emuenv();
+    if (emuenv)
+        ctrl_remove_direct_pad(*emuenv, device_id);
 }
 
 } // extern "C"

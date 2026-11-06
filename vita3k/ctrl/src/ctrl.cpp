@@ -31,8 +31,30 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <set>
 #include <string>
+#include <vector>
+
+static bool is_virtual_pad(const Controller &controller) {
+    return SDL_IsJoystickVirtual(SDL_GetGamepadID(controller.controller.get()));
+}
+
+static std::map<SDL_JoystickID, std::string> joystick_outcomes;
+
+constexpr uint32_t DIRECT_PAD_LEFT_TRIGGER = 1u << 30;
+constexpr uint32_t DIRECT_PAD_RIGHT_TRIGGER = 1u << 31;
+
+struct DirectPad {
+    std::string name;
+    uint16_t vendor = 0;
+    uint16_t product = 0;
+    uint16_t crc = 0;
+    uint32_t buttons = 0;
+    float axes[6] = {};
+    int verdict = -1;
+};
+static std::map<int, DirectPad> direct_pads;
 
 static int reserve_port(CtrlState &state) {
     for (int i = 0; i < SCE_CTRL_MAX_WIRELESS_NUM; i++) {
@@ -136,6 +158,70 @@ static void map_android_digital_triggers(SDL_Gamepad *gamepad, SDL_JoystickID id
         name, id, buttons, add_left && add_right ? "L2/R2" : (add_left ? "L2" : "R2"), added ? std::string() : fmt::format(" FAILED ({})", SDL_GetError()),
         SDL_GamepadHasAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) ? "mapped" : "none", SDL_GamepadHasAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) ? "mapped" : "none", mapping);
 }
+
+static bool is_pad_part(std::string_view name) {
+    return name.ends_with(" Touchpad") || name.ends_with(" Motion Sensors") || name.ends_with(" IMU");
+}
+
+static bool is_part_of_listed_pad(SDL_JoystickID id) {
+    const char *name = SDL_GetJoystickNameForID(id);
+    if (!name || !is_pad_part(name))
+        return false;
+    const Uint16 vendor = SDL_GetJoystickVendorForID(id);
+    const Uint16 product = SDL_GetJoystickProductForID(id);
+    int count = 0;
+    SDL_JoystickID *ids = SDL_GetJoysticks(&count);
+    bool listed = false;
+    for (int i = 0; ids && i < count && !listed; i++) {
+        const char *other = SDL_GetJoystickNameForID(ids[i]);
+        listed = ids[i] != id && other && !is_pad_part(other) && SDL_GetJoystickVendorForID(ids[i]) == vendor && SDL_GetJoystickProductForID(ids[i]) == product;
+    }
+    SDL_free(ids);
+    return listed;
+}
+
+static void log_joystick_census(const CtrlState &state, bool force) {
+    int count = 0;
+    SDL_JoystickID *ids = SDL_GetJoysticks(&count);
+    if (!ids)
+        return;
+    std::string signature;
+    std::vector<std::string> lines;
+    for (int i = 0; i < count; i++) {
+        const SDL_JoystickID id = ids[i];
+        const char *joystick_name = SDL_GetJoystickNameForID(id);
+        const bool gamepad = SDL_IsGamepad(id);
+        const char *gamepad_name = gamepad ? SDL_GetGamepadNameForID(id) : nullptr;
+        const SDL_GUID guid = SDL_GetJoystickGUIDForID(id);
+        char guid_string[33];
+        SDL_GUIDToString(guid, guid_string, sizeof(guid_string));
+        std::string where;
+        for (const auto &[_, controller] : state.controllers) {
+            if (SDL_GetGamepadID(controller.controller.get()) == id)
+                where = fmt::format("opened on port {}", controller.port);
+        }
+        if (where.empty()) {
+            const auto outcome = joystick_outcomes.find(id);
+            where = outcome != joystick_outcomes.end() ? outcome->second : (gamepad ? "not opened" : "not used (not a gamepad)");
+        }
+        char *mapping = gamepad ? SDL_GetGamepadMappingForID(id) : nullptr;
+        lines.push_back(fmt::format("[CTRL] SDL joystick {} '{}'{} | guid {} (crc 0x{:04X}, buttons 0x{:04X}, axes 0x{:04X}), vendor 0x{:04X} product 0x{:04X}{} | {} | mapping: {}",
+            id, joystick_name ? joystick_name : "", gamepad ? fmt::format(" = gamepad '{}'", gamepad_name ? gamepad_name : "") : std::string(" (not a gamepad)"),
+            guid_string, guid.data[2] | (guid.data[3] << 8), guid.data[12] | (guid.data[13] << 8), guid.data[14] | (guid.data[15] << 8),
+            SDL_GetJoystickVendorForID(id), SDL_GetJoystickProductForID(id), SDL_IsJoystickVirtual(id) ? ", virtual" : "", where, mapping ? mapping : "none"));
+        if (mapping)
+            SDL_free(mapping);
+        signature += fmt::format("{}|{}|{}|{};", id, joystick_name ? joystick_name : "", gamepad_name ? gamepad_name : "-", where);
+    }
+    SDL_free(ids);
+    static std::string last_signature;
+    if (!force && signature == last_signature)
+        return;
+    last_signature = signature;
+    LOG_INFO("[CTRL] SDL sees {} joysticks{}", count, force ? " at this launch" : " (changed)");
+    for (const auto &line : lines)
+        LOG_INFO("{}", line);
+}
 #endif
 
 void refresh_controllers(CtrlState &state, EmuEnvState &emuenv) {
@@ -172,6 +258,7 @@ void refresh_controllers(CtrlState &state, EmuEnvState &emuenv) {
         const char *id_name = SDL_GetGamepadNameForID(gamepad_id);
         const std::string_view name = id_name ? id_name : "unnamed";
         if (state.controllers_num >= SCE_CTRL_MAX_WIRELESS_NUM) {
+            joystick_outcomes[gamepad_id] = fmt::format("not opened: {} controllers are already connected", state.controllers_num);
             if (reported_skips.insert(gamepad_id).second)
                 LOG_WARN("[CTRL] '{}' (gamepad {}) ignored, {} controllers are already connected", name, gamepad_id, state.controllers_num);
             break;
@@ -179,14 +266,24 @@ void refresh_controllers(CtrlState &state, EmuEnvState &emuenv) {
 
 #ifdef __ANDROID__
         // for whatever reasons, fingerprint sensors are detected as controllers, filter them out
-        if (name.starts_with("uinput-") || name.starts_with("gf_"))
+        if (name.starts_with("uinput-") || name.starts_with("gf_")) {
+            joystick_outcomes[gamepad_id] = "not opened: a fingerprint sensor name";
             continue;
+        }
+        if (is_part_of_listed_pad(gamepad_id)) {
+            joystick_outcomes[gamepad_id] = "not opened: a pad's touchpad or motion part";
+            if (reported_skips.insert(gamepad_id).second)
+                LOG_INFO("[CTRL] '{}' (gamepad {}) not used, it is a pad's touchpad or motion part", SDL_GetJoystickNameForID(gamepad_id), gamepad_id);
+            continue;
+        }
 #endif
 
         const SDL_GUID guid = SDL_GetJoystickGUIDForID(gamepad_id);
         const auto existing = state.controllers.find(guid);
         if (existing != state.controllers.end()) {
             const SDL_JoystickID existing_id = SDL_GetGamepadID(existing->second.controller.get());
+            if (existing_id != gamepad_id)
+                joystick_outcomes[gamepad_id] = fmt::format("not opened: same GUID as gamepad {}", existing_id);
             if (existing_id != gamepad_id && reported_skips.insert(gamepad_id).second)
                 LOG_WARN("[CTRL] '{}' (gamepad {}) not used, it shares its GUID with connected '{}' (gamepad {})", name, gamepad_id, existing->second.name, existing_id);
             continue;
@@ -194,11 +291,13 @@ void refresh_controllers(CtrlState &state, EmuEnvState &emuenv) {
 
         const GamepadPtr controller(SDL_OpenGamepad(gamepad_id), SDL_CloseGamepad);
         if (controller == nullptr) {
+            joystick_outcomes[gamepad_id] = fmt::format("not opened: SDL_OpenGamepad failed ({})", SDL_GetError());
             LOG_WARN("[CTRL] could not open '{}' (gamepad {}): {}", name, gamepad_id, SDL_GetError());
             continue;
         }
         auto controller_name = SDL_GetGamepadName(controller.get());
         if (controller_name == nullptr) {
+            joystick_outcomes[gamepad_id] = "not opened: no name";
             LOG_WARN("[CTRL] gamepad {} has no name, ignored", gamepad_id);
             continue;
         }
@@ -211,8 +310,18 @@ void refresh_controllers(CtrlState &state, EmuEnvState &emuenv) {
         Controller new_controller;
         new_controller.port = reserve_port(state);
         if (new_controller.port == -1) {
+            joystick_outcomes[gamepad_id] = "not opened: no free port";
             LOG_WARN("[CTRL] no free port for '{}' (gamepad {})", controller_name, gamepad_id);
             break;
+        }
+        if (!SDL_IsJoystickVirtual(gamepad_id)) {
+            for (auto &[_, other] : state.controllers) {
+                if (other.port < new_controller.port && is_virtual_pad(other)) {
+                    LOG_INFO("[CTRL] '{}' moved from port {} to port {} so '{}' gets port {}", other.name, other.port, new_controller.port, controller_name, other.port);
+                    std::swap(other.port, new_controller.port);
+                    SDL_SetGamepadPlayerIndex(other.controller.get(), other.port);
+                }
+            }
         }
         new_controller.controller = controller;
         SDL_SetGamepadPlayerIndex(controller.get(), new_controller.port);
@@ -239,11 +348,30 @@ void refresh_controllers(CtrlState &state, EmuEnvState &emuenv) {
 
         LOG_INFO("[CTRL] '{}' connected on port {} (gamepad {}{}{})", controller_name, new_controller.port, gamepad_id,
             new_controller.has_gyro ? ", gyro" : "", new_controller.has_accel ? ", accelerometer" : "");
+        joystick_outcomes.erase(gamepad_id);
         state.controllers.emplace(guid, new_controller);
         state.controllers_num++;
     }
     SDL_free(gamepads);
+
+    for (auto &[_, controller] : state.controllers) {
+        if (!is_virtual_pad(controller))
+            continue;
+        for (int port = 0; port < controller.port; port++) {
+            if (state.free_ports[port]) {
+                LOG_INFO("[CTRL] '{}' moved from port {} to free port {}", controller.name, controller.port, port);
+                state.free_ports[controller.port] = true;
+                state.free_ports[port] = false;
+                controller.port = port;
+                SDL_SetGamepadPlayerIndex(controller.controller.get(), port);
+                break;
+            }
+        }
+    }
     state.has_motion_support = found_gyro && found_accel;
+#ifdef __ANDROID__
+    log_joystick_census(state, false);
+#endif
 }
 
 static void apply_keyboard(uint32_t *buttons, float axes[4], bool ext, EmuEnvState &emuenv) {
@@ -372,6 +500,55 @@ static void apply_controller(EmuEnvState &emuenv, uint32_t *buttons, float axes[
     axes[3] += axis_to_axis(SDL_GetGamepadAxis(controller, static_cast<SDL_GamepadAxis>(axis_binds[3])), analog_multiplier);
 }
 
+static const Controller *sdl_pad_for(const CtrlState &state, const DirectPad &pad) {
+    for (const auto &[guid, controller] : state.controllers) {
+        if (is_virtual_pad(controller))
+            continue;
+        const auto crc = static_cast<uint16_t>(guid.data[2] | (guid.data[3] << 8));
+        const auto vendor = static_cast<uint16_t>(guid.data[4] | (guid.data[5] << 8));
+        const auto product = static_cast<uint16_t>(guid.data[8] | (guid.data[9] << 8));
+        if (SDL_GetGamepadPath(controller.controller.get())) {
+            if (pad.vendor != 0 && vendor == pad.vendor && product == pad.product)
+                return &controller;
+        } else if (crc == pad.crc && (pad.vendor == 0 || (vendor == pad.vendor && product == pad.product))) {
+            return &controller;
+        }
+    }
+    return nullptr;
+}
+
+static void apply_direct_pad(EmuEnvState &emuenv, uint32_t *buttons, float axes[4], const DirectPad &pad, bool ext) {
+    const auto &axis_binds = emuenv.cfg.controller_axis_binds;
+    const auto axis = [&](int index) { return (index >= 0 && index < 6) ? pad.axes[index] : 0.f; };
+    const auto held = [&](SDL_GamepadButton button) { return button >= 0 && button < 30 && (pad.buttons & (1u << button)); };
+    const bool left_trigger = (pad.buttons & DIRECT_PAD_LEFT_TRIGGER) || axis(axis_binds[4]) > 0.5f;
+    const bool right_trigger = (pad.buttons & DIRECT_PAD_RIGHT_TRIGGER) || axis(axis_binds[5]) > 0.5f;
+
+    uint32_t pressed = 0;
+    if (ext) {
+        for (const auto &binding : get_controller_bindings_ext(emuenv)) {
+            if (held(binding.controller))
+                pressed |= binding.button;
+        }
+        if (left_trigger)
+            pressed |= SCE_CTRL_L2;
+        if (right_trigger)
+            pressed |= SCE_CTRL_R2;
+    } else {
+        for (const auto &binding : get_controller_bindings(emuenv)) {
+            if (held(binding.controller))
+                pressed |= binding.button;
+        }
+    }
+    if (emuenv.cfg.controller_swap_triggers)
+        pressed = swap_shoulders_and_triggers(pressed, ext, left_trigger, right_trigger);
+    *buttons |= pressed;
+
+    const float multiplier = emuenv.cfg.controller_analog_multiplier;
+    for (int i = 0; i < 4; i++)
+        axes[i] += std::clamp(axis(axis_binds[i]) * multiplier, -1.0f, 1.0f);
+}
+
 static void retrieve_ctrl_data(EmuEnvState &emuenv, int port, bool is_v2, bool negative, bool from_ext_function, SceUInt32 &buttons, SceUInt8 &lx, SceUInt8 &ly, SceUInt8 &rx, SceUInt8 &ry) {
     std::lock_guard<std::mutex> guard(emuenv.ctrl.mutex);
 
@@ -411,7 +588,8 @@ static void retrieve_ctrl_data(EmuEnvState &emuenv, int port, bool is_v2, bool n
             apply_keyboard(&buttons, axes.data(), is_v2, emuenv);
         }
         for (const auto &[_, controller] : state.controllers) {
-            if (controller.port + 1 == port) {
+            const int controller_port = is_virtual_pad(controller) ? 1 : controller.port + 1;
+            if (controller_port == port) {
                 // sceCtrl ports are 1-based and SDL_GameController index is 0-based. Need to convert.
                 apply_controller(emuenv, &buttons, axes.data(), controller.controller.get(), is_v2);
             }
@@ -421,6 +599,28 @@ static void retrieve_ctrl_data(EmuEnvState &emuenv, int port, bool is_v2, bool n
         apply_keyboard(&buttons, axes.data(), is_v2, emuenv);
         for (const auto &[_, controller] : state.controllers) {
             apply_controller(emuenv, &buttons, axes.data(), controller.controller.get(), is_v2);
+        }
+    }
+
+    if (port == 1) {
+        for (auto &[device_id, pad] : direct_pads) {
+            const Controller *sdl_pad = sdl_pad_for(state, pad);
+            const int verdict = sdl_pad ? 0 : 1;
+            if (verdict != pad.verdict) {
+                pad.verdict = verdict;
+                LOG_INFO("[CTRL] direct pad: device {} '{}': {}", device_id, pad.name,
+                    sdl_pad ? fmt::format("SDL has gamepad '{}' for it, left to SDL", sdl_pad->name) : std::string("SDL has no gamepad for it, its Android input goes to the game"));
+            }
+            if (sdl_pad)
+                continue;
+            uint32_t pressed = 0;
+            float moved[4] = {};
+            apply_direct_pad(emuenv, &pressed, moved, pad, is_v2);
+            buttons |= pressed;
+            for (int i = 0; i < 4; i++) {
+                if (std::fabs(moved[i]) > std::fabs(axes[i]))
+                    axes[i] = moved[i];
+            }
         }
     }
 
@@ -488,4 +688,46 @@ int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2
     }
 
     return nb_returned_data;
+}
+
+void ctrl_log_joystick_census(EmuEnvState &emuenv) {
+    CtrlState &state = emuenv.ctrl;
+    const std::lock_guard lock(state.mutex);
+    std::string binds;
+    for (const short bind : emuenv.cfg.controller_binds)
+        binds += fmt::format("{}{}", binds.empty() ? "" : ",", bind);
+    std::string axis_binds;
+    for (const short bind : emuenv.cfg.controller_axis_binds)
+        axis_binds += fmt::format("{}{}", axis_binds.empty() ? "" : ",", bind);
+    LOG_INFO("[CTRL] pad settings: {} button binds [{}], {} axis binds [{}], swap triggers {}, analog multiplier {}", emuenv.cfg.controller_binds.size(), binds,
+        emuenv.cfg.controller_axis_binds.size(), axis_binds, emuenv.cfg.controller_swap_triggers, emuenv.cfg.controller_analog_multiplier);
+#ifdef __ANDROID__
+    log_joystick_census(state, true);
+#endif
+}
+
+void ctrl_set_direct_pad(EmuEnvState &emuenv, int device_id, const std::string &name, uint16_t vendor, uint16_t product, uint16_t crc, uint32_t buttons, const float axes[6]) {
+    const std::lock_guard lock(emuenv.ctrl.mutex);
+    const auto [entry, added] = direct_pads.try_emplace(device_id);
+    DirectPad &pad = entry->second;
+    if (added) {
+        pad.name = name;
+        pad.vendor = vendor;
+        pad.product = product;
+        pad.crc = crc;
+        LOG_INFO("[CTRL] direct pad: device {} '{}' (vendor 0x{:04X} product 0x{:04X}, SDL GUID crc 0x{:04X}) sends Android input", device_id, name, vendor, product, crc);
+    }
+    pad.buttons = buttons;
+    std::copy(axes, axes + 6, pad.axes);
+}
+
+void ctrl_remove_direct_pad(EmuEnvState &emuenv, int device_id) {
+    const std::lock_guard lock(emuenv.ctrl.mutex);
+    if (device_id < 0) {
+        if (!direct_pads.empty())
+            LOG_INFO("[CTRL] direct pads cleared ({})", direct_pads.size());
+        direct_pads.clear();
+    } else if (direct_pads.erase(device_id)) {
+        LOG_INFO("[CTRL] direct pad: device {} removed", device_id);
+    }
 }
