@@ -95,7 +95,7 @@ public final class InputOverlayDrawableJoystick
 
   public boolean TrackEvent(MotionEvent event)
   {
-    boolean reCenter = false;
+    boolean reCenter = true;
     int action = event.getActionMasked();
     boolean firstPointer = action != MotionEvent.ACTION_POINTER_DOWN &&
             action != MotionEvent.ACTION_POINTER_UP;
