@@ -22,6 +22,7 @@
 #include <ngs/state.h>
 #include <ngs/system.h>
 #include <util/lock_and_find.h>
+#include <util/log.h>
 
 #include <util/vector_utils.h>
 
@@ -41,7 +42,7 @@ bool Patch::is_active() const {
 }
 
 void VoiceInputManager::init(const uint32_t granularity, const uint16_t total_input) {
-    inputs.resize(total_input);
+    inputs.resize(std::max<uint16_t>(1, total_input));
 
     for (auto &input : inputs) {
         // FLTP and maximum channel count
@@ -162,7 +163,14 @@ void Voice::init(Rack *mama) {
     for (uint32_t i = 0; i < MAX_OUTPUT_PORT; i++)
         patches[i].resize(mama->patches_per_output);
 
-    inputs.init(rack->system->granularity, 1);
+    uint16_t input_count = 0;
+    if (size_inputs_by_input_mixer_count) {
+        for (const auto &module : mama->modules) {
+            if (module && module->module_id() == input_mixer_module_id)
+                input_count++;
+        }
+    }
+    inputs.init(rack->system->granularity, std::max<uint16_t>(1, input_count));
     voice_mutex = std::make_unique<std::mutex>();
 }
 
@@ -208,6 +216,10 @@ Ptr<Patch> Voice::patch(const MemState &mem, const int32_t index, int32_t subind
 
     // Initialize the matrix
     memset(patch->volume_matrix, 0, sizeof(patch->volume_matrix));
+    if (default_patch_volume_is_unity) {
+        patch->volume_matrix[0][0] = 1.0f;
+        patch->volume_matrix[1][1] = 1.0f;
+    }
 
     return patches[index][subindex];
 }
@@ -426,6 +438,7 @@ bool init_rack(State &ngs, const MemState &mem, System *system, SceNgsBufferInfo
 
     // Alloc spaces for voice
     rack->voices.resize(description->voice_count);
+    LOG_WARN("[NGSLIFE] init_rack {} ({} voices)", fmt::ptr(rack), description->voice_count);
     rack->vdef = description->definition.get(mem);
 
     for (auto &voice : rack->voices) {
@@ -459,6 +472,7 @@ bool init_rack(State &ngs, const MemState &mem, System *system, SceNgsBufferInfo
 }
 
 void release_rack(State &ngs, const MemState &mem, System *system, Rack *rack) {
+    LOG_WARN("[NGSLIFE] release_rack {} ({} voices)", fmt::ptr(rack), rack ? rack->voices.size() : 0);
     // this function should only be called outside of ngs update and with the scheduler mutex acquired (except when releasing the system)
     if (!rack)
         return;

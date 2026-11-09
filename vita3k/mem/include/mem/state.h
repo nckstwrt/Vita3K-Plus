@@ -24,6 +24,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 
 struct AllocMemPage {
     uint32_t allocated : 4;
@@ -67,6 +68,8 @@ struct MemState {
     std::mutex protect_mutex;
 
     uint32_t host_page_size = 0;
+    // keep freed guest pages committed instead of decommitting
+    bool preserve_freed_pages = false;
     Memory memory;
     AllocPageTable alloc_table;
     BitmapAllocator allocator;
@@ -77,4 +80,11 @@ struct MemState {
     bool use_page_table = false;
     PageTable page_table;
     std::map<uint64_t, MemExternalMapping, std::greater<>> external_mapping;
+    mutable std::mutex external_mapping_mutex;
+    mutable std::shared_mutex external_transition_mutex;
+
+    int transition_not_parked = -1;
+    uint64_t transition_count = 0;
+    uint64_t transition_recopy_events = 0;
+    uint64_t transition_recopy_events_fully_parked = 0;
 };

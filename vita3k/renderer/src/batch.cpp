@@ -15,6 +15,8 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <array>
+#include <cpu/functions.h>
 #include <renderer/commands.h>
 #include <renderer/driver_functions.h>
 #include <renderer/functions.h>
@@ -86,6 +88,7 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
         { CommandOpcode::CreateRenderTarget, cmd_handle_create_render_target },
         { CommandOpcode::MemoryMap, cmd_handle_memory_map },
         { CommandOpcode::MemoryUnmap, cmd_handle_memory_unmap },
+        { CommandOpcode::MemoryUnmapFlush, cmd_handle_memory_unmap_flush },
         { CommandOpcode::Draw, cmd_handle_draw },
         { CommandOpcode::TransferCopy, cmd_handle_transfer_copy },
         { CommandOpcode::TransferDownscale, cmd_handle_transfer_downscale },
@@ -109,13 +112,24 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
             break;
         }
 
-        auto handler = handlers.find(cmd->opcode);
-        if (handler == handlers.end()) {
+        static const std::array<CommandHandlerFunc *, 32> handler_table = [&]() {
+            std::array<CommandHandlerFunc *, 32> table{};
+            for (const auto &[op, fn] : handlers)
+                if (static_cast<size_t>(op) < table.size())
+                    table[static_cast<size_t>(op)] = fn;
+            return table;
+        }();
+
+        const size_t op_index = static_cast<size_t>(cmd->opcode);
+        CommandHandlerFunc *handler_fn = op_index < handler_table.size() ? handler_table[op_index] : nullptr;
+        if (!handler_fn) {
             LOG_ERROR("Unimplemented command opcode {}", static_cast<int>(cmd->opcode));
         } else {
             CommandHelper helper(cmd);
-            handler->second(state, mem, config, helper, features, command_list.context);
+            handler_fn(state, mem, config, helper, features, command_list.context);
         }
+
+        state.progress_counter.fetch_add(1, std::memory_order_relaxed);
 
         Command *last_cmd = cmd;
         cmd = cmd->next;

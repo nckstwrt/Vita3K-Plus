@@ -240,17 +240,17 @@ SharedGLObject compile_program(GLState &renderer, GLContext &context, const GxmR
     bool shader_cache, bool spirv, bool maskupdate) {
     R_PROFILE(__func__);
 
-    assert(state.fragment_program);
-    assert(state.vertex_program);
+    assert(state.fragment_program_binding);
+    assert(state.vertex_program_binding);
 
-    const SceGxmVertexProgram &vertex_program_gxm = *state.vertex_program.get(mem);
-    const SceGxmFragmentProgram &fragment_program_gxm = *state.fragment_program.get(mem);
+    const ProgramBinding &vertex_program_binding = *state.vertex_program_binding;
+    const ProgramBinding &fragment_program_binding = *state.fragment_program_binding;
 
     const GLFragmentProgram &fragment_program = *reinterpret_cast<GLFragmentProgram *>(
-        fragment_program_gxm.renderer_data.get());
+        fragment_program_binding.fragment_program.get());
 
     const GLVertexProgram &vertex_program = *reinterpret_cast<GLVertexProgram *>(
-        vertex_program_gxm.renderer_data.get());
+        vertex_program_binding.vertex_program.get());
 
     const ProgramHashes hashes(fragment_program.hash, vertex_program.hash);
 
@@ -265,9 +265,9 @@ SharedGLObject compile_program(GLState &renderer, GLContext &context, const GxmR
 
     // update the hints
     context.shader_hints.color_format = state.color_surface.colorFormat;
-    context.shader_hints.attributes = &vertex_program_gxm.attributes;
+    context.shader_hints.attributes = &vertex_program_binding.attributes;
 
-    const SharedGLObject fragment_shader = get_or_compile_shader(fragment_program_gxm.program.get(mem), features, fragment_program.hash, renderer.fragment_shader_cache,
+    const SharedGLObject fragment_shader = get_or_compile_shader(fragment_program_binding.program(), features, fragment_program.hash, renderer.fragment_shader_cache,
         GL_FRAGMENT_SHADER, context.shader_hints, shader_cache, spirv, maskupdate, renderer.shaders_path, renderer.shaders_log_path, renderer.shader_version, renderer.shaders_count_compiled);
 
     if (!fragment_shader) {
@@ -275,7 +275,7 @@ SharedGLObject compile_program(GLState &renderer, GLContext &context, const GxmR
         return SharedGLObject();
     }
 
-    const SharedGLObject vertex_shader = get_or_compile_shader(vertex_program_gxm.program.get(mem), features, vertex_program.hash, renderer.vertex_shader_cache,
+    const SharedGLObject vertex_shader = get_or_compile_shader(vertex_program_binding.program(), features, vertex_program.hash, renderer.vertex_shader_cache,
         GL_VERTEX_SHADER, context.shader_hints, shader_cache, spirv, maskupdate, renderer.shaders_path, renderer.shaders_log_path, renderer.shader_version, renderer.shaders_count_compiled);
 
     if (!vertex_shader) {

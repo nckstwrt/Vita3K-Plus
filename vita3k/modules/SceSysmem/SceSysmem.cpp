@@ -21,6 +21,8 @@
 #include <kernel/state.h>
 #include <kernel/types.h>
 #include <modules/sysmem_state.h>
+#include <renderer/commands.h>
+#include <renderer/functions.h>
 
 #include <packages/sfo.h>
 
@@ -153,6 +155,9 @@ EXPORT(int, sceKernelFreeMemBlock, SceUID uid) {
 
 EXPORT(int, sceKernelFreeMemBlockForVM, SceUID uid) {
     TRACY_FUNC(sceKernelFreeMemBlockForVM, uid);
+    if (emuenv.renderer && renderer::has_dormant_mappings())
+        renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryUnmapFlush, true, static_cast<uint32_t>(thread_id));
+
     const auto state = emuenv.kernel.obj_store.get<SysmemState>();
     const auto guard = std::lock_guard<std::mutex>(state->mutex);
 

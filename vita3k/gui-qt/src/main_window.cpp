@@ -377,11 +377,12 @@ void MainWindow::initialize() {
     setObjectName(QStringLiteral("main_window"));
 
     this->resize(1280, 720);
-    this->setWindowIcon(QIcon(":/Vita3K.png"));
+    this->setWindowIcon(QIcon(":/Vita3KPlus.png"));
     this->setWindowTitle(QString::fromStdString(window_title));
 
     emuenv.compat.log_compat_warn = emuenv.cfg.log_compat_warn;
-    m_game_compat = new GameCompatibility(emuenv.compat, emuenv.cache_path.native(), this);
+    m_game_compat = new GameCompatibility(emuenv.compat, emuenv.cache_path.native(),
+        emuenv.cfg.check_for_updates_mode != static_cast<int>(UPDATE_STARTUP_OFF), this);
 
     emuenv.vulkan_device_info = std::make_unique<renderer::VulkanDeviceInfo>(renderer::enumerate_vulkan_devices());
 

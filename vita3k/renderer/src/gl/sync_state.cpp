@@ -427,9 +427,8 @@ void sync_texture(GLState &state, GLContext &context, MemState &mem, std::size_t
 
 void sync_blending(const GxmRecordState &state, const MemState &mem) {
     // Blending.
-    const SceGxmFragmentProgram &gxm_fragment_program = *state.fragment_program.get(mem);
     const GLFragmentProgram &fragment_program = *reinterpret_cast<GLFragmentProgram *>(
-        gxm_fragment_program.renderer_data.get());
+        state.fragment_program_binding->fragment_program.get());
 
     glColorMask(fragment_program.color_mask_red, fragment_program.color_mask_green, fragment_program.color_mask_blue, fragment_program.color_mask_alpha);
     if (fragment_program.blend_enabled) {
@@ -450,8 +449,8 @@ void clear_previous_uniform_storage(GLContext &context) {
 
 void sync_vertex_streams_and_attributes(GLContext &context, GxmRecordState &state, const MemState &mem) {
     // Vertex attributes.
-    const SceGxmVertexProgram &vertex_program = *state.vertex_program.get(mem);
-    GLVertexProgram *glvert = reinterpret_cast<GLVertexProgram *>(vertex_program.renderer_data.get());
+    const ProgramBinding &vertex_program = *state.vertex_program_binding;
+    GLVertexProgram *glvert = reinterpret_cast<GLVertexProgram *>(vertex_program.vertex_program.get());
 
     // Each draw will upload the stream data. Assuming that, we can just bind buffer, upload data
     // The GXM submit side should already submit used buffer, but we just delete all just in case
