@@ -129,6 +129,7 @@ struct VKState : public renderer::State {
     void teardown_dormant(MemState &mem, Address address);
     Address oldest_dormant() const;
     std::vector<Address> dormant_overlapping(Address start, Address end) const;
+    void log_memory_breakdown();
 
     // used with double buffer memory trapping
     BufferTrapping buffer_trapping;

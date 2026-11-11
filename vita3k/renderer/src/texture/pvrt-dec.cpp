@@ -40,6 +40,8 @@
 
 #include <renderer/pvrt-dec.h>
 
+#include "band_pool.h"
+
 namespace pvr {
 enum {
     ETC_MIN_TEXWIDTH = 4,
@@ -741,12 +743,15 @@ static int pvrtcDecompress(uint8_t *pCompressedData, Pixel32 *pDecompressedData,
     int i32NumXWords = static_cast<int>(ui32Width / ui32WordWidth);
     int i32NumYWords = static_cast<int>(ui32Height / ui32WordHeight);
 
+    // Each row of words writes the lower half of word row wordY and the upper half of word row wordY + 1
+    // (mapDecompressedData), so bands of word rows write disjoint pixels and can be decoded at once.
+    const auto decode_rows = [&](const int row_lo, const int row_hi) {
     // Structs used for decompression
     PVRTCWordIndices indices;
     std::vector<Pixel32> pPixels(ui32WordWidth * ui32WordHeight);
 
     // For each row of words
-    for (int wordY = -1; wordY < i32NumYWords - 1; wordY++) {
+    for (int wordY = row_lo; wordY < row_hi; wordY++) {
         // for each column of words
         for (int wordX = -1; wordX < i32NumXWords - 1; wordX++) {
             indices.P[0] = wrapWordIndex(i32NumXWords, wordX);
@@ -783,6 +788,13 @@ static int pvrtcDecompress(uint8_t *pCompressedData, Pixel32 *pDecompressedData,
 
         } // for each word
     } // for each row of words
+    };
+
+    // small images are not worth waking the band threads for
+    if (ui32Width * ui32Height >= 128 * 128)
+        ::renderer::texture::BandPool::get().run(-1, i32NumYWords - 1, decode_rows);
+    else
+        decode_rows(-1, i32NumYWords - 1);
 
     // Return the data size
     return ui32Width * ui32Height / static_cast<uint32_t>(ui32WordWidth / 2);

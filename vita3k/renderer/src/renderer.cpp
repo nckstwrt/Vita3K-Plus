@@ -36,6 +36,7 @@
 #include <renderer/gl/state.h>
 #include <renderer/gl/types.h>
 #include <renderer/vulkan/functions.h>
+#include <util/mem_snapshot.h>
 
 #include <gxm/functions.h>
 #include <mem/functions.h>
@@ -270,7 +271,10 @@ void set_context(State &state, Context *ctx, RenderTarget *target, SceGxmColorSu
 namespace {
 constexpr bool GUEST_STREAM_SNAPSHOT = true;
 constexpr bool GUEST_INDEX_SNAPSHOT = true;
-constexpr size_t SNAP_RING_SIZE = 64u * 1024u * 1024u;
+// ~18k snapshots/s of at most a few hundred bytes in WipEout: 16 MiB is seconds of history for a
+// consumer at most a frame or two behind (an overwritten slot counts as stale and reads guest memory).
+// Low-memory devices take that; others keep 64 MiB.
+const size_t SNAP_RING_SIZE = mem_diag::low_memory_device() ? 16u * 1024u * 1024u : 64u * 1024u * 1024u;
 // only a small stream is copied (every stream a game has been seen to recycle is a small per-draw block)
 // a game that indexes deep into a large shared buffer which would overlap the ring every frame
 constexpr uint32_t SNAP_MAX_BYTES = 16u * 1024u;

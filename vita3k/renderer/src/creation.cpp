@@ -36,6 +36,7 @@
 #include <chrono>
 #include <future>
 #include <util/log.h>
+#include <util/mem_snapshot.h>
 #include <util/tracy.h>
 
 namespace renderer {
@@ -190,7 +191,12 @@ struct WorldStopScope {
 };
 
 inline constexpr bool DORMANT_MAPPINGS = true;
-inline constexpr uint64_t DORMANT_BUDGET_BYTES = 128ull * 1024 * 1024;
+// A dormant mapping's Double Buffer copy is device memory the system cannot swap or reclaim, on top of
+// the guest's own copy: a low-memory device keeps far fewer of them.
+static uint64_t dormant_budget_bytes() {
+    static const uint64_t budget = mem_diag::low_memory_device() ? 32ull * 1024 * 1024 : 128ull * 1024 * 1024;
+    return budget;
+}
 static std::atomic<uint32_t> g_dormant_count{ 0 };
 
 inline constexpr bool DORMANT_WAIT_PENDING_GPU_USE = true;
@@ -314,7 +320,7 @@ COMMAND(handle_memory_unmap) {
         wait_for_pending_gpu_use(renderer, vk, addr.address());
         if (vk.make_dormant(addr.address())) {
             g_dormant_count.store(static_cast<uint32_t>(vk.dormant_mappings.size()), std::memory_order_release);
-            evict_dormant_to_budget(renderer, mem, caller_thread, DORMANT_BUDGET_BYTES, "budget");
+            evict_dormant_to_budget(renderer, mem, caller_thread, dormant_budget_bytes(), "budget");
             complete_command(renderer, helper, 0);
             return;
         }

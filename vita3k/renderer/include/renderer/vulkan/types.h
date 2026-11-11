@@ -62,6 +62,9 @@ struct TextureCacheEntry {
 struct VKTextureCache : public TextureCache {
     VKState &state;
 
+    // <cache>/texture-bc/<title>/<self>, next to the pipeline recipes
+    fs::path disk_cache_dir() override;
+
     uint64_t release_all_cached_textures();
     uint64_t release_idle_textures();
 

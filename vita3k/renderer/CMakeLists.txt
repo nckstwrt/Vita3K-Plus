@@ -31,6 +31,7 @@ add_library(
 	src/vulkan/sync_state.cpp
 	src/vulkan/texture.cpp
 
+	src/texture/bc_disk_cache.cpp
 	src/texture/cache.cpp
 	src/texture/format.cpp
 	src/texture/palette.cpp

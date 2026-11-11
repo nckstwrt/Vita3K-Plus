@@ -39,9 +39,11 @@ VKContext::VKContext(VKState &state, MemState &mem)
     , index_stream_ring_buffer(vk::BufferUsageFlagBits::eIndexBuffer, MiB(64))
     , vertex_uniform_stream_ring_buffer(vk::BufferUsageFlagBits::eStorageBuffer, MiB(/*256*/ 64))
     , fragment_uniform_stream_ring_buffer(vk::BufferUsageFlagBits::eStorageBuffer, MiB(/*256*/ 64))
-    , vertex_info_uniform_buffer(vk::BufferUsageFlagBits::eUniformBuffer, MiB(16))
-    , fragment_info_uniform_buffer(vk::BufferUsageFlagBits::eUniformBuffer, MiB(32))
-    // the uniform preload UBOs: a few hundred bytes a draw, smaller rings on low-memory devices
+    // a few hundred bytes a draw at ~12k draws/s: on a low-memory device these hold about a second of
+    // draws, many frames more than the GPU runs behind (2.5 GB devices such as the RG Vita swap at race
+    // start with 16 + 32 MiB); other devices keep the larger rings
+    , vertex_info_uniform_buffer(vk::BufferUsageFlagBits::eUniformBuffer, mem_diag::low_memory_device() ? MiB(4) : MiB(16))
+    , fragment_info_uniform_buffer(vk::BufferUsageFlagBits::eUniformBuffer, mem_diag::low_memory_device() ? MiB(8) : MiB(32))
     , vertex_preload_buffer(vk::BufferUsageFlagBits::eUniformBuffer, mem_diag::low_memory_device() ? MiB(1) : MiB(4))
     , fragment_preload_buffer(vk::BufferUsageFlagBits::eUniformBuffer, mem_diag::low_memory_device() ? MiB(2) : MiB(8)) {
     memset(&prev_vert_ublock, 0, sizeof(shader::RenderVertUniformBlock));

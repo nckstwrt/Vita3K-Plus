@@ -22,6 +22,7 @@
 
 #include <renderer/functions.h>
 #include <renderer/types.h>
+#include <gxm/functions.h>
 #include <renderer/vulkan/functions.h>
 #include <renderer/vulkan/state.h>
 
@@ -1093,8 +1094,10 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             .queueFamilyIndex = general_family_index
         };
 
-        frame.render_pool = device.createCommandPool(pool_info);
+        // both reset per command buffer: a render target that keeps rendering scenes without a flip
+        // reuses its finished command buffers (VKContext::start_recording)
         pool_info.flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
+        frame.render_pool = device.createCommandPool(pool_info);
         frame.prerender_pool = device.createCommandPool(pool_info);
 
         frame.destroy_queue.init(device);
@@ -1574,20 +1577,59 @@ void VKState::render_frame(DisplayState &display, const GxmState &gxm, MemState 
     }
 }
 
+// What the device memory is spent on, next to the process totals of the heartbeat snapshot: live
+// and dormant guest mappings (their Double Buffer copies), the texture cache, and VMA's view of each
+// memory type (bytes in blocks vs bytes allocated from them, so fragmentation shows).
+void VKState::log_memory_breakdown() {
+    uint64_t live_bytes = 0, live_dedicated = 0;
+    for (const auto &[addr, mapping] : mapped_memories) {
+        live_bytes += mapping.size;
+        if (mapping.size >= KiB(256))
+            live_dedicated++;
+    }
+    std::string types;
+    const vma::TotalStatistics stats = allocator.calculateStatistics();
+    for (uint32_t i = 0; i < physical_device_memory.memoryTypeCount; i++) {
+        const vma::Statistics &s = stats.memoryType[i].statistics;
+        if (s.blockCount == 0)
+            continue;
+        types += fmt::format(" | type {}: {} blocks {} MiB, {} allocs {} MiB", i, s.blockCount, s.blockBytes / MiB(1), s.allocationCount, s.allocationBytes / MiB(1));
+    }
+    LOG_INFO("[MEMBREAK] guest mappings live {} ({} MiB, {} of them >= 256 KiB) dormant {} ({} MiB) | texture cache {} MiB of {} MiB{}",
+        mapped_memories.size(), live_bytes / MiB(1), live_dedicated, dormant_mappings.size(), dormant_bytes / MiB(1),
+        texture_cache.cached_bytes / MiB(1), texture_cache.memory_budget / MiB(1), types);
+
+    // what the texture cache holds, by guest base format, and how it churned since the last line
+    std::map<uint32_t, std::pair<uint32_t, uint64_t>> by_format;
+    for (size_t i = 0; i < texture_cache.textures.size(); i++) {
+        const uint64_t bytes = texture_cache.textures[i].image_bytes;
+        if (bytes == 0)
+            continue;
+        auto &slot = by_format[static_cast<uint32_t>(gxm::get_base_format(gxm::get_format(texture_cache.texture_queue.items[i].content.texture)))];
+        slot.first++;
+        slot.second += bytes;
+    }
+    std::string formats;
+    for (const auto &[format, use] : by_format)
+        formats += fmt::format(" 0x{:X}: {} {} KiB", format, use.first, use.second / KiB(1));
+    LOG_INFO("[TEXSTAT] uploads miss {} changed {} (PVRTC mips as BC1 {} BC3 {}, from disk {}, to disk {}) | evicted {} ({} MiB) | held by base format:{}", texture_cache.stat_miss_uploads,
+        texture_cache.stat_change_uploads, texture_cache.stat_bc1_uploads, texture_cache.stat_bc3_uploads, texture_cache.stat_bc_disk_hits, texture_cache.stat_bc_disk_stores,
+        texture_cache.stat_evictions, texture_cache.stat_evicted_bytes / MiB(1), formats);
+    texture_cache.stat_miss_uploads = texture_cache.stat_change_uploads = texture_cache.stat_evictions = texture_cache.stat_evicted_bytes = 0;
+    texture_cache.stat_bc1_uploads = texture_cache.stat_bc3_uploads = texture_cache.stat_bc_disk_hits = texture_cache.stat_bc_disk_stores = 0;
+}
+
 void VKState::swap_window() {
     screen_renderer.swap_window();
 
     // Android asked us to give memory back!
     const int trim_level = memory_trim_level.exchange(-1, std::memory_order_relaxed);
     if (trim_level >= 0) {
-        constexpr int trim_ui_hidden = 20;
-        uint64_t freed = 0;
-        if (trim_level >= trim_ui_hidden) {
-            device.waitIdle();
-            freed = texture_cache.release_all_cached_textures();
-        } else {
-            freed = texture_cache.release_idle_textures();
-        }
+        // swap_window only runs while frames are being presented, so the UI is not hidden whatever the
+        // level says: Android 12 sends TRIM_MEMORY_COMPLETE (80) to the foreground game too. Dropping
+        // every cached texture after a waitIdle there stalled WipEout 2048 for 2.5 s mid-race while it
+        // decoded them all again; the textures no recent frame used are what can go.
+        const uint64_t freed = texture_cache.release_idle_textures();
         LOG_WARN("[ANDROID MEMORY] trim level {}: released {} MiB of cached textures", trim_level, freed / (1024 * 1024));
         dormant_trim_requested = true;
         mem_diag::log_memory_snapshot("post-trim");
@@ -1608,6 +1650,7 @@ void VKState::swap_window() {
             LOG_DEBUG("renderer heartbeat: {} frames presented, pipelines created={} failed={} keys={}",
                 frames_presented, pipeline_cache.pipelines_created.load(), pipeline_cache.pipelines_failed.load(), pipeline_cache.pipeline_key_count());
             mem_diag::log_memory_snapshot("heartbeat");
+            log_memory_breakdown();
         }
         next_heartbeat = time_s + 5;
     }
@@ -2055,12 +2098,16 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
 
     case MappingMethod::DoubleBuffer: {
         vkutil::Buffer buffer(size + KiB(4));
-        constexpr vma::AllocationCreateInfo double_buffer_alloc = {
+        vma::AllocationCreateInfo double_buffer_alloc = {
             .flags = vma::AllocationCreateFlagBits::eHostAccessRandom | vma::AllocationCreateFlagBits::eMapped,
             .usage = vma::MemoryUsage::eAutoPreferHost,
             .requiredFlags = vk::MemoryPropertyFlagBits::eHostCoherent,
             .preferredFlags = vk::MemoryPropertyFlagBits::eHostCached,
         };
+        // A copy of 256 KiB or more gets its own device memory: guest ranges come and go (loads), and
+        // suballocated copies keep whole VMA blocks alive once a long-lived neighbour holds them.
+        if (size >= KiB(256))
+            double_buffer_alloc.flags |= vma::AllocationCreateFlagBits::eDedicatedMemory;
         buffer.init_buffer(mapped_memory_flags, double_buffer_alloc);
 
         vk::BufferDeviceAddressInfoKHR address_info{

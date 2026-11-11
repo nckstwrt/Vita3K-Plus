@@ -97,6 +97,12 @@ uint64_t VKTextureCache::release_all_cached_textures() {
     return freed;
 }
 
+fs::path VKTextureCache::disk_cache_dir() {
+    if (state.recipes_path.empty() || state.cache_path.empty())
+        return {};
+    return state.cache_path / "texture-bc" / state.recipes_path.parent_path().filename() / state.recipes_path.filename();
+}
+
 void VKTextureCache::release_image(TextureCacheEntry &entry) {
     if (entry.texture.image)
         state.frame().destroy_queue.add_image(entry.texture);
@@ -139,6 +145,8 @@ void VKTextureCache::evict_entry(TextureCacheInfo &info, TextureCacheEntry &entr
     info.use_hash = false;
     info.last_hash_scene = 0;
     entry.texture.destroy();
+    stat_evictions++;
+    stat_evicted_bytes += entry.image_bytes;
     cached_bytes -= entry.image_bytes;
     entry.image_bytes = 0;
     entry.memory_needed = 0;
@@ -475,6 +483,22 @@ bool VKTextureCache::init(const bool hashless_texture_cache, const fs::path &tex
     // support_dxt might have already been set by the bcn patch on android
     support_dxt |= static_cast<bool>(dxt_support.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage);
 
+    {
+        const vk::FormatProperties bc3 = state.physical_device.getFormatProperties(vk::Format::eBc3UnormBlock);
+        const vk::FormatProperties bc3_srgb = state.physical_device.getFormatProperties(vk::Format::eBc3SrgbBlock);
+        constexpr vk::FormatFeatureFlags needed = vk::FormatFeatureFlagBits::eSampledImage | vk::FormatFeatureFlagBits::eSampledImageFilterLinear | vk::FormatFeatureFlagBits::eTransferDst;
+        // a re-encode loses some quality against the RGBA8 decode: only where memory is short (RGBA8
+        // is 8x the PVRTC size; a 2.5 GB device was killed for memory at WipEout 2048's race start)
+        pvrt_as_bc3 = !support_pvrt && mem_diag::low_memory_device() && (bc3.optimalTilingFeatures & needed) == needed && (bc3_srgb.optimalTilingFeatures & needed) == needed;
+        if (pvrt_as_bc3)
+            LOG_INFO("PVRTC textures are decoded and stored as BC3");
+        const vk::FormatProperties bc1 = state.physical_device.getFormatProperties(vk::Format::eBc1RgbUnormBlock);
+        const vk::FormatProperties bc1_srgb = state.physical_device.getFormatProperties(vk::Format::eBc1RgbSrgbBlock);
+        pvrt_opaque_as_bc1 = pvrt_as_bc3 && (bc1.optimalTilingFeatures & needed) == needed && (bc1_srgb.optimalTilingFeatures & needed) == needed;
+        if (pvrt_opaque_as_bc1)
+            LOG_INFO("Opaque 4 bpp PVRTC textures are stored as BC1");
+    }
+
     // check for astc support
     const vk::FormatProperties astc_support = state.physical_device.getFormatProperties(vk::Format::eAstc4x4SrgbBlock);
     support_astc = static_cast<bool>(astc_support.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage);
@@ -484,8 +508,10 @@ bool VKTextureCache::init(const bool hashless_texture_cache, const fs::path &tex
     for (uint32_t i = 0; i < state.physical_device_memory.memoryHeapCount; i++)
         heap_size = std::max(heap_size, state.physical_device_memory.memoryHeaps[i].size);
     const bool low_memory = mem_diag::low_memory_device();
-    budget_floor = low_memory ? MiB(128) : MiB(256);
-    memory_budget = std::clamp<vk::DeviceSize>(heap_size / (low_memory ? 16 : 4), budget_floor, GiB(2));
+    // a 2.5 GB handheld swaps at race start with 128 MiB of textures; converted PVRTC mips come back from the disk
+    // cache (BcDiskCache) instead of a decode once they are evicted, so a smaller budget costs a file read
+    budget_floor = low_memory ? MiB(96) : MiB(256);
+    memory_budget = std::clamp<vk::DeviceSize>(heap_size / (low_memory ? 24 : 4), budget_floor, GiB(2));
     default_budget = memory_budget;
     LOG_INFO("Texture cache budget: {} MiB (largest memory heap {} MiB{})", memory_budget / MiB(1), heap_size / MiB(1), low_memory ? ", low-memory device" : "");
 
@@ -507,6 +533,8 @@ static vk::Format linear_to_srgb(const vk::Format format) {
         return vk::Format::eR8G8B8A8Srgb;
     case vk::Format::eBc1RgbaUnormBlock:
         return vk::Format::eBc1RgbaSrgbBlock;
+    case vk::Format::eBc1RgbUnormBlock:
+        return vk::Format::eBc1RgbSrgbBlock;
     case vk::Format::eBc2UnormBlock:
         return vk::Format::eBc2SrgbBlock;
     case vk::Format::eBc3UnormBlock:
@@ -570,6 +598,10 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
     if (gxm::is_bcn_format(base_format) && !support_dxt)
         // texture will be decompressed
         vk_format = bcn_to_rgba8(vk_format);
+    if (pvrt_as_bc3 && gxm::is_pvrt_format(base_format))
+        // decoded, then encoded as BC3 at upload (TextureCache::upload_texture), BC1 when it has no transparency
+        // (RGB BC1: no block can read as transparent)
+        vk_format = (pvrt_opaque_as_bc1 && current_info && current_info->pvrt_opaque) ? vk::Format::eBc1RgbUnormBlock : vk::Format::eBc3UnormBlock;
     if (gxm_texture.gamma_mode)
         vk_format = linear_to_srgb(vk_format);
 
