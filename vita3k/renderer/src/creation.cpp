@@ -375,6 +375,11 @@ bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProg
     layout_ssbo_offset_from_uniform_buffer_sizes(fp->uniform_buffer_sizes, fp->uniform_buffer_data_offsets, fp->max_total_uniform_buffer_storage);
     fp->dynamic_uniform_buffers = shader::usse::get_dynamic_uniform_buffers(program);
     fp->written_uniform_buffers = shader::usse::get_written_uniform_buffers(program);
+    if (state.features.enable_memory_mapping && (state.features.uniform_preload_ubo & 2) && state.current_backend == Backend::Vulkan) {
+        fp->uniform_preload = shader::get_uniform_preload_layout(program);
+        if (!fp->uniform_preload.empty())
+            fp->uniform_preload_vec4 = fp->uniform_preload.back().vec4_offset + (fp->uniform_preload.back().words + 3) / 4;
+    }
     fp->textures_used = gxp::get_textures_used(program);
     fp->texture_count = std::bit_width(fp->textures_used.to_ulong());
 
@@ -410,6 +415,11 @@ bool create(std::unique_ptr<VertexProgram> &vp, State &state, const SceGxmProgra
     layout_ssbo_offset_from_uniform_buffer_sizes(vp->uniform_buffer_sizes, vp->uniform_buffer_data_offsets, vp->max_total_uniform_buffer_storage);
     vp->dynamic_uniform_buffers = shader::usse::get_dynamic_uniform_buffers(program);
     vp->written_uniform_buffers = shader::usse::get_written_uniform_buffers(program);
+    if (state.features.enable_memory_mapping && (state.features.uniform_preload_ubo & 1) && state.current_backend == Backend::Vulkan) {
+        vp->uniform_preload = shader::get_uniform_preload_layout(program);
+        if (!vp->uniform_preload.empty())
+            vp->uniform_preload_vec4 = vp->uniform_preload.back().vec4_offset + (vp->uniform_preload.back().words + 3) / 4;
+    }
     vp->textures_used = gxp::get_textures_used(program);
     vp->texture_count = std::bit_width(vp->textures_used.to_ulong());
 

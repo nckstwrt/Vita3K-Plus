@@ -54,6 +54,7 @@
 
 #ifdef __ANDROID__
 #include <SDL3/SDL_system.h>
+#include <sys/system_properties.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <util/float_to_half.h>
@@ -979,6 +980,17 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             device = physical_device.createDevice(device_info.get());
         }
         VULKAN_HPP_DEFAULT_DISPATCHER.init(device);
+
+        // malisx2 (Mali Bifrost) returns it; every other driver returns null
+        cmd_set_index_range_malisx2 = reinterpret_cast<PFN_CmdSetIndexRangeMALISX2>(
+            device.getProcAddr("vkCmdSetIndexRangeMALISX2"));
+        if (cmd_set_index_range_malisx2)
+            LOG_INFO("Driver takes index ranges (vkCmdSetIndexRangeMALISX2)");
+        if (features.support_clip_distance)
+            cmd_set_depth_cull_malisx2 = reinterpret_cast<PFN_CmdSetDepthCullMALISX2>(
+                device.getProcAddr("vkCmdSetDepthCullMALISX2"));
+        if (cmd_set_depth_cull_malisx2)
+            LOG_INFO("Driver culls near and far fragments in fixed function (vkCmdSetDepthCullMALISX2)");
     }
 
     // Get Queues
@@ -1175,6 +1187,21 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
     features.enable_memory_mapping = mapping_method != MappingMethod::Disabled;
 
     features.force_full_precision = cfg.force_full_precision;
+
+    if (features.enable_memory_mapping) {
+        // the uniform block preload through a UBO: on by default for fragment shaders with malisx2 (Mali
+        // Bifrost), where it was measured (a vertex UBO costs more than it saves there); off elsewhere
+        std::string mode = cmd_set_index_range_malisx2 ? "fs" : "off";
+#ifdef __ANDROID__
+        char value[PROP_VALUE_MAX] = {};
+        if (__system_property_get("debug.vita3k.ubopreload", value) > 0)
+            mode = value;
+#endif
+        if (const char *env = std::getenv("VITA3K_UBOPRELOAD"))
+            mode = env;
+        features.uniform_preload_ubo = mode == "both" ? 3 : mode == "fs" ? 2 : mode == "vs" ? 1 : 0;
+        LOG_INFO("uniform preload through UBO: {} (debug.vita3k.ubopreload)", mode);
+    }
 
 #ifdef __ANDROID__
     if (mapping_method == MappingMethod::NativeBuffer) {

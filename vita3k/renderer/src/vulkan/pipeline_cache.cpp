@@ -179,8 +179,14 @@ void PipelineCache::init(bool support_rasterized_order_access) {
             .stageFlags = vk::ShaderStageFlagBits::eFragment,
         };
 
+        // with memory mapping, 2 and 3 are the uniform preload UBOs when they are on
+        const bool preload_ubo = state.features.enable_memory_mapping && state.features.uniform_preload_ubo;
+        if (preload_ubo) {
+            layout_bindings[2].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
+            layout_bindings[3].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
+        }
         vk::DescriptorSetLayoutCreateInfo descriptor_info{
-            .bindingCount = state.features.enable_memory_mapping ? 2U : 4U,
+            .bindingCount = (state.features.enable_memory_mapping && !preload_ubo) ? 2U : 4U,
             .pBindings = layout_bindings.data()
         };
         uniforms_layout = state.device.createDescriptorSetLayout(descriptor_info);
@@ -663,6 +669,16 @@ static Sha256Hash shader_cache_key(const SceGxmProgram *program, const Sha256Has
     if (!is_vertex && hints.raw_color_attachment_input) {
         hash[6] ^= 0x75;
         version_suffix += "u";
+    }
+    if (features.enable_memory_mapping && (features.uniform_preload_ubo & (is_vertex ? 1 : 2)) && !shader::get_uniform_preload_layout(*program).empty()) {
+        // "p" shaders (no ArrayStride on the preload array) read garbage: never reuse them
+        hash[8] ^= 0x9E;
+        version_suffix += "p2";
+    }
+    if (is_vertex && hints.hw_depth_cull) {
+        // no eye/near/far clip distances: the driver culls those fragments (vkCmdSetDepthCullMALISX2)
+        hash[10] ^= 0xD5;
+        version_suffix += "d";
     }
     if (is_vertex && shader::emulates_vertex_stores(*program, features)) {
         hash[7] ^= hints.vertex_store_pass ? 0x5E : 0x4E;
@@ -1764,7 +1780,7 @@ void PipelineCache::bisect_pipeline_failure(const vk::GraphicsPipelineCreateInfo
     LOG_CRITICAL("=== END KNOCKOUT BISECT ===");
 }
 
-vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem, bool vertex_store_pass) {
+vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem, bool vertex_store_pass, bool hw_depth_cull) {
     const GxmRecordState &record = context.record;
     uint64_t key = hash_pipeline_record(record);
     uint64_t raw_key = XXH3_64bits(&record, record_pipeline_len);
@@ -1797,6 +1813,10 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     if (vertex_store_pass) {
         key ^= 0x9E3779B97F4A7C15ull;
         raw_key ^= 0x9E3779B97F4A7C15ull;
+    }
+    if (hw_depth_cull) {
+        key ^= 0xD6E8FEB86659FD93ull;
+        raw_key ^= 0xD6E8FEB86659FD93ull;
     }
 
     const uint32_t cast_units = context.curr_frag_ublock.cast_sampler_bits | context.curr_frag_ublock.cast_phase_bits | context.curr_frag_ublock.raw_cast_bits;
@@ -1861,6 +1881,7 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     context.shader_hints.color_format = record.color_surface.colorFormat;
     context.shader_hints.attributes = &vertex_program_binding->attributes;
     context.shader_hints.vertex_store_pass = vertex_store_pass;
+    context.shader_hints.hw_depth_cull = hw_depth_cull;
     context.shader_hints.output_register_format = fragment_program_binding->fragment_program
         ? fragment_program_binding->fragment_program->output_register_format
         : SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED;
@@ -2114,6 +2135,8 @@ void PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
         .attributes = &vertex_binding.attributes,
         .color_format = SCE_GXM_COLOR_FORMAT_U8U8U8U8_ABGR,
     };
+    // the variant most draws take when the driver culls near and far fragments itself (scene.cpp)
+    hints.hw_depth_cull = state.cmd_set_depth_cull_malisx2 != nullptr;
     std::fill_n(hints.vertex_textures, SCE_GXM_MAX_TEXTURE_UNITS, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
     std::fill_n(hints.fragment_textures, SCE_GXM_MAX_TEXTURE_UNITS, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
     hints.output_register_format = fragment_binding.fragment_program->output_register_format;
