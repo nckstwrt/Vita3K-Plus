@@ -260,12 +260,19 @@ void prepare_game_launch_overlay(EmuEnvState &emuenv) {
     if (fs::exists(bg_path))
         renderer.precompile_bg_path = fs_utils::path_to_utf8(bg_path);
 
-    if (renderer::get_shaders_cache_hashs(renderer) && emuenv.cfg.shader_cache) {
+    // Vulkan does not precompile from the list: its entries are shader cache keys, while the cached
+    // SPIR-V files are named by version, hint suffix and program hash, so the lookup found none of
+    // them and the boot only spent its time on misses (WipEout 2048: ~20000 entries, over a minute
+    // before the first frame). Shaders load from the SPIR-V cache when first used, and the pipeline
+    // recipe replay below creates every pipeline earlier sessions created.
+    if (renderer::get_shaders_cache_hashs(renderer) && emuenv.cfg.shader_cache && renderer.current_backend != renderer::Backend::Vulkan) {
         renderer.precompile_queue = renderer.shaders_cache_hashs;
         renderer.precompile_progress = 0;
         renderer.precompile_complete.store(false, std::memory_order_relaxed);
         renderer.precompile_requested = true;
     }
+    // every pipeline earlier sessions created, created again in the background (whatever the shader cache holds)
+    renderer::start_pipeline_recipe_replay(renderer);
 }
 
 bool update_runtime_metrics(EmuEnvState &emuenv, LaunchRuntimeMetrics &metrics) {

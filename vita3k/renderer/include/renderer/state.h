@@ -87,6 +87,7 @@ struct State {
     fs::path vita_fs_path;
     fs::path shaders_path;
     fs::path shaders_log_path;
+    fs::path recipes_path;
 
     FrameHost *frame = nullptr;
     KernelState *kernel = nullptr;
@@ -257,6 +258,8 @@ struct State {
 
     void set_app(const char *title_id, const char *self_name) {
         shaders_path = cache_path / "shaders" / title_id / self_name;
+        // outside shaders_path, which is wiped when the shader cache version or the GPU features change
+        recipes_path = cache_path / "pipeline-recipes" / title_id / self_name;
         shaders_log_path = log_path / "shaderlog" / title_id / self_name;
     }
 };

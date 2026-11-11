@@ -21,6 +21,7 @@ add_library(
 	src/vulkan/creation.cpp
 	src/vulkan/gxm_to_vulkan.cpp
 	src/vulkan/pipeline_cache.cpp
+	src/vulkan/pipeline_recipes.cpp
 	src/vulkan/renderer.cpp
 	src/vulkan/scene.cpp
 	src/vulkan/overlay_renderer.cpp

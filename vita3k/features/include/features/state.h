@@ -36,6 +36,9 @@ struct FeatureState {
     bool emulate_f16_denormals = false; ///< The GPU flushes fp16 denormals when converting, so VPCK to F16 builds subnormal halves itself
     bool support_depth_mirror = false; ///< Shader interlock with a D32 depth buffer. A blending program that writes its own depth tests it against a copy of the depth buffer as early fragment tests would ignore it
     int vertex_store_slots = 0;
+    /// with memory mapping, copy the uniform blocks a program preloads into registers through a per-draw UBO instead of
+    /// buffer device address reads: bit 0 vertex, bit 1 fragment (debug.vita3k.ubopreload = off/vs/fs/both)
+    int uniform_preload_ubo = 0;
 
     bool is_programmable_blending_supported() const {
         return support_shader_interlock || support_texture_barrier || direct_fragcolor;
