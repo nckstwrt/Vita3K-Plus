@@ -50,6 +50,27 @@ static bool draw_drops_fragments_beyond_far_plane(const GxmRecordState &record) 
     return drop_fragments_beyond_far_plane && front_drops && back_drops;
 }
 
+// vkCmdSetDepthCullMALISX2 flags that do what the eye, near and far clip distances of a vertex program do
+// (spirv_recompiler.cpp emit_eye_clip), or 0 when the driver cannot: then the draw keeps the clip distances.
+// The near clip distance is z + w >= 0 in GXM clip space, so the near plane is at screen depth
+// z_offset - z_scale: the driver's cull below the viewport's minDepth (0) is the same test only when that
+// is 0. A draw with the viewport transform off has no near clip. The far one is the depth test case below.
+static uint32_t hw_depth_cull_flags(const VKContext &context) {
+    constexpr uint32_t override_bit = 1, below_bit = 2, above_bit = 4;
+    if (!context.state.cmd_set_depth_cull_malisx2)
+        return 0;
+    const GxmRecordState &record = context.record;
+    uint32_t flags = override_bit;
+    if (!record.viewport_flat) {
+        if (!(record.z_scale > 0.0f) || std::abs(record.z_offset - record.z_scale) > 1e-6f * std::max(1.0f, record.z_scale))
+            return 0;
+        flags |= below_bit;
+    }
+    if (draw_drops_fragments_beyond_far_plane(record))
+        flags |= above_bit;
+    return flags;
+}
+
 // a program can index a uniform buffer past its declared size (therefore Double Buffer copies the rest of it too)
 constexpr uint32_t UNIFORM_SLACK_WINDOW = 16 * 1024;
 
@@ -71,6 +92,9 @@ static void copy_uniform_slack(VKContext &context, MemState &mem, const Address 
     memcpy(mirror + declared, guest + declared, static_cast<size_t>(end - address - declared));
 }
 
+// draws whose preloaded uniform blocks came from the preload UBO or, falling back, from the addresses (render thread only)
+static uint64_t preload_draws[2], preload_fallback_draws[2], preload_log_draws;
+
 void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *program, const bool vertex_shader, const int block_num, const int size, Ptr<uint8_t> data) {
     auto offset = program->uniform_buffer_data_offsets.at(block_num);
     if (offset == static_cast<std::uint32_t>(-1)) {
@@ -85,6 +109,22 @@ void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *
             context.state.buffer_trapping.access_buffer(data.address(), data_size_upload, mem, false, true);
             if ((program->dynamic_uniform_buffers & (1u << block_num)) && !context.state.has_shader_store)
                 copy_uniform_slack(context, mem, data.address(), data_size_upload);
+        }
+
+        if (!program->uniform_preload.empty()) {
+            const int stage = vertex_shader ? 0 : 1;
+            context.preload_set_mask[stage] |= 1u << block_num;
+            const bool gpu_written = aliases_surface || (program->written_uniform_buffers & (1u << block_num));
+            const uint8_t *guest = data.get(mem);
+            for (const shader::UniformPreload &entry : program->uniform_preload) {
+                if (entry.buffer_idx != block_num)
+                    continue;
+                // past the bytes set (the next block or the end of a mapping) the guest is not safe to read
+                if (gpu_written || !guest || entry.words * 4u > static_cast<uint32_t>(size))
+                    context.preload_unavailable[stage] = true;
+                else
+                    memcpy(&context.preload_staging[stage][entry.vec4_offset * 4], guest, entry.words * 4);
+            }
         }
 
         const uint64_t buffer_address = context.state.get_matching_device_address(data.address());
@@ -286,16 +326,17 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
         state.device.updateDescriptorSets(fragment_texture_count, write_descrs.data(), 0, nullptr);
     }
 
-    const uint32_t dynamic_offset_count = state.features.enable_memory_mapping ? 2U : 4U;
+    const bool preload_ubo = state.features.enable_memory_mapping && state.features.uniform_preload_ubo;
+    const uint32_t dynamic_offset_count = (state.features.enable_memory_mapping && !preload_ubo) ? 2U : 4U;
     const uint32_t dynamic_offsets[] = {
         // GXMRenderVertUniformBlock
         context.vertex_info_uniform_buffer.data_offset,
         // GXMRenderFragUniformBlock
         context.fragment_info_uniform_buffer.data_offset,
-        // vertex ssbo
-        context.vertex_uniform_stream_ring_buffer.data_offset,
-        // fragment ssbo
-        context.fragment_uniform_stream_ring_buffer.data_offset
+        // vertex ssbo, or the vertex preload UBO
+        preload_ubo ? context.vertex_preload_buffer.data_offset : context.vertex_uniform_stream_ring_buffer.data_offset,
+        // fragment ssbo, or the fragment preload UBO
+        preload_ubo ? context.fragment_preload_buffer.data_offset : context.fragment_uniform_stream_ring_buffer.data_offset
     };
 
     context.render_cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline_layout, 0,
@@ -612,7 +653,12 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         // We don't want to defer cases where we draw a whole quad over the screen as these draws could be necessary
         // to be able to see anything
         bool can_be_whole_quad = instance_count == 1 && count <= 6;
-        vk::Pipeline new_pipeline = context.state.pipeline_cache.retrieve_pipeline(context, type, !can_be_whole_quad, mem);
+        const uint32_t depth_cull = hw_depth_cull_flags(context);
+        vk::Pipeline new_pipeline = context.state.pipeline_cache.retrieve_pipeline(context, type, !can_be_whole_quad, mem, false, depth_cull != 0);
+        if (context.state.cmd_set_depth_cull_malisx2 && depth_cull != context.depth_cull_flags) {
+            context.state.cmd_set_depth_cull_malisx2(static_cast<VkCommandBuffer>(context.render_cmd), depth_cull);
+            context.depth_cull_flags = depth_cull;
+        }
         context.vertex_store_pipeline = vertex_stores ? context.state.pipeline_cache.retrieve_pipeline(context, type, false, mem, true) : vk::Pipeline{};
         context.pipeline_stops_lrz_write = fetch_draw_stops_lrz_write(context.state, context.record, fragment_program_gxp);
 
@@ -728,6 +774,32 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         memcpy(&context.prev_frag_ublock, &frag_ublock, sizeof(frag_ublock));
     }
 
+    if (use_memory_mapping && context.state.features.uniform_preload_ubo) {
+        const ShaderProgram *programs[2] = { vert_render_data.get(), frag_render_data.get() };
+        vkutil::HostRingBuffer *rings[2] = { &context.vertex_preload_buffer, &context.fragment_preload_buffer };
+        for (int stage = 0; stage < 2; stage++) {
+            const ShaderProgram *program = programs[stage];
+            if (!program->uniform_preload.empty()) {
+                bool all_set = true;
+                for (const shader::UniformPreload &entry : program->uniform_preload)
+                    all_set &= static_cast<bool>(context.preload_set_mask[stage] & (1u << entry.buffer_idx));
+                const bool in_ubo = all_set && !context.preload_unavailable[stage];
+                context.preload_staging[stage][0] = in_ubo ? 1.0f : 0.0f;
+                ++(in_ubo ? preload_draws : preload_fallback_draws)[stage];
+                rings[stage]->allocate(context.prerender_cmd, program->uniform_preload_vec4 * 16, context.preload_staging[stage]);
+            }
+            context.preload_set_mask[stage] = 0;
+            context.preload_unavailable[stage] = false;
+        }
+    }
+    if (use_memory_mapping && context.state.features.uniform_preload_ubo && ++preload_log_draws >= 20000) {
+        // which draws took the UBO path, to tell whether debug.vita3k.ubopreload is doing anything
+        LOG_INFO("[PRELOAD] last {} draws: vs ubo {} addresses {} | fs ubo {} addresses {}", preload_log_draws,
+            preload_draws[0], preload_fallback_draws[0], preload_draws[1], preload_fallback_draws[1]);
+        preload_log_draws = 0;
+        preload_draws[0] = preload_draws[1] = preload_fallback_draws[0] = preload_fallback_draws[1] = 0;
+    }
+
     // create, update and bind descriptors (uniforms and textures)
     draw_bind_descriptors(context, mem);
 
@@ -736,18 +808,26 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     const size_t index_size = (format == SCE_GXM_INDEX_FORMAT_U16) ? 2 : 4;
 
     uint32_t max_index = 0;
+    // the index range of the draw, when it is known (double buffer mapping reads the indices anyway)
+    uint32_t min_index = 0;
+    bool has_index_range = false;
     const uint32_t index_bytes = static_cast<uint32_t>(index_size * count);
     // the game may already have reused its index memory so prefer the copy taken when the scene was kicked
     const uint8_t *index_copy = use_memory_mapping ? renderer::stream_snapshot_get(index_snapshot, index_bytes) : nullptr;
     if (index_copy) {
-        if (context.state.mapping_method == MappingMethod::DoubleBuffer) {
+        if (context.state.mapping_method == MappingMethod::DoubleBuffer && count > 0) {
             if (format == SCE_GXM_INDEX_FORMAT_U16) {
                 const uint16_t *data = reinterpret_cast<const uint16_t *>(index_copy);
-                max_index = *std::max_element(&data[0], &data[count]);
+                const auto [lo, hi] = std::minmax_element(&data[0], &data[count]);
+                min_index = *lo;
+                max_index = *hi;
             } else {
                 const uint32_t *data = reinterpret_cast<const uint32_t *>(index_copy);
-                max_index = *std::max_element(&data[0], &data[count]);
+                const auto [lo, hi] = std::minmax_element(&data[0], &data[count]);
+                min_index = *lo;
+                max_index = *hi;
             }
+            has_index_range = true;
         }
         if (!context.vertex_stream_ring_buffer.handle())
             context.vertex_stream_ring_buffer.create();
@@ -759,16 +839,25 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         if (context.state.mapping_method == MappingMethod::DoubleBuffer) {
             TrappedBuffer *trapped_buffer = context.state.buffer_trapping.access_buffer(indices.address(), count * index_size, mem);
             if (trapped_buffer->extra == ~0) {
-                // store the max element in extra
+                // store the max element in extra, the min in extra_min
                 if (format == SCE_GXM_INDEX_FORMAT_U16) {
                     uint16_t *data = indices.cast<uint16_t>().get(mem);
-                    trapped_buffer->extra = *std::max_element(&data[0], &data[count]);
+                    const auto [lo, hi] = std::minmax_element(&data[0], &data[count]);
+                    trapped_buffer->extra_min = *lo;
+                    trapped_buffer->extra = *hi;
                 } else {
                     uint32_t *data = indices.cast<uint32_t>().get(mem);
-                    trapped_buffer->extra = *std::max_element(&data[0], &data[count]);
+                    const auto [lo, hi] = std::minmax_element(&data[0], &data[count]);
+                    trapped_buffer->extra_min = *lo;
+                    trapped_buffer->extra = *hi;
                 }
             }
             max_index = trapped_buffer->extra;
+            // a 32-bit max of ~0 is also the "not computed" mark: leave such a draw to the driver
+            if (trapped_buffer->extra != ~0) {
+                min_index = trapped_buffer->extra_min;
+                has_index_range = true;
+            }
         }
         context.render_cmd.bindIndexBuffer(buffer, offset, index_type);
     } else {
@@ -787,6 +876,13 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     }
     context.last_draw_pipeline = context.current_pipeline;
 
+    // malisx2: the driver skips reading the indices back
+    const auto set_index_range = [&]() {
+        if (has_index_range && context.state.cmd_set_index_range_malisx2)
+            context.state.cmd_set_index_range_malisx2(static_cast<VkCommandBuffer>(context.render_cmd), 0, count, min_index, max_index);
+    };
+
+    set_index_range();
     context.render_cmd.drawIndexed(count, instance_count, 0, 0, 0);
 
     if (vertex_stores && context.vertex_store_pipeline) {
@@ -795,6 +891,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         context.render_cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, context.vertex_store_pipeline);
         context.render_cmd.setViewport(0, vk::Viewport{ static_cast<float>(area.offset.x), static_cast<float>(area.offset.y), grid, grid, 0.0f, 1.0f });
         context.render_cmd.setScissor(0, area);
+        set_index_range();
         context.render_cmd.drawIndexed(count, instance_count, 0, 0, 0);
         context.render_cmd.setViewport(0, context.viewport);
         context.render_cmd.setScissor(0, context.scissor);
