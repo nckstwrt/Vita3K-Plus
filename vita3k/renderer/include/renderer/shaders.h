@@ -37,6 +37,9 @@ struct State;
 
 // Shaders.
 bool get_shaders_cache_hashs(State &renderer);
+// Vulkan: create again in the background every pipeline earlier sessions of the game created
+// (vulkan/pipeline_recipes.cpp), so none compiles during play after a driver or translator change
+void start_pipeline_recipe_replay(State &renderer);
 void save_shaders_cache_hashs(State &renderer, std::vector<ShadersHash> &shaders_cache_hashs);
 std::string load_glsl_shader(const SceGxmProgram &program, const FeatureState &features, const shader::Hints &hints, bool maskupdate, const fs::path &shader_cache_path, const fs::path &shader_log_path, const std::string &shader_version, bool shader_cache);
 std::vector<uint32_t> load_spirv_shader(const SceGxmProgram &program, const FeatureState &features, bool is_vulkan, const shader::Hints &hints, bool maskupdate, const fs::path &shader_cache_path, const fs::path &shader_log_path, const std::string &shader_version, bool shader_cache);

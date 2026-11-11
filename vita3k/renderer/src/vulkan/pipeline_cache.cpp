@@ -545,6 +545,7 @@ void PipelineCache::write_pipeline_cache(const std::vector<uint64_t> &keys) {
 }
 
 void PipelineCache::cleanup() {
+    stop_recipe_replay();
     stop_warm_threads();
     wait_for_background_save();
     warm_render_pass = nullptr;
@@ -776,11 +777,13 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
         // Save shader cache hashes
         // vertex and fragment shaders are not linked together so no need to associate them
         Sha256Hash empty_hash{};
-        if (is_vertex) {
-            state.shaders_cache_hashs.push_back({ hash, empty_hash });
-        } else {
-            state.shaders_cache_hashs.push_back({ empty_hash, hash });
+        if (listed_shader_hashes.empty()) {
+            for (const ShadersHash &listed : state.shaders_cache_hashs)
+                listed_shader_hashes.insert({ listed.frag, listed.vert });
         }
+        const ShadersHash entry = is_vertex ? ShadersHash{ hash, empty_hash } : ShadersHash{ empty_hash, hash };
+        if (listed_shader_hashes.insert({ entry.frag, entry.vert }).second)
+            state.shaders_cache_hashs.push_back(entry);
     }
 
     vk::PipelineShaderStageCreateInfo shader_stage_info{
@@ -937,6 +940,14 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool depth
     }
 
     render_passes_map[format] = state.device.createRenderPass(pass_info);
+    {
+        // what it was made from, for the pipeline recipes (pipeline_recipes.cpp)
+        std::lock_guard<std::mutex> guard(render_pass_params_mutex);
+        render_pass_params[static_cast<VkRenderPass>(render_passes_map[format])] = RenderPassParams{
+            .format = format, .depth_load = depth_load, .stencil_load = stencil_load, .force_store = force_store,
+            .is_color_transient = is_color_transient, .no_color = no_color, .has_raw = has_raw_attachment
+        };
+    }
 
     {
         // Remember exactly how this render pass was built. A pipeline is only ever rejected
@@ -1929,6 +1940,8 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
             texhint_it->second = now;
         }
     }
+
+    record_recipe(key, type, render_pass, *vertex_program_binding, *fragment_program_binding, record, static_cast<bool>(record.color_surface.data), context.shader_hints, has_casts);
 
     const bool compile_pipeline_async = !already_in_cache && use_async_compilation && !must_not_skip_draw(record, consider_for_async);
 

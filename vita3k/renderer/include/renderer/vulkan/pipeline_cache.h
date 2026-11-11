@@ -30,6 +30,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -72,6 +73,12 @@ struct VertexStreamLayout {
     uint32_t copy_count = 0;
 };
 
+// what retrieve_render_pass made a render pass from (pipeline recipes, pipeline_recipes.cpp)
+struct PipelineRenderPassParams {
+    vk::Format format = vk::Format::eUndefined;
+    bool depth_load = false, stencil_load = false, force_store = false, is_color_transient = false, no_color = false, has_raw = false;
+};
+
 class PipelineCache {
     friend struct VKState;
 
@@ -112,6 +119,9 @@ private:
 
     // only used when accessing the shaders map
     std::mutex shaders_mutex;
+    // the (vertex, fragment) entries already in state.shaders_cache_hashs, under shaders_mutex:
+    // a shader created again in a later session (from the SPIR-V cache) is not listed twice
+    std::set<std::pair<Sha256Hash, Sha256Hash>> listed_shader_hashes;
     // because of multithreading, we want the pointers to remain stable
     unordered_map_stable<Sha256Hash, vk::ShaderModule> shaders;
     unordered_map_stable<uint64_t, vk::Pipeline> pipelines;
@@ -129,6 +139,16 @@ private:
     };
     moodycamel::BlockingConcurrentQueue<WarmRequest *> warm_queue;
     std::vector<std::thread> warm_threads;
+
+    // pipeline recipes (pipeline_recipes.cpp)
+    std::mutex render_pass_params_mutex;
+    std::unordered_map<VkRenderPass, PipelineRenderPassParams> render_pass_params;
+    std::mutex recipes_mutex;
+    std::unordered_set<uint64_t> recipes_recorded;
+    std::unordered_set<uint64_t> recipe_programs_written;
+    bool recipes_file_checked = false;
+    std::vector<std::thread> replay_threads;
+    std::atomic<bool> replay_stopping{ false };
     std::atomic<bool> warm_enabled{ false };
     std::atomic<bool> warm_stopping{ false };
     std::mutex warm_mutex;
@@ -241,6 +261,19 @@ public:
     void warm_program_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment);
 
     vk::RenderPass retrieve_render_pass(vk::Format format, bool depth_load, bool stencil_load, bool force_store, bool is_color_transient, bool no_color = false, bool has_raw_attachment = false);
+
+    // Pipeline recipes (pipeline_recipes.cpp): everything a pipeline was created from, saved per game the first
+    // time a draw creates it, outside the shader cache. At boot every recipe is created again on worker threads,
+    // so a driver update (whose pipeline cache the old one cannot fill) or a translator change compiles before
+    // the game draws with the pipeline instead of in the middle of play.
+    using RenderPassParams = PipelineRenderPassParams;
+    // recipes are recorded and replayed with malisx2 only so far (a driver whose pipeline cache every
+    // driver build invalidates); other drivers keep the shader cache alone
+    bool recipes_enabled() const;
+    void record_recipe(uint64_t key, SceGxmPrimitiveType type, vk::RenderPass render_pass, const ProgramBinding &vertex_binding, const ProgramBinding &fragment_binding,
+        const GxmRecordState &record, bool has_color_surface_data, const shader::Hints &hints, bool has_casts);
+    void start_recipe_replay();
+    void stop_recipe_replay();
     vk::Pipeline retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem, bool vertex_store_pass = false, bool hw_depth_cull = false);
 
     vk::ShaderModule precompile_shader(const Sha256Hash &hash, bool search_first = true);

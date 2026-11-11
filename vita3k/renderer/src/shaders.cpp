@@ -26,10 +26,16 @@
 #include <util/fs.h>
 #include <util/log.h>
 
+#include <set>
 #include <string>
 #include <vector>
 
 namespace renderer {
+
+void start_pipeline_recipe_replay(State &renderer) {
+    if (renderer.current_backend == Backend::Vulkan)
+        dynamic_cast<vulkan::VKState &>(renderer).pipeline_cache.start_recipe_replay();
+}
 
 bool get_shaders_cache_hashs(State &renderer) {
     const std::string hash_file_name = fmt::format("hashs-{}.dat", (renderer.current_backend == Backend::OpenGL) ? "gl" : "vk");
@@ -64,7 +70,9 @@ bool get_shaders_cache_hashs(State &renderer) {
         dynamic_cast<vulkan::VKState &>(renderer).pipeline_cache.read_pipeline_cache();
     }
 
-    // Read Hashs info value
+    // Read Hashs info value. Lists written before entries were kept unique can hold each shader
+    // once per session that created it: read each entry once.
+    std::set<std::pair<Sha256Hash, Sha256Hash>> seen;
     for (size_t a = 0; a < size; a++) {
         auto read = [&shaders_hashs]() {
             Sha256Hash hash;
@@ -78,7 +86,8 @@ bool get_shaders_cache_hashs(State &renderer) {
         hash.frag = read();
         hash.vert = read();
 
-        renderer.shaders_cache_hashs.push_back({ hash.frag, hash.vert });
+        if (seen.insert({ hash.frag, hash.vert }).second)
+            renderer.shaders_cache_hashs.push_back({ hash.frag, hash.vert });
     }
 
     shaders_hashs.close();
