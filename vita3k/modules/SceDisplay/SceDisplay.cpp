@@ -27,6 +27,9 @@
 #include <util/types.h>
 
 #include <util/tracy.h>
+
+#include <atomic>
+#include <chrono>
 TRACY_MODULE_NAME(SceDisplay);
 
 static int display_wait(EmuEnvState &emuenv, SceUID thread_id, int vcount, const bool is_since_setbuf, const bool is_cb) {
@@ -195,7 +198,39 @@ EXPORT(SceInt32, sceDisplayGetRefreshRate, float *pFps) {
 
 EXPORT(SceInt32, sceDisplayGetVcount) {
     TRACY_FUNC(sceDisplayGetVcount);
-    return static_cast<SceInt32>(emuenv.display.vblank_count.load()) & 0xFFFF;
+    // A thread that polls the vcount in a tight loop (WipEout 2048's flip callback, on the
+    // highest-priority SceGxmDisplayQueue thread) holds a guest core the whole time, and with
+    // accurate scheduling the game's other threads only run when its time slice ends. Once a thread
+    // has seen the same value SPIN_POLLS times in a row, each less than SPIN_GAP_US after the last,
+    // it waits for the next vblank instead: the value it is waiting for cannot change before then.
+    // Each guest thread runs on its own host thread, so the poll state is thread_local.
+    constexpr int SPIN_POLLS = 64;
+    constexpr int64_t SPIN_GAP_US = 50;
+    thread_local uint64_t last_value = ~0ull;
+    thread_local int polls = 0;
+    thread_local std::chrono::steady_clock::time_point last_poll{};
+
+    const uint64_t vcount = emuenv.display.vblank_count.load();
+    const auto now = std::chrono::steady_clock::now();
+    const bool tight = std::chrono::duration_cast<std::chrono::microseconds>(now - last_poll).count() < SPIN_GAP_US;
+    last_poll = now;
+    if (vcount != last_value || !tight) {
+        last_value = vcount;
+        polls = 0;
+        return static_cast<SceInt32>(vcount) & 0xFFFF;
+    }
+    if (++polls < SPIN_POLLS)
+        return static_cast<SceInt32>(vcount) & 0xFFFF;
+
+    polls = 0;
+    static std::atomic<uint64_t> spin_waits{ 0 };
+    if (((spin_waits.fetch_add(1, std::memory_order_relaxed) + 1) & 1023) == 1)
+        LOG_INFO("[VCOUNT] thread {} polls sceDisplayGetVcount in a tight loop: waiting for the next vblank instead ({} so far)", thread_id, spin_waits.load(std::memory_order_relaxed));
+    wait_vblank(emuenv.display, emuenv.kernel, emuenv.kernel.get_thread(thread_id), vcount + 1, false);
+    const uint64_t woke = emuenv.display.vblank_count.load();
+    last_value = woke;
+    last_poll = std::chrono::steady_clock::now();
+    return static_cast<SceInt32>(woke) & 0xFFFF;
 }
 
 EXPORT(int, sceDisplayGetVcountInternal) {
