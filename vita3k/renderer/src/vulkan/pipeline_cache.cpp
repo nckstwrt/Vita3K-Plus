@@ -179,8 +179,14 @@ void PipelineCache::init(bool support_rasterized_order_access) {
             .stageFlags = vk::ShaderStageFlagBits::eFragment,
         };
 
+        // with memory mapping, 2 and 3 are the uniform preload UBOs when they are on
+        const bool preload_ubo = state.features.enable_memory_mapping && state.features.uniform_preload_ubo;
+        if (preload_ubo) {
+            layout_bindings[2].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
+            layout_bindings[3].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
+        }
         vk::DescriptorSetLayoutCreateInfo descriptor_info{
-            .bindingCount = state.features.enable_memory_mapping ? 2U : 4U,
+            .bindingCount = (state.features.enable_memory_mapping && !preload_ubo) ? 2U : 4U,
             .pBindings = layout_bindings.data()
         };
         uniforms_layout = state.device.createDescriptorSetLayout(descriptor_info);
@@ -539,6 +545,7 @@ void PipelineCache::write_pipeline_cache(const std::vector<uint64_t> &keys) {
 }
 
 void PipelineCache::cleanup() {
+    stop_recipe_replay();
     stop_warm_threads();
     wait_for_background_save();
     warm_render_pass = nullptr;
@@ -664,6 +671,16 @@ static Sha256Hash shader_cache_key(const SceGxmProgram *program, const Sha256Has
         hash[6] ^= 0x75;
         version_suffix += "u";
     }
+    if (features.enable_memory_mapping && (features.uniform_preload_ubo & (is_vertex ? 1 : 2)) && !shader::get_uniform_preload_layout(*program).empty()) {
+        // "p" shaders (no ArrayStride on the preload array) read garbage: never reuse them
+        hash[8] ^= 0x9E;
+        version_suffix += "p2";
+    }
+    if (is_vertex && hints.hw_depth_cull) {
+        // no eye/near/far clip distances: the driver culls those fragments (vkCmdSetDepthCullMALISX2)
+        hash[10] ^= 0xD5;
+        version_suffix += "d";
+    }
     if (is_vertex && shader::emulates_vertex_stores(*program, features)) {
         hash[7] ^= hints.vertex_store_pass ? 0x5E : 0x4E;
         version_suffix += hints.vertex_store_pass ? fmt::format("w{}", features.vertex_store_slots) : std::string("n");
@@ -760,11 +777,13 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
         // Save shader cache hashes
         // vertex and fragment shaders are not linked together so no need to associate them
         Sha256Hash empty_hash{};
-        if (is_vertex) {
-            state.shaders_cache_hashs.push_back({ hash, empty_hash });
-        } else {
-            state.shaders_cache_hashs.push_back({ empty_hash, hash });
+        if (listed_shader_hashes.empty()) {
+            for (const ShadersHash &listed : state.shaders_cache_hashs)
+                listed_shader_hashes.insert({ listed.frag, listed.vert });
         }
+        const ShadersHash entry = is_vertex ? ShadersHash{ hash, empty_hash } : ShadersHash{ empty_hash, hash };
+        if (listed_shader_hashes.insert({ entry.frag, entry.vert }).second)
+            state.shaders_cache_hashs.push_back(entry);
     }
 
     vk::PipelineShaderStageCreateInfo shader_stage_info{
@@ -921,6 +940,14 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool depth
     }
 
     render_passes_map[format] = state.device.createRenderPass(pass_info);
+    {
+        // what it was made from, for the pipeline recipes (pipeline_recipes.cpp)
+        std::lock_guard<std::mutex> guard(render_pass_params_mutex);
+        render_pass_params[static_cast<VkRenderPass>(render_passes_map[format])] = RenderPassParams{
+            .format = format, .depth_load = depth_load, .stencil_load = stencil_load, .force_store = force_store,
+            .is_color_transient = is_color_transient, .no_color = no_color, .has_raw = has_raw_attachment
+        };
+    }
 
     {
         // Remember exactly how this render pass was built. A pipeline is only ever rejected
@@ -1764,7 +1791,7 @@ void PipelineCache::bisect_pipeline_failure(const vk::GraphicsPipelineCreateInfo
     LOG_CRITICAL("=== END KNOCKOUT BISECT ===");
 }
 
-vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem, bool vertex_store_pass) {
+vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem, bool vertex_store_pass, bool hw_depth_cull) {
     const GxmRecordState &record = context.record;
     uint64_t key = hash_pipeline_record(record);
     uint64_t raw_key = XXH3_64bits(&record, record_pipeline_len);
@@ -1797,6 +1824,10 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     if (vertex_store_pass) {
         key ^= 0x9E3779B97F4A7C15ull;
         raw_key ^= 0x9E3779B97F4A7C15ull;
+    }
+    if (hw_depth_cull) {
+        key ^= 0xD6E8FEB86659FD93ull;
+        raw_key ^= 0xD6E8FEB86659FD93ull;
     }
 
     const uint32_t cast_units = context.curr_frag_ublock.cast_sampler_bits | context.curr_frag_ublock.cast_phase_bits | context.curr_frag_ublock.raw_cast_bits;
@@ -1861,6 +1892,7 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     context.shader_hints.color_format = record.color_surface.colorFormat;
     context.shader_hints.attributes = &vertex_program_binding->attributes;
     context.shader_hints.vertex_store_pass = vertex_store_pass;
+    context.shader_hints.hw_depth_cull = hw_depth_cull;
     context.shader_hints.output_register_format = fragment_program_binding->fragment_program
         ? fragment_program_binding->fragment_program->output_register_format
         : SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED;
@@ -1908,6 +1940,8 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
             texhint_it->second = now;
         }
     }
+
+    record_recipe(key, type, render_pass, *vertex_program_binding, *fragment_program_binding, record, static_cast<bool>(record.color_surface.data), context.shader_hints, has_casts);
 
     const bool compile_pipeline_async = !already_in_cache && use_async_compilation && !must_not_skip_draw(record, consider_for_async);
 
@@ -2114,6 +2148,8 @@ void PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
         .attributes = &vertex_binding.attributes,
         .color_format = SCE_GXM_COLOR_FORMAT_U8U8U8U8_ABGR,
     };
+    // the variant most draws take when the driver culls near and far fragments itself (scene.cpp)
+    hints.hw_depth_cull = state.cmd_set_depth_cull_malisx2 != nullptr;
     std::fill_n(hints.vertex_textures, SCE_GXM_MAX_TEXTURE_UNITS, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
     std::fill_n(hints.fragment_textures, SCE_GXM_MAX_TEXTURE_UNITS, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
     hints.output_register_format = fragment_binding.fragment_program->output_register_format;

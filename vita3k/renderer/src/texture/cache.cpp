@@ -31,6 +31,11 @@
 #include <algorithm>
 #include <cstring>
 #include <numeric>
+
+#define STB_DXT_IMPLEMENTATION
+#include <stb_dxt.h>
+
+#include "band_pool.h"
 #ifdef _WIN32
 #include <excpt.h> // EXCEPTION_EXECUTE_HANDLER for the SEH-guarded texture reads
 #endif
@@ -416,6 +421,24 @@ TextureCache::ContentKey TextureCache::registered_key(const TextureCacheInfo &in
     return content_key(std::bit_cast<TextureGxmDataRepr>(info.texture), info.registered_hash, info.registered_palette_hash);
 }
 
+// A 4 bpp PVRTC texture (PVRTC-I or -II) none of whose texels can be transparent: every word has its colours in
+// opaque mode (bit 31, and bit 15 for colour A of PVRTC-I) and its modulation mode bit clear, without which a
+// modulation value can punch through alpha (pvrt-dec.cpp unpackModulations). Alpha is interpolated between the
+// colours of neighbouring words, all opaque, so every decoded texel has full alpha.
+static bool pvrt4_is_opaque(const SceGxmTextureBaseFormat base_format, const uint8_t *data, const size_t bytes) {
+    const bool is_ii = base_format == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII4BPP;
+    if (!data || bytes < 8 || (!is_ii && base_format != SCE_GXM_TEXTURE_BASE_FORMAT_PVRT4BPP))
+        return false;
+    const uint32_t opaque_bits = is_ii ? 0x80000000u : 0x80008000u;
+    for (size_t i = 0; i + 8 <= bytes; i += 8) {
+        uint32_t color;
+        memcpy(&color, data + i + 4, sizeof(color));
+        if ((color & opaque_bits) != opaque_bits || (color & 1))
+            return false;
+    }
+    return true;
+}
+
 void TextureCache::remember_content(TextureCacheInfo &info) {
     forget_content(info);
     if (!info.use_hash || info.texture_size == 0)
@@ -459,6 +482,10 @@ void TextureCache::erase_key(const TextureCacheInfo &info) {
 bool TextureCache::init(const bool hashless_texture_cache, const fs::path &texture_folder, std::string_view game_id, const size_t sampler_cache_size) {
     use_protect = hashless_texture_cache;
     content_lookup.clear();
+
+    // converted PVRTC mips on disk, per game: opened at the first PVRTC upload, once the game is known
+    bc_disk.reset();
+    bc_disk_tried = false;
 
     // initialize the texture queue
     texture_queue.init(TextureCacheSize);
@@ -666,6 +693,39 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
             if (!is_swizzled)
                 LOG_ERROR_ONCE("Unhandled non-swizzled PVRT format, please report it to the developers");
 
+            {
+                // a mip converted before (this session or an earlier one) is read back instead of decoded and encoded again
+                // (BcDiskCache): the key is the source bytes and everything the conversion depends on
+                bc_key = 0;
+                if (pvrt_as_bc3 && !bc_disk_tried) {
+                    bc_disk_tried = true;
+                    const fs::path dir = disk_cache_dir();
+                    auto disk = std::make_unique<texture::BcDiskCache>();
+                    if (!dir.empty() && disk->open(dir))
+                        bc_disk = std::move(disk);
+                    else
+                        LOG_WARN("[BCCACHE] no disk cache for converted textures (\"{}\")", dir.string());
+                }
+                if (pvrt_as_bc3 && bc_disk) {
+                    const bool as_bc1 = pvrt_opaque_as_bc1 && current_info && current_info->pvrt_opaque;
+                    const size_t src_size = (static_cast<size_t>(pixels_per_stride) * memory_height * gxm::bits_per_pixel(base_format)) / 8;
+                    constexpr uint64_t conversion_version = 1;
+                    const uint64_t seed = (conversion_version << 60) ^ (static_cast<uint64_t>(base_format) << 24) ^ (static_cast<uint64_t>(pixels_per_stride) << 40)
+                        ^ (static_cast<uint64_t>(memory_height) << 8) ^ (as_bc1 ? 0x5A5A5A5Aull : 0x3C3C3C3Cull);
+                    bc_key = XXH3_64bits_withSeed(pixels, src_size, seed) | 1;
+                    const uint32_t bc_size = (pixels_per_stride / 4) * (memory_height / 4) * (as_bc1 ? 8 : 16);
+                    if (bc_disk->lookup(bc_key, bc_size, texture_data_bc)) {
+                        pixels = texture_data_bc.data();
+                        bpp = as_bc1 ? 4 : 8;
+                        bytes_per_pixel = 1;
+                        upload_format = as_bc1 ? SCE_GXM_TEXTURE_BASE_FORMAT_UBC1 : SCE_GXM_TEXTURE_BASE_FORMAT_UBC3;
+                        ++(as_bc1 ? stat_bc1_uploads : stat_bc3_uploads);
+                        stat_bc_disk_hits++;
+                        break;
+                    }
+                }
+            }
+
             texture_data_decompressed.resize(pixels_per_stride * memory_height * 4);
             // this actually also unswizzles the texture
             decompress_compressed_texture(base_format, texture_data_decompressed.data(), pixels, pixels_per_stride, memory_height);
@@ -673,6 +733,42 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
             bpp = 32;
             upload_format = SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8U8;
             pixels = texture_data_decompressed.data();
+            if (pvrt_as_bc3) {
+                // PVRTC blocks are 4x4 or 8x4, so the decoded mip is a whole number of 4x4 BC blocks;
+                // the rows of blocks keep the decoded stride (pixels_per_stride texels)
+                const uint32_t blocks_x = pixels_per_stride / 4;
+                const uint32_t blocks_y = memory_height / 4;
+                // an opaque texture (pvrt4_is_opaque, checked when it was configured) as BC1, 8 bytes a block
+                const bool as_bc1 = pvrt_opaque_as_bc1 && current_info && current_info->pvrt_opaque;
+                const size_t block_bytes = as_bc1 ? 8 : 16;
+                texture_data_bc.resize(static_cast<size_t>(blocks_x) * blocks_y * block_bytes);
+                const uint8_t *rgba = texture_data_decompressed.data();
+                uint8_t *bc = texture_data_bc.data();
+                const auto encode_rows = [=](const int by_lo, const int by_hi) {
+                    uint8_t block[16 * 4];
+                    for (uint32_t by = by_lo; by < static_cast<uint32_t>(by_hi); by++) {
+                        for (uint32_t bx = 0; bx < blocks_x; bx++) {
+                            for (uint32_t row = 0; row < 4; row++)
+                                memcpy(block + row * 16, rgba + ((static_cast<size_t>(by) * 4 + row) * pixels_per_stride + bx * 4) * 4, 16);
+                            stb_compress_dxt_block(bc + (static_cast<size_t>(by) * blocks_x + bx) * block_bytes, block, as_bc1 ? 0 : 1, STB_DXT_NORMAL);
+                        }
+                    }
+                };
+                // small mips are not worth waking the band threads for
+                if (blocks_x * blocks_y >= 32 * 32)
+                    ::renderer::texture::BandPool::get().run(0, static_cast<int>(blocks_y), encode_rows);
+                else
+                    encode_rows(0, static_cast<int>(blocks_y));
+                pixels = texture_data_bc.data();
+                bpp = as_bc1 ? 4 : 8;
+                bytes_per_pixel = 1;
+                upload_format = as_bc1 ? SCE_GXM_TEXTURE_BASE_FORMAT_UBC1 : SCE_GXM_TEXTURE_BASE_FORMAT_UBC3;
+                ++(as_bc1 ? stat_bc1_uploads : stat_bc3_uploads);
+                if (bc_key) {
+                    bc_disk->store(bc_key, texture_data_bc.data(), static_cast<uint32_t>(texture_data_bc.size()));
+                    stat_bc_disk_stores++;
+                }
+            }
             break;
         case SCE_GXM_TEXTURE_BASE_FORMAT_U8U3U3U2:
             // Convert U8U3U3U2 to U8U8U8U8
@@ -879,13 +975,17 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
         // (for example, uniform buffer value and texture data got mixed, so page faults are triggered too many, it's not always good).
         // This works under the assumption that once this big enough texture decided to modify. It will have to modify either all of its data,
         // or replace with an entire new texture.
+        // The GPU cannot render into a block-compressed format, so only the CPU writes PVRTC and BCn texture
+        // data: write-protecting its pages catches every change, and such a texture is not rehashed each scene
+        // (a game that streams them, WipEout 2048, spends a quarter of the renderer thread hashing otherwise).
+        const bool cpu_written_only = gxm::is_pvrt_format(key_base_format) || gxm::is_bcn_format(key_base_format);
         bool should_use_hash = true;
-        if (use_protect && texture_size >= mem.host_page_size * 4) {
+        if ((use_protect || cpu_written_only) && texture_size >= mem.host_page_size * 4) {
             range_protect_begin = align(gxm_texture.data_addr << 2, mem.host_page_size);
             range_protect_end = align_down((gxm_texture.data_addr << 2) + texture_size, mem.host_page_size);
 
             if (range_protect_end - range_protect_begin >= mem.host_page_size * 4) {
-                should_use_hash = protect_only_is_sufficient;
+                should_use_hash = protect_only_is_sufficient && !cpu_written_only;
             }
         }
 
@@ -1003,6 +1103,18 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
 
     if (upload && !importing_texture && info->is_imported)
         configure = true;
+
+    if ((upload || configure) && pvrt_opaque_as_bc1 && (key_base_format == SCE_GXM_TEXTURE_BASE_FORMAT_PVRT4BPP || key_base_format == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII4BPP)) {
+        // the image is BC1 or BC3 by the content's opacity: new content of the other kind needs another image
+        const bool opaque = pvrt4_is_opaque(key_base_format, Ptr<const uint8_t>(gxm_texture.data_addr << 2).get(mem), info->texture_size);
+        if (opaque != info->pvrt_opaque) {
+            info->pvrt_opaque = opaque;
+            configure = true;
+        }
+    }
+
+    if (upload)
+        (configure ? stat_miss_uploads : stat_change_uploads)++;
 
     select(index, gxm_texture);
 

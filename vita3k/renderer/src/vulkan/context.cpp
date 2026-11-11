@@ -399,6 +399,30 @@ void VKContext::start_recording(bool first_in_scene) {
         render_target->last_used_frame = frame_timestamp;
     }
 
+    // A game that renders scene after scene without a flip (a load) would otherwise get a new pair of
+    // command buffers per scene, all holding their command memory until the next flip resets the
+    // frame's pools. Past STALL_RECYCLE_SCENES, wait for the GPU work submitted this frame (one queue,
+    // so that covers every earlier scene) and record into the first ones again; beginning a command
+    // buffer resets it. Fences are handled exactly as below.
+    constexpr uint32_t STALL_RECYCLE_SCENES = 32;
+    const bool recycle = render_target->cmd_buffer_idx == render_target->cmd_buffers[state.current_frame_idx].size()
+        && render_target->cmd_buffer_idx >= STALL_RECYCLE_SCENES && cmdbuffers_to_submit.empty();
+    if (recycle && !state.frame().rendered_fences.empty()) {
+        if (state.device.waitForFences(state.frame().rendered_fences, VK_TRUE, 5'000'000'000ULL) != vk::Result::eSuccess) {
+            LOG_ERROR("Scene command buffers of a frame without a flip: fences did not signal within 5 s, allocating more");
+        } else {
+            static uint64_t recycles = 0;
+            if (((++recycles) & 63) == 1)
+                LOG_INFO("[STALL] {} scenes without a flip on one render target: reusing its command buffers ({} so far)", render_target->cmd_buffer_idx, recycles);
+            render_target->cmd_buffer_idx = 0;
+            vk::FenceCreateInfo fence_info{};
+            auto fence_insert_it = render_target->fences.begin() + render_target->fence_idx;
+            if (!first_in_scene)
+                fence_insert_it++;
+            render_target->fences.insert(fence_insert_it, state.device.createFence(fence_info));
+        }
+    }
+
     // safety check
     if (render_target->cmd_buffer_idx == render_target->cmd_buffers[state.current_frame_idx].size()) {
         LOG_WARN_ONCE("Render Target is using more scenes per frame than what was planned!");
@@ -438,6 +462,8 @@ void VKContext::start_recording(bool first_in_scene) {
     };
     render_cmd.begin(begin_info);
     prerender_cmd.begin(begin_info);
+    // a command buffer starts with the driver's depth cull at the pipeline's state
+    depth_cull_flags = 0;
 
     is_recording = true;
 

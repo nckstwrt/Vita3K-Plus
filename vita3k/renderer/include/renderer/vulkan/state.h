@@ -129,6 +129,7 @@ struct VKState : public renderer::State {
     void teardown_dormant(MemState &mem, Address address);
     Address oldest_dormant() const;
     std::vector<Address> dormant_overlapping(Address start, Address end) const;
+    void log_memory_breakdown();
 
     // used with double buffer memory trapping
     BufferTrapping buffer_trapping;
@@ -152,6 +153,16 @@ struct VKState : public renderer::State {
     bool is_mesa_turnip = false;
     // Turnip Adreno 6xx fix: a draw that switches pipeline waits for the draws before it
     bool wait_on_pipeline_switch = false;
+    // malisx2 on Mali Bifrost: vkCmdSetIndexRangeMALISX2 gives the driver the index range of the
+    // next indexed draw, which it otherwise reads back from the index buffer on the CPU
+    using PFN_CmdSetIndexRangeMALISX2 = void(VKAPI_PTR *)(VkCommandBuffer commandBuffer, uint32_t firstIndex,
+        uint32_t indexCount, uint32_t minIndex, uint32_t maxIndex);
+    PFN_CmdSetIndexRangeMALISX2 cmd_set_index_range_malisx2 = nullptr;
+    // malisx2: vkCmdSetDepthCullMALISX2 culls fragments in front of the near plane and (optionally) behind
+    // the far plane in fixed function while depth clamp clamps the rest. With it a vertex program needs no
+    // eye/near/far clip distances, which Mali Bifrost can only apply as a fragment discard in every draw
+    using PFN_CmdSetDepthCullMALISX2 = void(VKAPI_PTR *)(VkCommandBuffer commandBuffer, uint32_t flags);
+    PFN_CmdSetDepthCullMALISX2 cmd_set_depth_cull_malisx2 = nullptr;
     // bound guest write-backs to the render-target extent the surface was rendered with
     bool surface_sync_clamp_rt = true;
     LinuxSurfaceType linux_surface_type = LinuxSurfaceType::Unknown;

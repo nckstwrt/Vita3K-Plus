@@ -36,6 +36,7 @@
 #include <chrono>
 #include <future>
 #include <util/log.h>
+#include <util/mem_snapshot.h>
 #include <util/tracy.h>
 
 namespace renderer {
@@ -190,7 +191,12 @@ struct WorldStopScope {
 };
 
 inline constexpr bool DORMANT_MAPPINGS = true;
-inline constexpr uint64_t DORMANT_BUDGET_BYTES = 128ull * 1024 * 1024;
+// A dormant mapping's Double Buffer copy is device memory the system cannot swap or reclaim, on top of
+// the guest's own copy: a low-memory device keeps far fewer of them.
+static uint64_t dormant_budget_bytes() {
+    static const uint64_t budget = mem_diag::low_memory_device() ? 32ull * 1024 * 1024 : 128ull * 1024 * 1024;
+    return budget;
+}
 static std::atomic<uint32_t> g_dormant_count{ 0 };
 
 inline constexpr bool DORMANT_WAIT_PENDING_GPU_USE = true;
@@ -314,7 +320,7 @@ COMMAND(handle_memory_unmap) {
         wait_for_pending_gpu_use(renderer, vk, addr.address());
         if (vk.make_dormant(addr.address())) {
             g_dormant_count.store(static_cast<uint32_t>(vk.dormant_mappings.size()), std::memory_order_release);
-            evict_dormant_to_budget(renderer, mem, caller_thread, DORMANT_BUDGET_BYTES, "budget");
+            evict_dormant_to_budget(renderer, mem, caller_thread, dormant_budget_bytes(), "budget");
             complete_command(renderer, helper, 0);
             return;
         }
@@ -375,6 +381,11 @@ bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProg
     layout_ssbo_offset_from_uniform_buffer_sizes(fp->uniform_buffer_sizes, fp->uniform_buffer_data_offsets, fp->max_total_uniform_buffer_storage);
     fp->dynamic_uniform_buffers = shader::usse::get_dynamic_uniform_buffers(program);
     fp->written_uniform_buffers = shader::usse::get_written_uniform_buffers(program);
+    if (state.features.enable_memory_mapping && (state.features.uniform_preload_ubo & 2) && state.current_backend == Backend::Vulkan) {
+        fp->uniform_preload = shader::get_uniform_preload_layout(program);
+        if (!fp->uniform_preload.empty())
+            fp->uniform_preload_vec4 = fp->uniform_preload.back().vec4_offset + (fp->uniform_preload.back().words + 3) / 4;
+    }
     fp->textures_used = gxp::get_textures_used(program);
     fp->texture_count = std::bit_width(fp->textures_used.to_ulong());
 
@@ -410,6 +421,11 @@ bool create(std::unique_ptr<VertexProgram> &vp, State &state, const SceGxmProgra
     layout_ssbo_offset_from_uniform_buffer_sizes(vp->uniform_buffer_sizes, vp->uniform_buffer_data_offsets, vp->max_total_uniform_buffer_storage);
     vp->dynamic_uniform_buffers = shader::usse::get_dynamic_uniform_buffers(program);
     vp->written_uniform_buffers = shader::usse::get_written_uniform_buffers(program);
+    if (state.features.enable_memory_mapping && (state.features.uniform_preload_ubo & 1) && state.current_backend == Backend::Vulkan) {
+        vp->uniform_preload = shader::get_uniform_preload_layout(program);
+        if (!vp->uniform_preload.empty())
+            vp->uniform_preload_vec4 = vp->uniform_preload.back().vec4_offset + (vp->uniform_preload.back().words + 3) / 4;
+    }
     vp->textures_used = gxp::get_textures_used(program);
     vp->texture_count = std::bit_width(vp->textures_used.to_ulong());
 

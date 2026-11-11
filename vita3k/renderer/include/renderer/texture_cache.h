@@ -18,6 +18,7 @@
 #pragma once
 
 #include <gxm/types.h>
+#include <renderer/texture/bc_disk_cache.h>
 #include <util/containers.h>
 #include <util/fs.h>
 
@@ -63,6 +64,8 @@ struct TextureCacheInfo {
     bool dirty = false;
     // used for texture importation
     bool is_imported = false;
+    // a 4 bpp PVRTC texture without any transparent texel: stored as BC1 instead of BC3 (pvrt_as_bc3)
+    bool pvrt_opaque = false;
     bool is_srgb = false;
     // content hash of the palette of a paletted texture
     uint64_t palette_hash = 0;
@@ -179,6 +182,21 @@ public:
     bool support_depth_linear_filtering = true;
     // powerVR only
     bool support_pvrt = false;
+    // without PVRTC support, PVRTC textures are decoded and then stored as BC3 when the GPU samples
+    // BC3: a quarter of the RGBA8 the decode gives, so far more of them fit in the texture budget
+    bool pvrt_as_bc3 = false;
+    // and the opaque ones as BC1, half of BC3 (TextureCacheInfo::pvrt_opaque)
+    bool pvrt_opaque_as_bc1 = false;
+    // since the last [TEXSTAT] line: PVRTC textures stored as BC1 and as BC3, and of those read back from
+    // the disk cache and newly written to it
+    uint64_t stat_bc1_uploads = 0, stat_bc3_uploads = 0, stat_bc_disk_hits = 0, stat_bc_disk_stores = 0;
+    // converted PVRTC mips kept on disk (texture/bc_disk_cache.h)
+    std::unique_ptr<texture::BcDiskCache> bc_disk;
+    uint64_t bc_key = 0;
+    std::vector<uint8_t> texture_data_bc;
+    // since the last [MEMBREAK] line: uploads of a texture new to the cache (miss) and of a cached
+    // one whose content hash changed, and evictions
+    uint64_t stat_miss_uploads = 0, stat_change_uploads = 0, stat_evictions = 0, stat_evicted_bytes = 0;
     // other color format
     bool support_x8d24 = false;
     bool support_e5rgb9 = false;
@@ -191,6 +209,9 @@ public:
     virtual void configure_texture(const SceGxmTexture &texture) = 0;
     virtual void upload_texture_impl(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height, uint32_t mip_index, const void *pixels, int face, uint32_t pixels_per_stride) = 0;
     virtual void upload_done() {}
+    // where the converted PVRTC mips of the running game go (BcDiskCache), empty for none
+    virtual fs::path disk_cache_dir() { return {}; }
+    bool bc_disk_tried = false;
 
     virtual void configure_sampler(size_t index, const SceGxmTexture &texture, bool no_linear) {}
 

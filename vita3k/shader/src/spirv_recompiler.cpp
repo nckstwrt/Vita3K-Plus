@@ -42,6 +42,7 @@
 #include <limits>
 #include <list>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -1135,6 +1136,22 @@ static void copy_uniform_block_to_register(spv::Builder &builder, spv::Id sa_ban
     }
 }
 
+std::vector<UniformPreload> get_uniform_preload_layout(const SceGxmProgram &program) {
+    std::vector<UniformPreload> layout;
+    uint32_t next_vec4 = 1; // after the header
+    for (const auto &buffer : get_program_input(program).uniform_buffers) {
+        if (buffer.index >= SCE_GXM_REAL_MAX_UNIFORM_BUFFER || buffer.reg_start_offset >= REG_SA_COUNT || buffer.reg_block_size == 0)
+            continue;
+        const uint32_t words = std::min<uint32_t>(buffer.reg_block_size, REG_SA_COUNT - buffer.reg_start_offset);
+        const uint8_t buffer_idx = buffer.index < SCE_GXM_MAX_UNIFORM_BUFFERS ? buffer.index + SCE_GXM_UNIFORM_BUFFER_OFFSET : SCE_GXM_DEFAULT_UNIFORM_BUFFER_CONTAINER_INDEX;
+        layout.push_back({ buffer_idx, static_cast<uint8_t>(next_vec4), static_cast<uint8_t>(buffer.reg_start_offset), static_cast<uint8_t>(words) });
+        next_vec4 += (words + 3) / 4;
+    }
+    if (next_vec4 > UNIFORM_PRELOAD_UBO_VEC4)
+        layout.clear();
+    return layout;
+}
+
 static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProgram &program, utils::SpirvUtilFunctions &utils,
     const FeatureState &features, TranslationState &translation_state, SceGxmProgramType program_type, NonDependentTextureQueryCallInfos &texture_queries) {
     SpirvShaderParameters spv_params = {};
@@ -1421,6 +1438,46 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
 
     spv_params.render_info_id = translation_state.render_info_id;
 
+    const uint8_t preload_stage_bit = program.is_vertex() ? 1 : 2;
+    const std::vector<UniformPreload> preload_layout = (features.enable_memory_mapping && translation_state.is_vulkan && (features.uniform_preload_ubo & preload_stage_bit))
+        ? get_uniform_preload_layout(program)
+        : std::vector<UniformPreload>{};
+    std::optional<spv::Builder::If> preload_from_ubo;
+    if (!preload_layout.empty()) {
+        const spv::Id f32 = b.makeFloatType(32);
+        const spv::Id v4 = b.makeVectorType(f32, 4);
+        const spv::Id arr = b.makeArrayType(v4, b.makeUintConstant(UNIFORM_PRELOAD_UBO_VEC4), 16);
+        // a stride makes a type of its own, but glslang leaves the decoration to us
+        b.addDecoration(arr, spv::DecorationArrayStride, 16);
+        const spv::Id block = b.makeStructType({ arr }, program.is_vertex() ? "VertUniformPreload" : "FragUniformPreload");
+        b.addDecoration(block, spv::DecorationBlock);
+        b.addMemberDecoration(block, 0, spv::DecorationOffset, 0);
+        b.addMemberName(block, 0, "data");
+        const spv::Id ubo = b.createVariable(spv::NoPrecision, spv::StorageClassUniform, block, program.is_vertex() ? "vertUniformPreload" : "fragUniformPreload");
+        b.addDecoration(ubo, spv::DecorationDescriptorSet, 0);
+        b.addDecoration(ubo, spv::DecorationBinding, program.is_vertex() ? 2 : 3);
+
+        const spv::Id header = b.createLoad(utils::create_access_chain(b, spv::StorageClassUniform, ubo, { b.makeIntConstant(0), b.makeIntConstant(0), b.makeIntConstant(0) }), spv::NoPrecision);
+        const spv::Id in_ubo = b.createBinOp(spv::OpFOrdNotEqual, b.makeBoolType(), header, b.makeFloatConstant(0.0f));
+        preload_from_ubo.emplace(in_ubo, spv::SelectionControlMaskNone, b);
+        for (const UniformPreload &entry : preload_layout) {
+            for (int i = 0; i < entry.words;) {
+                const int reg = entry.reg_start + i;
+                const spv::Id src_vec4 = b.makeIntConstant(entry.vec4_offset + i / 4);
+                if (reg % 4 == 0 && i % 4 == 0 && i + 4 <= entry.words) {
+                    const spv::Id value = b.createLoad(utils::create_access_chain(b, spv::StorageClassUniform, ubo, { b.makeIntConstant(0), src_vec4 }), spv::NoPrecision);
+                    b.createStore(value, utils::create_access_chain(b, spv::StorageClassPrivate, spv_params.uniforms, { b.makeIntConstant(reg / 4) }));
+                    i += 4;
+                } else {
+                    const spv::Id value = b.createLoad(utils::create_access_chain(b, spv::StorageClassUniform, ubo, { b.makeIntConstant(0), src_vec4, b.makeIntConstant(i % 4) }), spv::NoPrecision);
+                    b.createStore(value, utils::create_access_chain(b, spv::StorageClassPrivate, spv_params.uniforms, { b.makeIntConstant(reg / 4), b.makeIntConstant(reg % 4) }));
+                    i++;
+                }
+            }
+        }
+        preload_from_ubo->makeBeginElse();
+    }
+
     for (const auto &buffer : program_input.uniform_buffers) {
         // a block starting past the SA bank has no registers to fill
         if (buffer.index >= SCE_GXM_REAL_MAX_UNIFORM_BUFFER || buffer.reg_start_offset >= REG_SA_COUNT)
@@ -1443,6 +1500,8 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
             }
         }
     }
+    if (preload_from_ubo)
+        preload_from_ubo->makeEndIf();
 
     const auto add_var_to_reg = [&](const Input &input, const std::string &name, std::uint16_t semantic, bool pa, bool regformat, std::int32_t location, std::uint32_t index) {
         spv::Id param_type = get_param_type(b, input);
@@ -2007,7 +2066,8 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
     o_op.swizzle = SWIZZLE_CHANNEL_4_DEFAULT;
 
     // gl_ClipDistance carries the three eye and far plane guards first, then the planes the program declares
-    const bool emit_eye_clip = translation_state.is_vulkan && features.support_clip_distance && (vertex_outputs & SCE_GXM_VERTEX_PROGRAM_OUTPUT_POSITION);
+    const bool emit_eye_clip = translation_state.is_vulkan && features.support_clip_distance && (vertex_outputs & SCE_GXM_VERTEX_PROGRAM_OUTPUT_POSITION)
+        && !(translation_state.hints && translation_state.hints->hw_depth_cull);
     const uint32_t eye_clip_count = emit_eye_clip ? 3 : 0;
     uint32_t gxm_clip_count = 0;
     if (translation_state.is_vulkan && features.support_gxm_clip_planes) {

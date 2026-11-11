@@ -62,6 +62,9 @@ struct TextureCacheEntry {
 struct VKTextureCache : public TextureCache {
     VKState &state;
 
+    // <cache>/texture-bc/<title>/<self>, next to the pipeline recipes
+    fs::path disk_cache_dir() override;
+
     uint64_t release_all_cached_textures();
     uint64_t release_idle_textures();
 
@@ -179,6 +182,8 @@ struct TrappedBuffer {
     uint32_t size;
     // used by the index buffer to keep the max index
     uint32_t extra;
+    // used by the index buffer to keep the min index (valid when extra != ~0)
+    uint32_t extra_min = 0;
     // no need for it to be atomic
     bool dirty = false;
     uint8_t *mapped_location;
@@ -319,6 +324,15 @@ struct VKContext : public renderer::Context {
     vkutil::HostRingBuffer fragment_uniform_stream_ring_buffer;
     vkutil::HostRingBuffer vertex_info_uniform_buffer;
     vkutil::HostRingBuffer fragment_info_uniform_buffer;
+    // uniform blocks preloaded into the SA registers, read through a UBO (features.uniform_preload_ubo)
+    vkutil::HostRingBuffer vertex_preload_buffer;
+    vkutil::HostRingBuffer fragment_preload_buffer;
+    // the current draw's preload data per stage (0 vertex, 1 fragment), filled as the uniform buffers are set
+    alignas(16) float preload_staging[2][shader::UNIFORM_PRELOAD_UBO_VEC4 * 4] = {};
+    uint32_t preload_set_mask[2] = {}; // buffers set since the last draw
+    // the vkCmdSetDepthCullMALISX2 flags render_cmd has now (~0: not set in this command buffer yet)
+    uint32_t depth_cull_flags = ~0u;
+    bool preload_unavailable[2] = {}; // a block the GPU may write: the draw reads through the addresses
 
     vk::DescriptorImageInfo vertex_textures[SCE_GXM_MAX_TEXTURE_UNITS] = {};
     vk::DescriptorImageInfo fragment_textures[SCE_GXM_MAX_TEXTURE_UNITS] = {};
