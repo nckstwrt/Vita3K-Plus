@@ -53,17 +53,26 @@ static bool draw_drops_fragments_beyond_far_plane(const GxmRecordState &record) 
 // vkCmdSetDepthCullMALISX2 flags that do what the eye, near and far clip distances of a vertex program do
 // (spirv_recompiler.cpp emit_eye_clip), or 0 when the driver cannot: then the draw keeps the clip distances.
 // The near clip distance is z + w >= 0 in GXM clip space, so the near plane is at screen depth
-// z_offset - z_scale: the driver's cull below the viewport's minDepth (0) is the same test only when that
-// is 0. A draw with the viewport transform off has no near clip. The far one is the depth test case below.
-static uint32_t hw_depth_cull_flags(const VKContext &context) {
+// z_offset - z_scale (near_depth). The driver's cull below the viewport's minDepth (0) is that test when it is
+// 0; anywhere else (Sonic & All-Stars Racing Transformed: z_scale 1, z_offset 0, so -1) the driver has to take
+// the depth (vkCmdSetDepthCullBelowMALISX2), and what lies between it and 0 keeps its depth instead of being
+// clamped to 0. Without it such a draw keeps its clip distances, a fragment discard in every draw on Bifrost.
+// A draw with the viewport transform off has no near clip. The far one is the depth test case below.
+static uint32_t hw_depth_cull_flags(const VKContext &context, float &near_depth) {
     constexpr uint32_t override_bit = 1, below_bit = 2, above_bit = 4;
+    near_depth = 0.0f;
     if (!context.state.cmd_set_depth_cull_malisx2)
         return 0;
     const GxmRecordState &record = context.record;
     uint32_t flags = override_bit;
     if (!record.viewport_flat) {
-        if (!(record.z_scale > 0.0f) || std::abs(record.z_offset - record.z_scale) > 1e-6f * std::max(1.0f, record.z_scale))
+        if (!(record.z_scale > 0.0f))
             return 0;
+        if (std::abs(record.z_offset - record.z_scale) > 1e-6f * std::max(1.0f, record.z_scale)) {
+            if (!context.state.cmd_set_depth_cull_below_malisx2)
+                return 0;
+            near_depth = record.z_offset - record.z_scale;
+        }
         flags |= below_bit;
     }
     if (draw_drops_fragments_beyond_far_plane(record))
@@ -653,11 +662,16 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         // We don't want to defer cases where we draw a whole quad over the screen as these draws could be necessary
         // to be able to see anything
         bool can_be_whole_quad = instance_count == 1 && count <= 6;
-        const uint32_t depth_cull = hw_depth_cull_flags(context);
+        float near_depth = 0.0f;
+        const uint32_t depth_cull = hw_depth_cull_flags(context, near_depth);
         vk::Pipeline new_pipeline = context.state.pipeline_cache.retrieve_pipeline(context, type, !can_be_whole_quad, mem, false, depth_cull != 0);
         if (context.state.cmd_set_depth_cull_malisx2 && depth_cull != context.depth_cull_flags) {
             context.state.cmd_set_depth_cull_malisx2(static_cast<VkCommandBuffer>(context.render_cmd), depth_cull);
             context.depth_cull_flags = depth_cull;
+        }
+        if (context.state.cmd_set_depth_cull_below_malisx2 && near_depth != context.depth_cull_below) {
+            context.state.cmd_set_depth_cull_below_malisx2(static_cast<VkCommandBuffer>(context.render_cmd), near_depth != 0.0f, near_depth);
+            context.depth_cull_below = near_depth;
         }
         context.vertex_store_pipeline = vertex_stores ? context.state.pipeline_cache.retrieve_pipeline(context, type, false, mem, true) : vk::Pipeline{};
         context.pipeline_stops_lrz_write = fetch_draw_stops_lrz_write(context.state, context.record, fragment_program_gxp);

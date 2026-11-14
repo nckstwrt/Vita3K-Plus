@@ -991,6 +991,11 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
                 device.getProcAddr("vkCmdSetDepthCullMALISX2"));
         if (cmd_set_depth_cull_malisx2)
             LOG_INFO("Driver culls near and far fragments in fixed function (vkCmdSetDepthCullMALISX2)");
+        if (cmd_set_depth_cull_malisx2)
+            cmd_set_depth_cull_below_malisx2 = reinterpret_cast<PFN_CmdSetDepthCullBelowMALISX2>(
+                device.getProcAddr("vkCmdSetDepthCullBelowMALISX2"));
+        if (cmd_set_depth_cull_below_malisx2)
+            LOG_INFO("Driver takes the near cull's depth (vkCmdSetDepthCullBelowMALISX2)");
     }
 
     // Get Queues

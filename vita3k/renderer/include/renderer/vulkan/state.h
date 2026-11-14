@@ -162,6 +162,10 @@ struct VKState : public renderer::State {
     // eye/near/far clip distances, which Mali Bifrost can only apply as a fragment discard in every draw
     using PFN_CmdSetDepthCullMALISX2 = void(VKAPI_PTR *)(VkCommandBuffer commandBuffer, uint32_t flags);
     PFN_CmdSetDepthCullMALISX2 cmd_set_depth_cull_malisx2 = nullptr;
+    // malisx2: vkCmdSetDepthCullBelowMALISX2 moves that near cull from the viewport's minDepth to a depth of
+    // its own, for programs whose near plane is not at depth 0 (z_offset != z_scale)
+    using PFN_CmdSetDepthCullBelowMALISX2 = void(VKAPI_PTR *)(VkCommandBuffer commandBuffer, VkBool32 enable, float depth);
+    PFN_CmdSetDepthCullBelowMALISX2 cmd_set_depth_cull_below_malisx2 = nullptr;
     // bound guest write-backs to the render-target extent the surface was rendered with
     bool surface_sync_clamp_rt = true;
     LinuxSurfaceType linux_surface_type = LinuxSurfaceType::Unknown;

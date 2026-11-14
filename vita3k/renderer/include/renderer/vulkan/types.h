@@ -329,6 +329,8 @@ struct VKContext : public renderer::Context {
     uint32_t preload_set_mask[2] = {}; // buffers set since the last draw
     // the vkCmdSetDepthCullMALISX2 flags render_cmd has now (~0: not set in this command buffer yet)
     uint32_t depth_cull_flags = ~0u;
+    // the depth vkCmdSetDepthCullBelowMALISX2 last put the near cull at in this command buffer, 0 for minDepth
+    float depth_cull_below = 0.0f;
     bool preload_unavailable[2] = {}; // a block the GPU may write: the draw reads through the addresses
 
     vk::DescriptorImageInfo vertex_textures[SCE_GXM_MAX_TEXTURE_UNITS] = {};
