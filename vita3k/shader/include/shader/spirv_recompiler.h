@@ -43,6 +43,19 @@ static constexpr uint32_t SURFACE_CAST_SPECIALIZATION_ID = 1;
 static constexpr uint32_t DEPTH_MIRROR_FUNC_SPECIALIZATION_ID = 2;
 static constexpr uint32_t DEPTH_MIRROR_WRITE_SPECIALIZATION_ID = 3;
 
+// With memory mapping a program can read the uniform blocks it preloads into its SA registers from a per-draw UBO
+// (set 0, binding 2 vertex / 3 fragment) instead of through buffer device addresses. The first vec4 is a header:
+// x != 0 when the draw's data is in the UBO, 0 when the renderer could not supply it (the shader then reads the addresses).
+static constexpr uint32_t UNIFORM_PRELOAD_UBO_VEC4 = 32;
+struct UniformPreload {
+    uint8_t buffer_idx; // host buffer index: 0 for the default buffer, the GXM index + 1 otherwise
+    uint8_t vec4_offset; // where the block starts in the UBO
+    uint8_t reg_start; // first SA register it fills
+    uint8_t words; // words copied from the start of the block
+};
+// The program's preloaded blocks in UBO order. Empty when it preloads nothing or the blocks do not fit the UBO.
+std::vector<UniformPreload> get_uniform_preload_layout(const SceGxmProgram &program);
+
 enum struct Target {
     GLSLOpenGL,
     SpirVOpenGL,
@@ -70,6 +83,9 @@ struct Hints {
 
     bool raw_color_attachment_input = false;
     bool vertex_store_pass = false;
+    // vertex: the driver culls fragments outside the near and far planes (vkCmdSetDepthCullMALISX2),
+    // so no eye, near or far clip distance is written
+    bool hw_depth_cull = false;
 };
 
 struct GeneratedShader {

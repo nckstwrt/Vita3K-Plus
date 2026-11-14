@@ -195,6 +195,8 @@ struct ShaderProgram {
     uint32_t dynamic_uniform_buffers = 0; // blocks can read through a computed address past their declared size
     uint32_t written_uniform_buffers = 0; // blocks the program stores to
     uint16_t buffer_count; // max buffer index used by the shader + 1
+    std::vector<shader::UniformPreload> uniform_preload; // blocks read through the preload UBO, empty when it is off
+    uint32_t uniform_preload_vec4 = 0; // size of a draw's preload UBO
 
     uint16_t texture_count; // max texture index used by the shader + 1
     TextureInfo textures_used; // textures_used[i] is true if and only if the i-th texture is used by the shader

@@ -438,6 +438,9 @@ void VKContext::start_recording(bool first_in_scene) {
     };
     render_cmd.begin(begin_info);
     prerender_cmd.begin(begin_info);
+    // a command buffer starts with the driver's depth cull at the pipeline's state
+    depth_cull_flags = 0;
+    depth_cull_below = 0.0f;
 
     is_recording = true;
 

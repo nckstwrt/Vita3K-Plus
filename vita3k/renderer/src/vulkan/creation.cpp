@@ -25,6 +25,7 @@
 #include <gxm/types.h>
 #include <shader/spirv_recompiler.h>
 
+#include <util/mem_snapshot.h>
 #include <vkutil/vkutil.h>
 
 #include <future>
@@ -39,7 +40,10 @@ VKContext::VKContext(VKState &state, MemState &mem)
     , vertex_uniform_stream_ring_buffer(vk::BufferUsageFlagBits::eStorageBuffer, MiB(/*256*/ 64))
     , fragment_uniform_stream_ring_buffer(vk::BufferUsageFlagBits::eStorageBuffer, MiB(/*256*/ 64))
     , vertex_info_uniform_buffer(vk::BufferUsageFlagBits::eUniformBuffer, MiB(16))
-    , fragment_info_uniform_buffer(vk::BufferUsageFlagBits::eUniformBuffer, MiB(32)) {
+    , fragment_info_uniform_buffer(vk::BufferUsageFlagBits::eUniformBuffer, MiB(32))
+    // the uniform preload UBOs: a few hundred bytes a draw, smaller rings on low-memory devices
+    , vertex_preload_buffer(vk::BufferUsageFlagBits::eUniformBuffer, mem_diag::low_memory_device() ? MiB(1) : MiB(4))
+    , fragment_preload_buffer(vk::BufferUsageFlagBits::eUniformBuffer, mem_diag::low_memory_device() ? MiB(2) : MiB(8)) {
     memset(&prev_vert_ublock, 0, sizeof(shader::RenderVertUniformBlock));
     memset(&prev_frag_ublock, 0, sizeof(shader::RenderFragUniformBlock));
 
@@ -55,6 +59,8 @@ VKContext::VKContext(VKState &state, MemState &mem)
     fragment_uniform_stream_ring_buffer.alignment = storage_alignment;
     vertex_info_uniform_buffer.alignment = uniform_alignment;
     fragment_info_uniform_buffer.alignment = uniform_alignment;
+    vertex_preload_buffer.alignment = uniform_alignment;
+    fragment_preload_buffer.alignment = uniform_alignment;
 
     if (state.features.enable_memory_mapping) {
         // use the default buffer
@@ -74,6 +80,11 @@ VKContext::VKContext(VKState &state, MemState &mem)
 
     vertex_info_uniform_buffer.create();
     fragment_info_uniform_buffer.create();
+    const bool preload_ubo = state.features.enable_memory_mapping && state.features.uniform_preload_ubo;
+    if (preload_ubo) {
+        vertex_preload_buffer.create();
+        fragment_preload_buffer.create();
+    }
 
     // default values for the viewport and scissors
     viewport = vk::Viewport{
@@ -91,17 +102,18 @@ VKContext::VKContext(VKState &state, MemState &mem)
 
     // allocate descriptor pools
     {
-        const uint32_t nb_descriptor = state.features.enable_memory_mapping ? 2U : 4U;
+        // bindings 2 and 3 are the preload UBOs with memory mapping, the uniform SSBOs without
+        const uint32_t nb_descriptor = (state.features.enable_memory_mapping && !preload_ubo) ? 2U : 4U;
 
         std::array<vk::DescriptorPoolSize, 2> pool_sizes = {
-            vk::DescriptorPoolSize{ vk::DescriptorType::eUniformBufferDynamic, 2 },
+            vk::DescriptorPoolSize{ vk::DescriptorType::eUniformBufferDynamic, preload_ubo ? 4U : 2U },
             vk::DescriptorPoolSize{ vk::DescriptorType::eStorageBufferDynamic, 2 },
         };
 
         vk::DescriptorPoolCreateInfo descriptor_pool_info{
             // one for the global buffer descriptor, one for the empty descriptor
             .maxSets = 2,
-            .poolSizeCount = nb_descriptor / 2,
+            .poolSizeCount = state.features.enable_memory_mapping ? 1U : 2U,
             .pPoolSizes = pool_sizes.data()
         };
 
@@ -136,6 +148,10 @@ VKContext::VKContext(VKState &state, MemState &mem)
                 // TODO: get max range of buffer
                 .range = KB(500) },
         };
+        if (preload_ubo) {
+            buffers_info[2] = vk::DescriptorBufferInfo{ .buffer = vertex_preload_buffer.handle(), .range = shader::UNIFORM_PRELOAD_UBO_VEC4 * 16 };
+            buffers_info[3] = vk::DescriptorBufferInfo{ .buffer = fragment_preload_buffer.handle(), .range = shader::UNIFORM_PRELOAD_UBO_VEC4 * 16 };
+        }
 
         std::array<vk::WriteDescriptorSet, 4> write_descr;
         for (uint32_t i = 0; i < 4; i++) {
@@ -143,7 +159,7 @@ VKContext::VKContext(VKState &state, MemState &mem)
                 .dstSet = global_set,
                 .dstBinding = i,
                 .dstArrayElement = 0,
-                .descriptorType = i < 2 ? vk::DescriptorType::eUniformBufferDynamic : vk::DescriptorType::eStorageBufferDynamic
+                .descriptorType = (i < 2 || preload_ubo) ? vk::DescriptorType::eUniformBufferDynamic : vk::DescriptorType::eStorageBufferDynamic
             };
             write_descr[i].setBufferInfo(buffers_info[i]);
         }
